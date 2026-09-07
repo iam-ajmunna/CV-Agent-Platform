@@ -2,32 +2,27 @@
 
 **Audience:** Project owner, developers, AI/CV coding agents
 **Status:** Approved operating model
-**Repository:** `CodeHub1443/cv-engineering-agent`
+**Repository:** `iam-ajmunna/CV-Agent-Platform`
 
-> The project uses a three-level development flow: `main` → `dev-munna` → short-lived
-> branches. `dev-munna` is the PM integration branch; `main` is the official
-> integration/release branch. Short-lived work branches are reviewed and merged into
-> `dev-munna`; the Official PM reviews and promotes `dev-munna` to `main`.
+> The project operates on a single-trunk development flow: `main` + short-lived
+> work branches. The project owner is the Official PM who reviews and approves
+> all changes before merging into `main`. The `dev-munna` intermediate trunk is
+> permanently retired.
 
 ## 1. Executive Summary
 
-- **`main`** is the official verified integration/release baseline.
-- **`dev-munna`** is the active PM integration branch.
-- Developers and coding agents never commit directly to `main` or `dev-munna`.
-- Work is performed on short-lived branches cut from `dev-munna`.
-- Every short-lived branch requires CI and review before merge into `dev-munna`.
-- Promotion from `dev-munna` to `main` is a separate Official PM review/merge gate.
+- **`main`** is the official integration and release baseline.
+- Work is performed on short-lived branches cut directly from `main`.
+- Developers and coding agents never commit directly to `main` (except rolling-state acceptance syncs authorized by the Official PM).
+- Every short-lived branch requires CI and Official PM review and approval before merge into `main`.
+- The `dev-munna` branch is permanently retired.
 
 ## 2. Branch Roles
 
 ```text
                          main
                           ▲
-                          │ Official PM review + merge
-                          │
-                      dev-munna
-                          ▲
-                          │ PM review + CI
+                          │ Official PM review + CI
                           │
              short-lived feature/fix/docs/ci branch
 ```
@@ -35,33 +30,25 @@
 ### `main`
 
 - Official integration and release baseline.
-- No direct commits or pushes.
-- Updated only through the Official PM promotion PR from `dev-munna`.
-
-### `dev-munna`
-
-- PM integration branch for the current development stream.
-- Receives completed short-lived work after review and green CI.
-- May contain multiple completed increments before promotion to `main`.
-- No direct commits or pushes.
+- No direct unreviewed development commits.
+- Updated exclusively through short-lived branch PRs reviewed and merged by the Official PM, or authorized acceptance synchronization commits.
 
 ### Short-lived branches
 
-- Cut from `dev-munna`.
+- Cut from `main`.
 - One issue/work item per branch.
 - Prefixes: `feature/`, `fix/`, `docs/`, `ci/`, `hotfix/`.
-- Deleted after merge into `dev-munna`.
+- Deleted after merge into `main`.
 
 ## 3. Non-Negotiable Rules
 
 ```text
-1. main is never used for day-to-day development.
-2. dev-munna is never used for direct development commits.
-3. Short-lived work branches start from dev-munna.
-4. Every work branch requires CI and PM review before merge to dev-munna.
-5. Official PM approval is required to promote dev-munna to main.
-6. Never force-push main or dev-munna.
-7. Expensive/destructive CV-agent operations remain subject to docs/APPROVALS.md.
+1. main is the single trunk; no direct development commits without PR or explicit PM authorization.
+2. The dev-munna trunk is permanently retired and deleted.
+3. Short-lived work branches start from main.
+4. Every work branch requires CI and Official PM review before merge to main.
+5. Never force-push main.
+6. Expensive/destructive CV-agent operations remain subject to docs/APPROVALS.md.
 ```
 
 ## 4. Pull Request and CI/CD Requirements
@@ -104,19 +91,13 @@ Requirement
    ↓
 GitHub Issue
    ↓
-Short-lived Branch (from dev-munna)
+Short-lived Branch (from main)
    ↓
 Commit(s)
    ↓
-PR → dev-munna
+PR → main
    ↓
-CI/CD + PM Review
-   ↓
-dev-munna
-   ↓
-Promotion PR → main
-   ↓
-Official PM Review + Merge
+CI/CD + Official PM Review & Merge
    ↓
 main
 ```
@@ -129,10 +110,8 @@ main
 [ ] Documentation updated
 [ ] Local validation passes
 [ ] CI passes
-[ ] PM technical review complete
-[ ] PR merged to dev-munna
-[ ] Promotion PR reviewed by Official PM
-[ ] dev-munna merged to main
+[ ] Official PM review and approval complete
+[ ] PR merged to main
 [ ] Post-merge main CI passes
 [ ] Short-lived branch deleted
 ```

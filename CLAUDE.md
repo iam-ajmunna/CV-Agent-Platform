@@ -104,9 +104,9 @@ the system toward any of these, flag it.
 1. Read the issue and its governing ADR. No ADR + architectural change ⇒ stop.
 2. Plan first: files, interfaces, tests, and explicitly what you will **not** change.
 3. Branch `feature/<owner>/<work>` (or `fix/`, `docs/`, `ci/`, `hotfix/` — see
-   `docs/development/GITHUB_FLOW_V1.md` §4) from `dev-munna`. **Never commit directly to
-   `main` or `dev-munna`.** PRs from short-lived branches target `dev-munna`; the PM
-   reviews and merges them. The Official PM promotes `dev-munna` to `main` via a final PR.
+   `docs/development/GITHUB_FLOW_V1.md` §4) from `main`. **Never commit directly to
+   `main`.** PRs from short-lived branches target `main`; the Official PM reviews and
+   merges them after passing CI.
 4. Write the acceptance test first, from the issue's acceptance criteria. Show it
    failing.
 5. Implement the minimum that makes it pass. No speculative abstraction. No unrelated

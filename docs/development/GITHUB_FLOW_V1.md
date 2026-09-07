@@ -1,12 +1,12 @@
 # CV Engineering Agent — GitHub Development & Delivery Flow
 
 **Status:** Approved Working Process
-**Version:** V1.2
-**Repository:** `CodeHub1443/cv-engineering-agent`
+**Version:** V1.3
+**Repository:** `iam-ajmunna/CV-Agent-Platform`
 
-> Current project flow: `main` → `dev-munna` → short-lived branches. `dev-munna` is the
-> PM integration branch. Short-lived work is reviewed and CI-validated before merging
-> into `dev-munna`. The Official PM reviews and promotes `dev-munna` to `main`.
+> Current project flow: `main` + short-lived branches. The project owner is the
+> Official PM who reviews and approves all changes before merging into `main`.
+> The `dev-munna` intermediate trunk is permanently retired.
 
 ## 1. Purpose
 
@@ -15,12 +15,10 @@ merged through GitHub.
 
 The project follows:
 
-- protected `main` as official integration/release baseline;
-- `dev-munna` as the PM integration branch;
-- short-lived work branches for each issue/work item;
-- mandatory CI/CD validation;
-- PM review before merge to `dev-munna`;
-- Official PM review before promotion to `main`;
+- protected `main` as the official integration and release baseline;
+- short-lived work branches cut directly from `main` for each issue/work item;
+- mandatory automated CI/CD validation;
+- Official PM review and approval before merge into `main`;
 - small, isolated feature increments.
 
 ## 2. Branching Model
@@ -28,44 +26,35 @@ The project follows:
 ```text
                          main
                           ▲
-                          │ Official PM review + merge
-                          │
-                      dev-munna
-                          ▲
-                          │ PM review + CI
+                          │ Official PM review + CI
                           │
              short-lived work branch
 ```
 
 ### Rules
 
-1. `main` receives no direct development commits or pushes.
-2. `dev-munna` receives no direct development commits or pushes.
-3. Short-lived branches are cut from `dev-munna`.
-4. PRs from short-lived branches target `dev-munna`.
-5. CI and PM review are required before merging a work branch into `dev-munna`.
-6. The Official PM promotes `dev-munna` to `main` through a separate PR/review gate.
-7. Short-lived branches are deleted after merge.
-8. Never force-push `main` or `dev-munna`.
+1. `main` receives no direct unreviewed development commits or pushes.
+2. Short-lived branches are cut from `main`.
+3. PRs from short-lived branches target `main`.
+4. Passing CI and Official PM review/approval are required before merging a work branch into `main`.
+5. Short-lived branches are deleted after merge.
+6. Never force-push `main`.
+7. The `dev-munna` branch is permanently retired.
 
 ## 3. One Work Item at a Time
 
 ```text
 Issue
   ↓
-short-lived branch from dev-munna
+short-lived branch from main
   ↓
 implementation + tests
   ↓
-PR → dev-munna
+PR → main
   ↓
-CI + PM review
+CI + Official PM review & merge
   ↓
-dev-munna
-  ↓
-Promotion PR → main
-  ↓
-Official PM review + merge
+main
 ```
 
 Keep diffs reviewable; if a change is too large, split the issue.
@@ -116,24 +105,20 @@ failure is discovered.
 
 ## 8. Review and Merge
 
-### PM review
+### Official PM review & merge
 
-The PM reviews work-branch PRs for correctness, architecture consistency, tests,
-security, performance implications, API compatibility, and documentation.
-
-### Official PM promotion
-
-The Official PM reviews promotion PRs from `dev-munna` to `main` and performs the
-final merge into `main`.
+The Official PM reviews work-branch PRs for correctness, architecture consistency, tests,
+security, performance implications, API compatibility, and documentation, and performs the
+merge into `main`.
 
 ### Merge strategy
 
-Prefer squash merging short-lived branches so `dev-munna` retains meaningful history.
+Prefer squash merging short-lived branches so `main` retains meaningful history.
 
 ## 9. Keeping Branches Current
 
 Before opening or merging a PR, synchronize the work branch with the current
-`dev-munna` state. Never force-push `main` or `dev-munna`.
+`main` state. Never force-push `main`.
 
 ## 10. Work Completion
 
@@ -145,10 +130,8 @@ Before opening or merging a PR, synchronize the work branch with the current
 [ ] Documentation updated
 [ ] Local validation passes
 [ ] CI passes
-[ ] PM review complete
-[ ] PR merged to dev-munna
-[ ] Promotion PR reviewed by Official PM
-[ ] dev-munna merged to main
+[ ] Official PM review and approval complete
+[ ] PR merged to main
 [ ] Post-merge main CI passes
 [ ] Short-lived branch deleted
 ```
@@ -172,11 +155,11 @@ Before opening or merging a PR, synchronize the work branch with the current
 ## 12. Non-Negotiable Rules
 
 ```text
-1. No direct development commits to main or dev-munna.
-2. Short-lived work branches start from dev-munna.
-3. Every work PR requires CI and PM review.
-4. Promotion to main requires Official PM review.
-5. No force-push to main or dev-munna.
+1. No direct development commits to main without PR or PM authorization.
+2. Short-lived work branches start from main.
+3. Every work PR requires CI and Official PM review.
+4. The dev-munna trunk is permanently retired.
+5. No force-push to main.
 6. Expensive/destructive CV-agent operations remain subject to docs/APPROVALS.md.
 7. Documentation and tests are part of feature completion.
 ```
@@ -185,8 +168,7 @@ Before opening or merging a PR, synchronize the work branch with the current
 
 ```text
 Integration baseline: main
-PM integration branch: dev-munna
-Work branches: short-lived branches cut from dev-munna
-Promotion: dev-munna -> main via Official PM PR
+Work branches: short-lived branches cut from main
+Review & approval: Official PM
 Current milestone: Phase 1 — Architecture & ADR Specification
 ```

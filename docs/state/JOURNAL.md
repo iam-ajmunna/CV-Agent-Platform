@@ -246,3 +246,17 @@ isolation) and Q3 (cross-process restart survival) cleanly without external netw
 
 **Left open:** Q10 (dataset storage/versioning) remains open and blocks ADR-0009 (Dataset subsystem).
 
+---
+
+## 2026-09-07 — Governance Realignment: Single-Trunk Main & Retirement of dev-munna (D-027)
+
+**Did:** Realigned the repository development model to a single-trunk workflow (`main` + short-lived work branches) under the sole review and approval authority of the project owner as Official PM (`D-027`, reversing `D-010` via `R-003`). Updated `AGENTS.md`, `CLAUDE.md`, `docs/development/GITHUB_DEVELOPMENT_MODEL.md`, `docs/development/GITHUB_FLOW_V1.md`, `.github/workflows/ci.yml`, `docs/state/DECISIONS.md`, `docs/state/STATUS.md`, and `docs/state/AGENT_HANDOFF.md`. Updated repository target references to `iam-ajmunna/CV-Agent-Platform`. Permanently retired and scheduled deletion of the `dev-munna` integration branch.
+
+**Why:** Simplifies development flow and aligns review authority directly with the Official PM, eliminating redundant two-stage promotion gates while preserving strict branch protection, CI gates, and issue traceability on `main`.
+
+**Broke:** Nothing broken. Documentation, CI triggers, and governance state aligned.
+
+**Learned:** Single-trunk workflow combined with mandatory short-lived branch PRs and automated CI provides faster delivery velocity while maintaining full verification and review integrity.
+
+**Left open:** Q10 (dataset storage/versioning) remains open and blocks ADR-0009 (Dataset subsystem).
+

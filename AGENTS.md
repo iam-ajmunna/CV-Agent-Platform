@@ -39,11 +39,12 @@ normative statement. Never edit or summarize it. Gaps go to
 - Architect sessions produce ADR + interface stubs.
 
 ## Workflow
-The project uses `main` → `dev-munna` → short-lived branches. `dev-munna` is the PM
-integration branch. Work is performed on one short-lived `feature/<owner>/<work>` (or
-`fix/`/`docs/`/`ci/`/`hotfix/`) branch cut from `dev-munna`; review and CI are required
-before merging back to `dev-munna`. The Official PM reviews and merges promotion PRs
-from `dev-munna` to `main`. Never commit directly to `main` or `dev-munna`.
+The project uses a single trunk: `main` + short-lived work branches. The project owner
+is the Official PM who reviews and approves all changes before merging to `main`.
+Work is performed on one short-lived `feature/<owner>/<work>` (or `fix/`/`docs/`/`ci/`/`hotfix/`)
+branch cut from `main`; technical review by the Official PM and passing CI are required
+before merging to `main`. Never commit directly to `main` (except rolling-state acceptance
+syncs authorized by the Official PM). The `dev-munna` trunk is permanently retired.
 
 ## Rolling state (before every commit)
 Rewrite `STATUS.md` (≤60 lines, present tense). Append to `JOURNAL.md`, `DECISIONS.md`,
