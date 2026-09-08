@@ -61,10 +61,24 @@ predicts nothing.
 
 ## Versioning mechanism
 
-Backend to be decided — see `OPEN_QUESTIONS.md` Q10 (DVC / Git LFS / object store).
-Whatever is chosen must support: content-addressed identity, cheap version diffing,
-lineage from parent version, and retrieval of an exact historical version for
-reproduction `[P§29.5]`.
+Decided via Q10 resolution (`D-028`): **Manifest-first content-addressed dataset storage with pluggable payload backends.**
+
+- **Authority:** Git-tracked dataset manifests define all metadata, split memberships, annotation references, and payload checksums.
+- **Payload:** Raw image/video payloads are stored outside Git in a pluggable content-addressed object store (`local_fs`, `s3`, `gcs`, `minio`).
+- **Dependencies:** Neither DVC nor Git LFS is a core runtime dependency. DVC compatibility may be provided later via an optional adapter.
+
+### Required Invariants
+
+1. **Immutable version:** Every dataset increment produces a unique, immutable version.
+2. **Authoritative manifest:** Every dataset has a complete Git-tracked manifest.
+3. **Content-addressed identity:** Dataset identity and item references derive from cryptographic content hashes.
+4. **Independent annotations:** Annotation versions are decoupled from underlying media payloads.
+5. **Explicit splits:** Split memberships are explicitly recorded lists/hashes, never dynamic seeds.
+6. **Deterministic retrieval:** Any historical version is deterministically retrievable via its manifest and payload hashes `[P§29.5]`.
+7. **Approval-gated mutation:** Dataset deletion, relabeling, overwriting, and re-splitting require human approval `[P§24]`.
+8. **Audited leakage:** Leakage check results (temporal, camera, duplicate, identity, annotation round) are recorded in the manifest.
+9. **Remote retrieval:** Remote GPU/cloud targets can fetch required payloads directly via content hashes without cloning full Git history.
+10. **Git-diffable metadata:** All dataset metadata and manifests remain human-readable and Git-diffable.
 
 ## Dataset card
 

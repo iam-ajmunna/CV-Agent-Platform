@@ -62,7 +62,7 @@ mutation scope)? `docs/APPROVALS.md` has placeholders. `[P§24]`
 what are the terms-of-service constraints? The requirement is clear; the mechanism is
 not.
 
-**Q10.** Dataset storage and versioning: DVC, Git LFS, or external object store? `[P§26]`
+~~**Q10.** Dataset storage and versioning: DVC, Git LFS, or external object store? `[P§26]`~~ — **Answered 2026-09-08:** Manifest-first content-addressed dataset storage with pluggable payload backends (`local_fs`, `s3`, `gcs`, `minio`). Git-tracked manifests provide authoritative schema, identity, splits, lineage, and checksums; raw media payloads are stored externally by content hash. DVC and Git LFS are not core runtime dependencies (DVC adapter deferred). See D-028 / `docs/DATA.md` / ADR-0009.
 
 ## Deferrable
 

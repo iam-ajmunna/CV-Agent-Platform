@@ -260,3 +260,17 @@ isolation) and Q3 (cross-process restart survival) cleanly without external netw
 
 **Left open:** Q10 (dataset storage/versioning) remains open and blocks ADR-0009 (Dataset subsystem).
 
+---
+
+## 2026-09-08 — Q10 Resolution: Manifest-First Content-Addressed Dataset Storage (D-028)
+
+**Did:** Formally resolved Q10 (`docs/state/OPEN_QUESTIONS.md`) by adopting the manifest-first content-addressed dataset storage architecture with pluggable payload backends (`local_fs`, `s3`, `gcs`, `minio`). Updated `docs/DATA.md` with the authoritative manifest schema, 10 required invariants, and decoupled payload storage. Recorded decision `D-028` in `DECISIONS.md`. Updated `docs/state/STATUS.md` and `docs/state/AGENT_HANDOFF.md`. Unblocked ADR-0009 (Dataset Subsystem Architecture).
+
+**Why:** `[P§7]`, `[P§25]`, `[P§26]`, `[P§29.5]`, `[P§34]` — establishes deterministic dataset reproducibility and independent annotation versioning without imposing heavy external tool dependencies (DVC or Git LFS) on the core runtime, while enabling remote GPU compute targets to retrieve datasets without cloning Git history.
+
+**Broke:** Nothing broken. Architecture and state synchronization only; zero runtime implementation code altered.
+
+**Learned:** Storing authoritative manifests in Git while keeping raw media payloads in content-addressed external storage ensures git diffs remain fast and readable, enables remote compute workers to pull exact slices, and guarantees deterministic reproduction across experiment runs.
+
+**Left open:** ADR-0009 (Dataset Subsystem Architecture) is unblocked and scheduled next.
+
