@@ -274,3 +274,17 @@ isolation) and Q3 (cross-process restart survival) cleanly without external netw
 
 **Left open:** ADR-0009 (Dataset Subsystem Architecture) is unblocked and scheduled next.
 
+---
+
+## 2026-09-08 — ADR-0009 Acceptance Synchronization (D-029)
+
+**Did:** Formally marked ADR-0009 (`docs/architecture/adr/ADR-0009-dataset-subsystem.md`) as `Status: Accepted` on `main` following review and merge of PR #3 (`10b693f`). Recorded decision `D-029` in `DECISIONS.md`. Synchronized rolling state ledgers (`STATUS.md`, `AGENT_HANDOFF.md`, `JOURNAL.md`). Deleted and pruned task branch `docs/issue-adr-0009-dataset`. Issue #2 is closed by PR #3.
+
+**Why:** `[P§7]`, `[P§25]`, `[P§26]`, `[P§27]`, `[P§29.5]`, `[P§34]` — establishes the authoritative dataset subsystem architecture (manifest schema, content-addressed storage abstraction, independent annotation versioning, explicit split integrity, automated 5-point leakage auditing, lineage DAG, remote worker retrieval, and mutation approval gates).
+
+**Broke:** Nothing broken. Architecture and governance state synchronization only; zero runtime implementation code altered.
+
+**Learned:** Codifying the 5-point leakage audit (temporal, camera/site, duplicate, identity, annotation-round) into the dataset manifest contract guarantees that optimistic evaluation errors are trapped before training jobs consume compute resources.
+
+**Left open:** Phase 1 architecture sequence for ADR-0001 through ADR-0009 is fully accepted. ADR-0010 (Training Subsystem) is parked awaiting explicit Official PM instruction and gate authorization.
+

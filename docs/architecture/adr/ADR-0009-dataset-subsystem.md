@@ -1,6 +1,6 @@
 # ADR-0009: Dataset Subsystem Architecture
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-09-08
 - **Layer:** data / dataset engineering
 - **Canon:** `[P§7]`, `[P§25]`, `[P§26]`, `[P§27]`, `[P§29.5]`, `[P§34]`

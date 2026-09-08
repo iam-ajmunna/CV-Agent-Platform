@@ -22,7 +22,7 @@
 | ADR-0006 — Knowledge / RAG | **Accepted** |
 | ADR-0007 — Skills | **Accepted** |
 | ADR-0008 — Reasoning | **Accepted** |
-| ADR-0009 — Dataset subsystem | Unblocked (Q10 settled) |
+| ADR-0009 — Dataset subsystem | **Accepted** |
 | ADR-0010 — Training | Unblocked (Q2 settled) |
 | ADR-0011 — Evaluation | Not started |
 | ADR-0012 — Optimization / deployment | Not started |
@@ -49,12 +49,13 @@
 - **D-026:** ADR-0008 Reasoning Subsystem Architecture is accepted as the authoritative decision; cognitive engineering judgment decoupled from orchestration (ADR-0003), execution (ADR-0005), and retrieval (ADR-0006); specialized stateless provider-agnostic reasoning components (ProblemFramingNode, BaselineSelectionNode, ExperimentDiagnosisNode, StrategyFormulationNode); provider-isolated LLM Gateway consumption with zero direct provider SDK imports per [P§20]; passive grounded evidence consumption with dedicated GroundingValidator detecting evidence contradictions and unsupported speculative inferences; capability intent formulation (CapabilityId) strictly decoupled from downstream capability validation and skill mapping (ADR-0007 SkillResolver resolving against ADR-0001); standardized Pydantic v2 schemas with ConfigDict(frozen=True); mandatory DecisionPayload[T] audit envelope containing DecisionAuditRecord; approval recommendation flagging (recommends_approval = True) deferring policy evaluation to ADR-0003/APPROVALS.md; and implementation targeted for Phase 4 (DISCOVER / DEFINE workflow per ROADMAP.md).
 - **D-027:** single-trunk development flow: short-lived work branches → PR → `main`; `dev-munna` is permanently retired; the project owner is the Official PM who reviews and approves all merges into `main` (supersedes D-010 per R-003).
 - **D-028:** Q10 dataset storage architecture accepted: manifest-first content-addressed storage with pluggable backends (local_fs, s3, gcs, minio); Git-tracked manifests authoritative; raw payloads addressed by content hash externally; DVC/Git LFS not core runtime dependencies; ADR-0009 unblocked.
+- **D-029:** ADR-0009 Dataset Subsystem Architecture is accepted as the authoritative decision; manifest-first content-addressed storage with pluggable backends (local_fs, s3, gcs, minio); authoritative Git-tracked manifests in .cv_agent/datasets/ covering 16 mandatory fields from docs/DATA.md; raw media payloads addressed by SHA-256 ContentHash externally; zero core runtime dependency on DVC or Git LFS; independent AnnotationManifest versioning; explicit immutable split memberships with 5-point leakage auditing; lineage DAG; remote worker retrieval without Git cloning; and mutation approval gates per docs/APPROVALS.md.
 
 ## Blocking questions
 
-Q1–Q5, Q7–Q8, Q10 are resolved. ADR-0009 is unblocked. Downstream implementation work is gated on Phase 1 ADR acceptance.
+Q1–Q5, Q7–Q8, Q10 are resolved. ADR-0001 through ADR-0009 are accepted. Downstream implementation work is gated on Phase 1 ADR acceptance.
 
 ## Next session
 
-1. Open GitHub Issue and cut short-lived branch for ADR-0009 (Dataset Subsystem Architecture).
-2. Draft ADR-0009 specification in Status: Proposed for Official PM review.
+1. Await Official PM instruction establishing scope and requirements for ADR-0010 (Training Subsystem Architecture).
+2. Open GitHub Issue and cut short-lived branch for ADR-0010 upon authorization.
