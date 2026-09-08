@@ -22,7 +22,7 @@
 | ADR-0006 — Knowledge / RAG | **Accepted** |
 | ADR-0007 — Skills | **Accepted** |
 | ADR-0008 — Reasoning | **Accepted** |
-| ADR-0009 — Dataset subsystem | Not started |
+| ADR-0009 — Dataset subsystem | Unblocked (Q10 settled) |
 | ADR-0010 — Training | Unblocked (Q2 settled) |
 | ADR-0011 — Evaluation | Not started |
 | ADR-0012 — Optimization / deployment | Not started |
@@ -30,7 +30,7 @@
 
 ## Agreed decisions
 
-- **D-010:** three-level development flow: short-lived work branches → `dev-munna` → final PR → `main`; `dev-munna` is the PM development/integration trunk and `main` is the Official PM integration/release trunk.
+- **D-010:** three-level development flow: short-lived work branches → `dev-munna` → final PR → `main`; `dev-munna` is the PM development/integration trunk and `main` is the Official PM integration/release trunk (superseded by D-027).
 - **D-011:** ADR-0001 capability model accepted; four registry identities are semantic/type boundaries, not a requirement for independent storage backends.
 - **D-012:** ADR-0002 LLM Gateway accepted; provider isolation, configuration-driven routing, transient fallback taxonomy, fast-fail request/configuration errors, normalized responses/errors, and reproducibility metadata are the Phase 1 gateway contract.
 - **D-013:** Q1 — one CV Engineering Agent project per repository/workspace; project memory and experiment records are isolated to that project, with experiment identifiers scoped to the project.
@@ -48,12 +48,13 @@
 - **D-025:** ADR-0007 Skills Architecture & NVIDIA Capability Discovery is accepted as the authoritative decision; declarative SkillDescriptor contracts decoupled from tool execution; resolution hierarchy (CapabilityId -> SkillId -> ToolId) preserving ADR-0001 registry authority; authoritative SkillRegistry (validated/registered skills) decoupled from ephemeral runtime discovery cache; declarative NVIDIA ecosystem adapters (TensorRT, Model Optimizer PTQ/QAT, TAO, DeepStream, DALI, Triton, Jetson, CUDA Agent) per [P§15]; typed 7-state availability machine (KNOWN, DISCOVERED, CONFIGURED, AVAILABLE, EXECUTABLE, UNAVAILABLE, KNOWN_BUT_UNAVAILABLE); known-but-unavailable constraint enforcing zero silent CPU fallback on unconfigured NVIDIA targets (D-022); execution target binding aligned with ADR-0005 (LOCAL, REMOTE, MCP_ENDPOINT); approval execution requirement declaration decoupled from ADR-0003/APPROVALS.md policy authority; and proposed Phase 3 interface contracts (SkillRegistry, SkillResolver, SkillExecutor).
 - **D-026:** ADR-0008 Reasoning Subsystem Architecture is accepted as the authoritative decision; cognitive engineering judgment decoupled from orchestration (ADR-0003), execution (ADR-0005), and retrieval (ADR-0006); specialized stateless provider-agnostic reasoning components (ProblemFramingNode, BaselineSelectionNode, ExperimentDiagnosisNode, StrategyFormulationNode); provider-isolated LLM Gateway consumption with zero direct provider SDK imports per [P§20]; passive grounded evidence consumption with dedicated GroundingValidator detecting evidence contradictions and unsupported speculative inferences; capability intent formulation (CapabilityId) strictly decoupled from downstream capability validation and skill mapping (ADR-0007 SkillResolver resolving against ADR-0001); standardized Pydantic v2 schemas with ConfigDict(frozen=True); mandatory DecisionPayload[T] audit envelope containing DecisionAuditRecord; approval recommendation flagging (recommends_approval = True) deferring policy evaluation to ADR-0003/APPROVALS.md; and implementation targeted for Phase 4 (DISCOVER / DEFINE workflow per ROADMAP.md).
 - **D-027:** single-trunk development flow: short-lived work branches → PR → `main`; `dev-munna` is permanently retired; the project owner is the Official PM who reviews and approves all merges into `main` (supersedes D-010 per R-003).
+- **D-028:** Q10 dataset storage architecture accepted: manifest-first content-addressed storage with pluggable backends (local_fs, s3, gcs, minio); Git-tracked manifests authoritative; raw payloads addressed by content hash externally; DVC/Git LFS not core runtime dependencies; ADR-0009 unblocked.
 
 ## Blocking questions
 
-Q1–Q5, Q7–Q8 are resolved. Q10 (dataset storage/versioning) remains open and blocks ADR-0009. Downstream implementation work is gated on Phase 1 ADR acceptance.
+Q1–Q5, Q7–Q8, Q10 are resolved. ADR-0009 is unblocked. Downstream implementation work is gated on Phase 1 ADR acceptance.
 
 ## Next session
 
-1. Formulate and resolve Q10 (dataset storage/versioning) in `docs/state/OPEN_QUESTIONS.md`.
-2. Draft ADR-0009 (Dataset Subsystem) once Q10 is settled.
+1. Open GitHub Issue and cut short-lived branch for ADR-0009 (Dataset Subsystem Architecture).
+2. Draft ADR-0009 specification in Status: Proposed for Official PM review.
