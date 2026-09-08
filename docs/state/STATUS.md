@@ -11,10 +11,12 @@ The repository operates on a single-trunk development flow (`main` + short-lived
 branches) under the sole approval authority of the project owner as Official PM.
 `dev-munna` is permanently retired (D-027).
 
-The frozen project definition is `docs/PROJECT.md`. ADR-0001 through ADR-0009 are
-formally accepted. Decisions Q1–Q5, Q7–Q8, Q10 (D-028), and D-022 through D-029 are
-recorded. The dataset architecture is fully settled: manifest-first content-addressed
-storage with pluggable payload backends (`local_fs`, `s3`, `gcs`, `minio`).
+The frozen project definition is `docs/PROJECT.md`. ADR-0001 through ADR-0010 are
+formally accepted. Decisions Q1–Q5, Q7–Q8, Q10 (D-028), and D-022 through D-030 are
+recorded. The training architecture is settled: immutable `TrainingPlan` contract,
+pre-calculated cost estimation, approval gates (`[P§24]`), `TrainingLauncher` dispatch
+delegating to ADR-0005, telemetry streaming, checkpoint manifests, and online failure
+diagnostics.
 
 ## In flight
 
@@ -24,16 +26,16 @@ storage with pluggable payload backends (`local_fs`, `s3`, `gcs`, `minio`).
 
 ## Next 3 actions
 
-1. Await Official PM instruction establishing scope and requirements for ADR-0010.
-2. Open GitHub Issue for ADR-0010 (Training Subsystem Architecture) upon authorization.
-3. Cut short-lived branch `docs/issue-adr-0010-training` from `main` to draft ADR-0010.
+1. Await Official PM directive establishing scope for the next architectural milestone (ADR-0011 — Evaluation Subsystem Architecture).
+2. Open GitHub Issue for ADR-0011 upon authorization.
+3. Cut short-lived branch `docs/issue-adr-0011-evaluation` from `main` to draft ADR-0011.
 
 ## Blockers
 
 - Downstream implementation work is gated on Phase 1 architecture ADR acceptance.
-- ADR-0010 drafting requires explicit Official PM authorization.
+- ADR-0011 drafting requires explicit Official PM authorization.
 
 ## Do not start yet
 
-ADR-0010 specification, stage workflows, training execution, or runtime code.
+ADR-0011 specification, runtime evaluation, training execution, or stage runtime code.
 These depend on explicit PM gate authorization.

@@ -288,3 +288,17 @@ isolation) and Q3 (cross-process restart survival) cleanly without external netw
 
 **Left open:** Phase 1 architecture sequence for ADR-0001 through ADR-0009 is fully accepted. ADR-0010 (Training Subsystem) is parked awaiting explicit Official PM instruction and gate authorization.
 
+---
+
+## 2026-09-08 — ADR-0010 Acceptance Synchronization (D-030)
+
+**Did:** Formally marked ADR-0010 (`docs/architecture/adr/ADR-0010-training-subsystem.md`) as `Status: Accepted` on `main` following review and merge of PR #5 (`61f9421`). Recorded decision `D-030` in `DECISIONS.md`. Synchronized rolling state ledgers (`STATUS.md`, `AGENT_HANDOFF.md`, `JOURNAL.md`). Pruned task branch `docs/issue-adr-0010-training`. Issue #4 is closed by PR #5.
+
+**Why:** `[P§10]`, `[P§11]`, `[P§13]`, `[P§15]`, `[P§21]`, `[P§22]`, `[P§24]`, `[P§25]`, `[P§29.2]`, `[P§29.4]`, `[P§29.8]`, `[P§34]` — establishes the authoritative training subsystem architecture (immutable `TrainingPlan`, reasoning vs training proposal/materialization boundary, `TrainingLauncher` dispatch delegation to ADR-0005, mandatory cost estimation and human approval preconditions per `docs/APPROVALS.md` and `[P§24]`, 11-state lifecycle state machine, real-time telemetry streaming, checkpoint manifests and retention, online failure diagnostics, and `TrainingEnvironmentRecord` reproducibility metadata per `[P§25]`).
+
+**Broke:** Nothing broken. Architecture and governance state synchronization only; zero runtime implementation code altered.
+
+**Learned:** Decoupling training job semantics from physical transport via `TrainingLauncher` → ADR-0005 maintains strict layer isolation while ensuring remote compute execution remains fully hardware-aware and cost-gated.
+
+**Left open:** Phase 1 architecture sequence for ADR-0001 through ADR-0010 is fully accepted. ADR-0011 (Evaluation Subsystem) is parked awaiting explicit Official PM instruction and gate authorization.
+
