@@ -302,3 +302,17 @@ isolation) and Q3 (cross-process restart survival) cleanly without external netw
 
 **Left open:** Phase 1 architecture sequence for ADR-0001 through ADR-0010 is fully accepted. ADR-0011 (Evaluation Subsystem) is parked awaiting explicit Official PM instruction and gate authorization.
 
+---
+
+## 2026-09-09 — ADR-0011 Acceptance Synchronization (D-031)
+
+**Did:** Formally marked ADR-0011 (`docs/architecture/adr/ADR-0011-evaluation-subsystem.md`) as `Status: Accepted` on `main` following review and merge of PR #7 (`ee1e61a`). Recorded decision `D-031` in `DECISIONS.md`. Synchronized rolling state ledgers (`STATUS.md`, `AGENT_HANDOFF.md`, `JOURNAL.md`). Deleted and pruned task branch `docs/issue-adr-0011-evaluation`. Issue #6 is closed by PR #7.
+
+**Why:** `[P§7]`, `[P§12]`, `[P§13]`, `[P§21]`, `[P§22]`, `[P§24]`, `[P§25]`, `[P§27]`, `[P§29.2]`, `[P§29.3]`, `[P§29.4]`, `[P§29.10]`, `[P§34]` — establishes the authoritative evaluation subsystem architecture (co-equal measurement of model quality and systems performance, immutable dataset split and model checkpoint bindings, mandatory baseline comparison prohibiting unsubstantiated claims, extensible versioned metrics, hardware-aware benchmarking on target accelerators, structured diagnostic error analysis, dispatch delegation to ADR-0005, immutable result handoff to ADR-0004 `experiments.sqlite`, and 12 codified architectural invariants).
+
+**Broke:** Nothing broken. Architecture and governance state synchronization only; zero runtime implementation code altered.
+
+**Learned:** Treating systems performance (latency, throughput, VRAM) as a co-equal evaluation dimension alongside model quality (mAP, F1) prevents edge-deployability blindness, while mandatory baseline comparisons architecturally eliminate unsupported claims of model improvement.
+
+**Left open:** Phase 1 architecture sequence for ADR-0001 through ADR-0011 is fully accepted. ADR-0012 (Optimization & Deployment Subsystem) is parked awaiting explicit Official PM instruction and gate authorization.
+

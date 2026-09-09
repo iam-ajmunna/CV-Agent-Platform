@@ -1,6 +1,6 @@
 # ADR-0011: Evaluation Subsystem Architecture
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-09-09
 - **Layer:** evaluation / empirical measurement
 - **Canon:** `[P§7]`, `[P§12]`, `[P§13]`, `[P§21]`, `[P§22]`, `[P§24]`, `[P§25]`, `[P§27]`, `[P§29.2]`, `[P§29.3]`, `[P§29.4]`, `[P§29.10]`, `[P§34]`
