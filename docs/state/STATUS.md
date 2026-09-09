@@ -11,8 +11,8 @@ The repository operates on a single-trunk development flow (`main` + short-lived
 branches) under the sole approval authority of the project owner as Official PM.
 `dev-munna` is permanently retired (D-027).
 
-ADR-0001 (D-035), ADR-0002 (D-036), ADR-0003 (#19), ADR-0004 (D-037), ADR-0005 (D-038), ADR-0006 (D-039), ADR-0007 (D-040), ADR-0008 (D-041), and ADR-0009 (D-042) are frozen.
-ADR-0010 through ADR-0013 remain accepted and will be reviewed sequentially.
+ADR-0001 (D-035), ADR-0002 (D-036), ADR-0003 (#19), ADR-0004 (D-037), ADR-0005 (D-038), ADR-0006 (D-039), ADR-0007 (D-040), ADR-0008 (D-041), ADR-0009 (D-042), and ADR-0010 (D-043) are frozen.
+ADR-0011 through ADR-0013 remain accepted and will be reviewed sequentially.
 
 The Phase 1 architectural freeze protocol is in active progress. Phase 2 runtime
 implementation remains paused until all 13 ADRs are frozen.
@@ -21,12 +21,12 @@ implementation remains paused until all 13 ADRs are frozen.
 
 | Item | Issue | State |
 |---|---|---|
-| ADR freeze | #24 | ADR-0001 through ADR-0009 frozen; ADR-0010 under active freeze review |
+| ADR freeze | #24 | ADR-0001 through ADR-0010 frozen; ADR-0011 under active freeze review |
 
 ## Next 3 actions
 
-1. Review and freeze ADR-0010 (Training Subsystem Architecture) resolving all validated findings.
-2. Proceed sequentially to ADR-0011 through ADR-0013 under the freeze protocol.
+1. Review and freeze ADR-0011 (Evaluation Subsystem Architecture) resolving all validated findings.
+2. Proceed sequentially to ADR-0012 and ADR-0013 under the freeze protocol.
 3. Perform final system-level dependency audit before closing Phase 1.
 
 ## Blockers

@@ -498,3 +498,22 @@ isolation) and Q3 (cross-process restart survival) cleanly without external netw
 **Learned:** Codifying a dedicated calibration split directly in dataset split membership prevents downstream optimization pipelines (ADR-0012) from inadvertently sampling frames from evaluation test splits for INT8 PTQ histograms.
 
 **Left open:** Proceeding to ADR-0010 freeze review.
+
+---
+
+## 2026-09-10 — ADR-0010 Freeze Synchronization (D-043, PR #28)
+
+**Did:** Hardened and froze ADR-0010 (`docs/architecture/adr/ADR-0010-training-subsystem.md`) on `main` following review and squash-merge of PR #28. Recorded decision `D-043` in `DECISIONS.md`. Updated `STATUS.md` and `AGENT_HANDOFF.md`. Changes made:
+1. Updated amendment status to `Accepted — Frozen`.
+2. Documented canonical identifier syntax rules in §4 for `PlanId`, `TrainingJobId`, `CheckpointId`, and `ApprovalId` conforming to `[a-z0-9_.-]+(/[a-z0-9_.-]+)*` per ADR-0001 §3.1.
+3. Hardened `losses` in `TrainingPlan` and `devices_info` in `TrainingEnvironmentRecord` to immutable `tuple` types.
+4. Bound `TrainingJobRecord` directly to ADR-0005 execution tokens via `execution_id: ExecutionId | None` and `target_id: TargetId | None`, and updated `TrainingLauncher.launch` with optional `target_id`.
+5. Added Section 7 (`Implementation Acceptance Criteria`) covering plan immutability, cost estimation preconditions, approval gating, transport delegation, execution token traceability, telemetry normalization, online diagnostics, checkpoint lineage, and reproducibility packaging.
+
+**Why:** `[P§10]`, `[P§11]`, `[P§13]`, `[P§15]`, `[P§21]`, `[P§22]`, `[P§24]`, `[P§25]`, `[P§29.2]`, `[P§29.4]`, `[P§29.8]`, `[P§34]` — establishes typed training plans, mandatory cost estimation guardrails, persistent human approval boundaries, real-time telemetry streaming, and deterministic checkpoint lineage.
+
+**Broke:** Nothing broken. 99 pytest tests pass, ruff clean, mypy clean.
+
+**Learned:** Explicitly recording ADR-0005 `execution_id` and `target_id` inside `TrainingJobRecord` maintains direct causal auditability from high-level training lifecycle states to low-level physical container and process handles.
+
+**Left open:** Proceeding to ADR-0011 freeze review.
