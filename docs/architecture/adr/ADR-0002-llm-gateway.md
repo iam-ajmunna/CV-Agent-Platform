@@ -1,8 +1,10 @@
 # ADR-0002: LLM Gateway and Provider Abstraction
 
 - **Status:** Accepted
+- **Amendment Status:** Frozen
 - **Date:** 2026-09-01
 - **Amended:** 2026-09-09
+- **Last Reviewed:** 2026-09-10
 - **Layer:** cross-cutting
 - **Canon:** `[P§20]`, `[P§29.3]`, `[P§29.5]`, `[P§34]`
 - **Supersedes / Superseded by:** —
@@ -144,7 +146,7 @@ Fallback means moving to another eligible provider/model after a failed attempt.
 @dataclass(frozen=True)
 class FallbackPolicy:
     enabled: bool
-    allowed_failure_categories: frozenset[str]
+    allowed_failure_categories: frozenset["FailureCategory"]
     max_provider_switches: int
 ```
 
@@ -213,12 +215,19 @@ class ImageBlock:
     data_ref: str | None = None
     sha256: str | None = None
 
+    def __post_init__(self) -> None:
+        if self.uri is None and self.data_ref is None:
+            raise ValueError("ImageBlock requires at least one of 'uri' or 'data_ref'")
+
+
+ToolContentBlock = TextBlock | ImageBlock
+
 
 @dataclass(frozen=True)
 class ToolResultBlock:
     type: Literal["tool_result"]
     tool_call_id: str
-    content: tuple["ContentBlock", ...]
+    content: tuple[ToolContentBlock, ...]
 
 
 ContentBlock = TextBlock | ImageBlock | ToolResultBlock
@@ -230,7 +239,7 @@ class Message:
     content: tuple[ContentBlock, ...]
 ```
 
-Binary image/video payloads MUST NOT be owned or persisted by the LLM gateway. `uri`, `data_ref`, and `sha256` are references to externally managed content. Dataset-managed assets MUST preserve their ADR-0009 content identity when passed into the gateway.
+Binary image/video payloads MUST NOT be owned or persisted by the LLM gateway. `uri`, `data_ref`, and `sha256` are references to externally managed content. At least one of `uri` or `data_ref` MUST be specified. A `ToolResultBlock` MUST NOT nest another `ToolResultBlock`; tool execution output is represented strictly by `ToolContentBlock` (`TextBlock` | `ImageBlock`). Dataset-managed assets MUST preserve their ADR-0009 content identity when passed into the gateway.
 
 The canonical contract MAY be extended with additional provider-neutral modalities in future amendments, but provider-specific content representations MUST remain adapter-local.
 
@@ -250,7 +259,7 @@ class LLMRequest:
 
 `request_id` identifies the logical request. `idempotency_key` identifies the logical operation for safe retry semantics. `trace_id` correlates the request with the surrounding workflow.
 
-Request metadata MUST NOT contain provider credentials or secrets.
+Request metadata MUST NOT contain provider credentials or secrets. To enforce Invariant 14 at construction time, implementations MUST reject metadata keys containing sensitive substrings (e.g. case-insensitive matches for `key`, `token`, `secret`, `password`, `credential`, `auth`).
 
 ## 8. Structured Output Contract
 
@@ -363,7 +372,7 @@ class LLMStreamingGateway(Protocol):
     def stream(self, request: LLMRequest) -> Iterator[LLMStreamEvent]: ...
 ```
 
-Streaming is optional for a given provider/model, but if requested through `LLMRequirements.streaming`, the selected model MUST advertise streaming capability.
+Streaming is optional for a given provider/model, but if requested through `LLMRequirements.streaming`, the selected model MUST advertise streaming capability. A `UsageEvent` MUST be emitted before `StreamDoneEvent` whenever token usage is reported by the provider stream, ensuring consumers process usage accounting before the stream terminates.
 
 ## 11. Error Semantics
 
@@ -421,10 +430,13 @@ No retry/fallback policy may override a `policy_denied` classification.
 Cost must be represented independently of transient provider pricing.
 
 ```python
+from decimal import Decimal
+
+
 @dataclass(frozen=True)
 class CostRecord:
     currency: str
-    amount: float
+    amount: Decimal
     pricing_source: str
     pricing_version: str
 ```
@@ -521,7 +533,7 @@ class LLMStreamingGateway(Protocol):
     def stream(self, request: LLMRequest) -> Iterator[LLMStreamEvent]: ...
 ```
 
-The gateway implementation is responsible for request validation, compatibility filtering, routing, retry/fallback policy application, correlation metadata, and normalization.
+The gateway implementation is responsible for request validation, compatibility filtering, routing, retry/fallback policy application, correlation metadata, and normalization. The gateway handles model resolution and profile binding before calling the provider adapter (`LLMProvider.complete(request, model)` / `LLMProvider.stream(request, model)`), insulating upstream callers from provider-specific profile mappings.
 
 ## 17. Alternatives Considered
 
