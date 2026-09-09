@@ -1,6 +1,6 @@
 # ADR-0010: Training Subsystem Architecture
 
-- **Status:** Accepted
+- **Status:** Accepted — Frozen
 - **Date:** 2026-09-08
 - **Layer:** training / execution orchestration
 - **Canon:** `[P§10]`, `[P§11]`, `[P§13]`, `[P§15]`, `[P§21]`, `[P§22]`, `[P§24]`, `[P§25]`, `[P§29.2]`, `[P§29.4]`, `[P§29.8]`, `[P§34]`
@@ -319,7 +319,10 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from cv_agent.capabilities import CapabilityId, ToolId
 from cv_agent.dataset.types import ContentHash, DatasetId, DatasetVersion
+from cv_agent.tools.types import ExecutionId, TargetId
 
+# Identifier syntax rules:
+# - PlanId, TrainingJobId, CheckpointId, ApprovalId: conform to `[a-z0-9_.-]+(/[a-z0-9_.-]+)*` per ADR-0001 §3.1.
 PlanId = NewType("PlanId", str)
 TrainingJobId = NewType("TrainingJobId", str)
 CheckpointId = NewType("CheckpointId", str)
@@ -448,7 +451,7 @@ class TrainingPlan(BaseModel):
     pretrained_weights_ref: str | None = None
     optimizer: OptimizerConfig
     scheduler: SchedulerConfig
-    losses: Sequence[LossComponentConfig]
+    losses: tuple[LossComponentConfig, ...]
     augmentation: AugmentationConfig
 
     # Execution hyperparameters
@@ -513,7 +516,7 @@ class TrainingEnvironmentRecord(BaseModel):
     torch_version: str
     cuda_version: str | None
     driver_version: str | None
-    devices_info: Sequence[Mapping[str, Any]]
+    devices_info: tuple[Mapping[str, Any], ...]
 
 
 class TrainingJobRecord(BaseModel):
@@ -530,6 +533,8 @@ class TrainingJobRecord(BaseModel):
     completed_at: datetime | None = None
     best_checkpoint: CheckpointManifest | None = None
     environment: TrainingEnvironmentRecord | None = None
+    execution_id: ExecutionId | None = None
+    target_id: TargetId | None = None
 
 
 @runtime_checkable
@@ -562,6 +567,7 @@ class TrainingLauncher(Protocol):
         self,
         plan: TrainingPlan,
         tool_id: ToolId,
+        target_id: TargetId | None = None,
     ) -> TrainingJobRecord: ...
 
     def abort(self, job_id: TrainingJobId) -> bool: ...
@@ -595,3 +601,15 @@ class TrainingLauncher(Protocol):
 - ADR-0007: Skills Architecture & NVIDIA Discovery (`D-025`)
 - ADR-0008: Reasoning Subsystem (`D-026`)
 - ADR-0009: Dataset Subsystem (`D-029`)
+
+## 7. Implementation Acceptance Criteria
+
+1. **Plan Validation & Immutability:** A `TrainingPlan` enforces frozen validation (`frozen=True`, `extra='forbid'`), validates positive learning rates and class counts, and binds authoritatively to `DatasetId`, `DatasetVersion`, and `dataset_manifest_hash` per ADR-0009.
+2. **Cost Estimation Precondition:** Every non-mock training job requires a pre-calculated `CostEstimate` detailing GPU-hours, wall-clock time, monetary cost, and artifact storage before state transition to `AWAITING_APPROVAL`.
+3. **Approval Gate Enforcement:** Job dispatch transitions from `AWAITING_APPROVAL` to `LAUNCHING` strictly upon receipt of a valid `ApprovalId` routed through Orchestration (ADR-0003) per `docs/APPROVALS.md`. Any dispatch without approval raises an authorization defect.
+4. **Transport Delegation:** `TrainingLauncher` formats execution arguments and environment variables, delegating physical execution strictly through ADR-0005 (`ToolId`, `ExecutionTarget`, `ActiveJobHandoff`) without managing raw SSH connections or local subprocess sockets.
+5. **Traceability to Execution Tokens:** `TrainingJobRecord` preserves explicit linkages to ADR-0005 execution tokens via `execution_id: ExecutionId | None` and `target_id: TargetId | None`.
+6. **Real-time Telemetry Normalization:** Point-in-time progress events are captured as immutable `TrainingTelemetryRecord` objects streaming step loss, loss components, throughput, learning rate, and VRAM utilization without blocking the orchestrator event loop.
+7. **Online Failure Diagnostics:** Automated `TrainingMonitor` triggers immediate job abort on detecting NaN/Inf values, loss explosion, or unrecoverable CUDA OOM, recording structured `failure_reason` and `failure_details` in `TrainingJobRecord`.
+8. **Deterministic Checkpoint Lineage:** Checkpoint manifests record `checkpoint_id`, `weights_hash` (SHA-256), training step, epoch, and metric snapshot, enforcing disk retention policies (`keep_best`, `keep_last`, `keep_final`).
+9. **Reproducibility Metadata Packaging:** Completed runs package an immutable `TrainingEnvironmentRecord` (`seed_*`, git commit SHA, dependency versions, device topology) and hand off to ADR-0004 `experiments.sqlite` and ADR-0011 Evaluation.
