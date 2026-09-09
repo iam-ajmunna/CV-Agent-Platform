@@ -219,6 +219,22 @@ Per `[P§25]`, every evaluation outcome compiles an immutable `EvaluationEnviron
 - **Future Optimization / Deployment Subsystem (ADR-0012):** ADR-0012 will own the transformation of models (TensorRT INT8 quantization, pruning, engine export). ADR-0011 will be invoked by ADR-0012 to evaluate the resulting compiled engine against the original unquantized baseline to verify that quantization did not cause unacceptable accuracy degradation.
 - **Future Monitoring Subsystem (ADR-0013):** ADR-0013 will monitor streaming production camera data for data drift and operational health. ADR-0011 provides the offline gold-standard benchmark against which production behavior is verified.
 
+### 3.12. Required Architectural Invariants
+
+The Evaluation Subsystem strictly enforces twelve non-negotiable architectural invariants:
+1. **Immutable Dataset Versioning (`[P§26]`, ADR-0009):** Evaluation references an authoritative, immutable `DatasetManifest` version and content hash. Evaluating implicit "current" or unversioned data directories is strictly prohibited.
+2. **Immutable Model Artifacts (`[P§25]`, ADR-0010):** Evaluation binds to a specific model checkpoint identified by `CheckpointId` and SHA-256 `ContentHash`. Evaluating transient in-memory weights is barred.
+3. **Mandatory Baseline Reference (`[P§29.2]`, `[P§29.3]`):** Every evaluation plan declares a baseline reference. Claims such as "model improved" without quantitative empirical comparison are architecturally barred.
+4. **Versioned Metric Definitions:** Metric definitions are declarative, versioned, and parameter-explicit (`MetricDefinition`), avoiding monolithic conditional evaluation scripts.
+5. **Separation of Quality and Systems Metrics (`[P§12]`):** Model quality metrics (`MetricResult`) and systems performance metrics (`BenchmarkResult`) remain distinct, co-equal measurement dimensions.
+6. **Hardware Execution Identification (`[P§13]`, `[P§29.4]`, `D-014`, `D-022`):** All systems benchmarks explicitly record their physical hardware target, device name, and execution environment.
+7. **Complete Reproducibility (`[P§25]`):** Every evaluation result bundles an immutable `EvaluationEnvironmentRecord` (git commit SHA, dataset manifest hash, weights hash, metric versions, random seeds, runtime/CUDA environment).
+8. **Structured Error Analysis (`[P§27]`):** Error analysis (`ErrorAnalysisRecord`) must be quantitative, structured, and evidence-based (confusion matrices, false positive/negative hashes, slice breakdowns), not subjective narrative.
+9. **No Physical Transport Ownership:** Evaluation defines evaluation semantics; physical process transport is delegated entirely to ADR-0005 (`LOCAL`, `REMOTE`, `MCP_ENDPOINT`).
+10. **No Experiment Persistence Ownership:** Evaluation produces immutable evaluation records; authoritative database persistence is owned exclusively by ADR-0004 (`experiments.sqlite`).
+11. **Anti-LLM Narrative Invariant (`[P§29.3]`):** Subjective LLM judgment or conversational narrative cannot substitute for deterministic quantitative metrics.
+12. **Decoupled Reasoning Consumption:** Evaluation results are structured for ingestion by Reasoning (ADR-0008 `ExperimentDiagnosisNode`) without coupling evaluation execution to reasoning prompts or cognitive graphs.
+
 ## 4. Proposed Interface Contracts (Phase 2 Implementation Target)
 
 *(Note: These interfaces represent the proposed type contracts for Phase 2 implementation. They do not exist in the repository today).*
@@ -248,6 +264,24 @@ class TaskType(str, Enum):
     SEGMENTATION = "segmentation"
     TRACKING = "tracking"
     REPRESENTATION = "representation"
+
+
+class EvaluationTargetType(str, Enum):
+    LOCAL = "local"
+    REMOTE = "remote"
+    MCP_ENDPOINT = "mcp_endpoint"
+
+
+class EvaluationTarget(BaseModel):
+    """Target compute environment for evaluation execution per ADR-0005."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    target_id: str
+    target_type: EvaluationTargetType
+    device_name: str | None = None
+    cuda_compute_capability: str | None = None
+    description: str = ""
 
 
 class EvaluationStatus(str, Enum):
@@ -407,10 +441,28 @@ class EvaluationPlan(BaseModel):
 
     dataset_binding: EvaluationDatasetBinding
     model_artifact: ModelArtifactReference
+    task_type: TaskType
     metrics: Sequence[MetricDefinition]
     benchmark_config: BenchmarkConfiguration | None = None
     baseline_experiment_id: str | None = None
     compute_target_id: str = "default_evaluator"
+    evaluation_requirements: Mapping[str, Any] = Field(default_factory=dict)
+    reproducibility_requirements: Mapping[str, Any] = Field(default_factory=dict)
+
+
+class EvaluationExecution(BaseModel):
+    """Active execution handle and status record for an in-flight evaluation job."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    evaluation_id: EvaluationId
+    plan: EvaluationPlan
+    status: EvaluationStatus
+    started_at: datetime
+    target: EvaluationTarget
+    active_job_ref: Mapping[str, Any] | None = (
+        None  # Aligned with ADR-0005 ActiveJobHandoff
+    )
 
 
 class EvaluationResult(BaseModel):
