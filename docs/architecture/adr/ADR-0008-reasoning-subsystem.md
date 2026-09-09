@@ -1,7 +1,9 @@
 # ADR-0008: Reasoning Subsystem Architecture
 
 - **Status:** Accepted
+- **Amendment Status:** Frozen
 - **Date:** 2026-09-03
+- **Last Reviewed:** 2026-09-10
 - **Layer:** reasoning / orchestration
 - **Canon:** `[P§4]`, `[P§5]`, `[P§6]`, `[P§19]`, `[P§20]`, `[P§23]`, `[P§24]`, `[P§29.1]`, `[P§29.2]`, `[P§29.3]`, `[P§29.4]`, `[P§34]`
 - **Supersedes / Superseded by:** —
@@ -95,7 +97,7 @@ Reasoning is divided into specialized, decoupled node types matching the enginee
    - *Function:* Formulates reference baseline specification (architecture, weights, resolution, evaluation protocol).
    - *Output:* Typed `BaselineSpec`. Capability intent for executing or evaluating the baseline is emitted as a distinct decision where appropriate.
 3. **Experiment Diagnosis Node (`[P§4]`, `[P§29.3]`):**
-   - *Input:* Current experiment metrics (`RunRecord` from ADR-0004), baseline metrics, target constraints.
+   - *Input:* Current experiment metrics (`RunRecord` from ADR-0004, terminal evaluation outcomes with `EvaluationResult.status == COMPLETED` per ADR-0011), baseline metrics, target constraints. Partial or in-flight runs cannot be diagnosed.
    - *Function:* Compares outcome against hypothesis; classifies empirical behavior (e.g. `OVERFITTING`, `LATENCY_BOTTLENECK`, `SATURATION`, `METRIC_IMPROVED`).
    - *Output:* Typed `DiagnosticRecord`.
 4. **Strategy Formulation Node (`[P§5]`, `[P§29.4]`):**
@@ -123,6 +125,9 @@ Reasoning is divided into specialized, decoupled node types matching the enginee
 4. **The Approval Recommendation Invariant (`[P§24]`, `docs/APPROVALS.md`):**
    - When a reasoning node assesses that a proposed strategy involves high risk, destruction, or high expense (e.g. lengthy remote training, destructive data mutation, unverified edge deployment), it sets `recommends_approval = True` and provides an `approval_recommendation_reason`.
    - Reasoning does NOT evaluate or enforce approval policy. Authoritative gate evaluation, approval ticket verification, and interrupt lifecycles remain strictly owned by Orchestration (`ADR-0003`) and `docs/APPROVALS.md`.
+5. **Reasoning Depth and Cycle Prevention Invariant:**
+   - Reasoning components execute within orchestration workflows as bounded cognitive evaluations. A reasoning workflow MUST NOT exceed a configurable maximum cognitive iteration limit (default: 10 reasoning hops per task cycle).
+   - If a sequence of diagnosis and hypothesis steps does not converge within the iteration budget, orchestration halts the loop and emits an escalation for human review, preventing unbounded LLM token consumption and recursive reasoning cycles.
 
 ### 3.4. Structured Output, Schema Recovery, and Mandatory Auditability
 
@@ -147,7 +152,16 @@ Reasoning components reject free-form conversational prose. The Reasoning subsys
 # module: cv_agent.reasoning.types (Proposed — Phase 4 per docs/roadmap/ROADMAP.md)
 
 from enum import Enum
-from typing import Any, Generic, NewType, Protocol, TypeVar, runtime_checkable
+from typing import (
+    Any,
+    Generic,
+    Mapping,
+    NewType,
+    Protocol,
+    TypeVar,
+    Union,
+    runtime_checkable,
+)
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -156,6 +170,9 @@ from cv_agent.llm.gateway import LLMGateway
 
 HypothesisId = NewType("HypothesisId", str)
 T = TypeVar("T")
+
+# Identifier syntax rule: HypothesisId and decision IDs MUST be non-empty ASCII strings
+# conforming to [a-z0-9_.-]+(/[a-z0-9_.-]+)* per ADR-0001 §3.1.
 
 
 class DiagnosticClassification(str, Enum):
@@ -191,9 +208,9 @@ class DatasetSummary(BaseModel):
 
     total_samples: int
     classes: tuple[str, ...]
-    split_proportions: dict[str, float]
+    split_proportions: Mapping[str, float]
     annotation_type: str
-    metadata: dict[str, Any] = Field(default_factory=dict)
+    metadata: Mapping[str, Any] = Field(default_factory=dict)
 
 
 class ProblemCharacterization(BaseModel):
@@ -257,12 +274,20 @@ class StrategyDecision(BaseModel):
     hypothesis_id: HypothesisId
     hypothesis_statement: str
     next_capability: CapabilityId  # Capability intent; validated downstream
-    parameter_intent: dict[str, Any]
+    parameter_intent: Mapping[str, Any]
     recommends_approval: bool = False
     approval_recommendation_reason: str | None = None
     evidence_citations: tuple[str, ...] = ()
     rationale: str = ""
     audit_record: DecisionAuditRecord
+
+
+ReasoningOutputPayload = Union[
+    ProblemCharacterization,
+    BaselineSpec,
+    DiagnosticRecord,
+    StrategyDecision,
+]
 
 
 class DecisionPayload(BaseModel, Generic[T]):
@@ -290,7 +315,7 @@ class ExperimentSummaryRef(BaseModel):
 class ReasoningContext(BaseModel):
     """Aggregated context passed to a reasoning node.
 
-    Residual dictionaries represent explicit boundary adapters to upstream
+    Residual mappings represent explicit boundary adapters to upstream
     contracts (e.g. ADR-0003 workflow StateSnapshot).
     """
 
@@ -301,7 +326,7 @@ class ReasoningContext(BaseModel):
     active_baseline: BaselineSpec | None
     recent_experiments: tuple[ExperimentSummaryRef, ...] = ()
     quarantined_evidence: tuple[str, ...] = ()  # Injected <knowledge_citation>
-    upstream_state_adapter: dict[str, Any] = Field(
+    upstream_state_adapter: Mapping[str, Any] = Field(
         default_factory=dict
     )  # Boundary adapter to ADR-0003 StateSnapshot
 
@@ -386,6 +411,7 @@ The Reasoning subsystem defines structured exception and uncertainty types:
 8. **Approval Preconditions Recommended, Not Enforced:** Reasoning nodes recommend approval (`recommends_approval = True`) and provide rationale; authoritative policy evaluation and gate enforcement remain owned by ADR-0003 and `docs/APPROVALS.md` `[P§24]`.
 9. **Mandatory Auditability:** All decisions preserve comprehensive audit records (`decision_id`, `node_name`, `model_id`, `context_ref`, citation URIs, schema version, and timestamp).
 10. **Zero Runtime Implementation in Phase 1:** Specification defines interface contracts and architectural boundaries without introducing speculative runtime implementation code.
+11. **Cognitive Boundedness & Cycle Prevention:** Reasoning workflows enforce a configurable maximum cognitive iteration budget (default 10 hops) and operate exclusively on terminal evaluation outcomes (`status == COMPLETED`).
 
 ## 9. References
 
