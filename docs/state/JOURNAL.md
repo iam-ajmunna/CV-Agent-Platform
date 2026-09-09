@@ -382,6 +382,22 @@ isolation) and Q3 (cross-process restart survival) cleanly without external netw
 
 **Broke:** Nothing broken. 99 pytest tests pass, ruff clean, mypy clean.
 
-**Learned:** Explicit validation on multimodal image references and eliminating recursive type definitions on tool results prevents malformed requests and recursion traps before provider adapters are invoked.
+**Left open:** Phase 1 architecture sequence (ADR-0001 through ADR-0013) is fully accepted and complete. Phase 2 (Runtime Substrate & Core Type Implementation) is parked awaiting explicit Official PM instruction and milestone sequencing.
 
-**Left open:** Proceeding to ADR-0004 freeze review (ADR-0003 already frozen in #19).
+---
+
+## 2026-09-10 — ADR-0004 Freeze Synchronization (D-037, PR #22)
+
+**Did:** Hardened and froze ADR-0004 (`docs/architecture/adr/ADR-0004-project-memory-and-ledger.md`) on `main` following review and squash-merge of PR #22. Recorded decision `D-037` in `DECISIONS.md`. Updated `STATUS.md` and `AGENT_HANDOFF.md`. Changes made:
+1. Defined explicit YAML schema for `hardware_constraints.yaml` in §2.3 mapping directly to `HardwareConstraints`.
+2. Strengthened immutable typing in §5 interfaces using `Mapping` and `tuple` across dataclasses and query return types (`additional_metrics: Mapping[str, float]`, `checksums: Mapping[str, str]`, `hyperparameters: Mapping[str, Any]`, `list_experiments -> tuple[ExperimentRecord, ...]`).
+3. Reconciled resolved dependencies in §8 (Q5 resolved via D-022, Q10 resolved via D-028 / ADR-0009 manifest binding).
+4. Marked status as `Accepted — Frozen`.
+
+**Why:** `[P§10]`, `[P§12]`, `[P§24]`, `[P§25]`, `[P§26]`, `[P§29.2]`, `[P§29.4]`, `[P§29.5]`, `[P§33]`, `[P§34]` — guarantees reproducible experiment lineage, immutability of terminal results, and structured domain memory contracts before runtime implementation.
+
+**Broke:** Nothing broken. 99 pytest tests pass, ruff clean, mypy clean.
+
+**Learned:** Explicit YAML schema definitions for qualitative project memory prevent drift when agents distill hardware budgets and operational limits from project conversations into Git-tracked state.
+
+**Left open:** Proceeding to ADR-0005 freeze review.

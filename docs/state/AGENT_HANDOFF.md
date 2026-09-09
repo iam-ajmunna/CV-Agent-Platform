@@ -17,8 +17,8 @@
 | ADR-0001 — Capability model | **Accepted — Frozen** |
 | ADR-0002 — LLM Gateway | **Accepted — Frozen** |
 | ADR-0003 — Orchestration state | **Accepted — Frozen** |
-| ADR-0004 — Project memory / experiment ledger | **Accepted — In Freeze Review** |
-| ADR-0005 — Tools / MCP | **Accepted** |
+| ADR-0004 — Project memory / experiment ledger | **Accepted — Frozen** |
+| ADR-0005 — Tools / MCP | **Accepted — In Freeze Review** |
 | ADR-0006 — Knowledge / RAG | **Accepted** |
 | ADR-0007 — Skills | **Accepted** |
 | ADR-0008 — Reasoning | **Accepted** |
@@ -57,6 +57,7 @@
 - **D-034:** ADR-0002 amendment is accepted as authoritative; canonical multimodal content; capability-aware ModelProfile/LLMRequirements; separate routing/retry/fallback; idempotency-safe timeout semantics; normalized failure taxonomy; versioned structured outputs; canonical tool-call representation with ADR-0005 isolation; typed streaming lifecycle; correlation identifiers; versioned cost provenance; data-governance eligibility; reproducibility metadata without false determinism claims; secret isolation; extensible provider adapters; 16 invariants and 15 implementation acceptance criteria.
 - **D-035:** ADR-0001 Capability Model is frozen; canonical namespaced identifier syntax in §3.1 (`[a-z0-9_.-]+(/[a-z0-9_.-]+)*`), typed `AvailabilityState` Literal orthogonal to workflow authorization in §3.5/§3.7, pairwise `ResolvedToolRef` in `ResolutionSnapshot` §3.10, canonical `Stage` enum per `[P§6]` in §5, and snapshot round-trip acceptance criterion in §7.
 - **D-036:** ADR-0002 LLM Gateway is frozen; typed `frozenset[FailureCategory]` in `FallbackPolicy` §4.3, `ImageBlock` `__post_init__` validation in §6, recursion-free `ToolContentBlock` in `ToolResultBlock.content` §6, request metadata sensitive key rejection in §7, streaming `UsageEvent` before `StreamDoneEvent` ordering in §10, `Decimal` monetary amount in `CostRecord` §12, and explicit model-resolution gateway responsibility in §16.
+- **D-037:** ADR-0004 Project Memory and Experiment Ledger Persistence is frozen; explicit YAML schema for `hardware_constraints.yaml` in §2.3 mapping to `HardwareConstraints`, immutable `Mapping` and `tuple` collection typing in memory and experiment interfaces in §5, and reconciliation of resolved dependencies (Q5 via D-022, Q10 via D-028/ADR-0009 binding to `DatasetManifest`) in §8.
 
 ## Blocking questions
 
