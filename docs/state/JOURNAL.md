@@ -362,4 +362,26 @@ isolation) and Q3 (cross-process restart survival) cleanly without external netw
 
 **Learned:** Explicitly decoupling `AvailabilityState` (operational readiness of tool/target binding) from `authorized` (workflow/human policy evaluation) prevents the capability resolver from ever usurping authorization authority.
 
-**Left open:** Proceeding to ADR-0002 freeze review.
+**Left open:** Phase 1 architecture sequence (ADR-0001 through ADR-0013) is fully accepted and complete. Phase 2 (Runtime Substrate & Core Type Implementation) is parked awaiting explicit Official PM instruction and milestone sequencing.
+
+---
+
+## 2026-09-10 — ADR-0002 Freeze Synchronization (D-036, PR #21)
+
+**Did:** Hardened and froze ADR-0002 (`docs/architecture/adr/ADR-0002-llm-gateway.md`) on `main` following review and squash-merge of PR #21. Recorded decision `D-036` in `DECISIONS.md`. Updated `STATUS.md` and `AGENT_HANDOFF.md`. Changes made:
+1. Typed `allowed_failure_categories` in `FallbackPolicy` as `frozenset[FailureCategory]` in §4.3.
+2. Added `__post_init__` validation on `ImageBlock` requiring at least one of `uri` or `data_ref` in §6.
+3. Defined `ToolContentBlock = TextBlock | ImageBlock` for `ToolResultBlock.content` in §6, eliminating forward-reference recursion.
+4. Specified sensitive key rejection pattern in request metadata in §7 to enforce Invariant 14 at construction time.
+5. Codified streaming lifecycle ordering invariant in §10 requiring `UsageEvent` before `StreamDoneEvent`.
+6. Updated `CostRecord.amount` to `Decimal` in §12.
+7. Clarified gateway model resolution and profile binding before calling provider adapters in §16.
+8. Marked status as `Accepted — Frozen`.
+
+**Why:** `[P§20]`, `[P§29.3]`, `[P§29.5]`, `[P§34]` — ensures robust provider isolation, type safety, and error containment in the foundational gateway contract.
+
+**Broke:** Nothing broken. 99 pytest tests pass, ruff clean, mypy clean.
+
+**Learned:** Explicit validation on multimodal image references and eliminating recursive type definitions on tool results prevents malformed requests and recursion traps before provider adapters are invoked.
+
+**Left open:** Proceeding to ADR-0004 freeze review (ADR-0003 already frozen in #19).
