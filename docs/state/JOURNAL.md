@@ -329,3 +329,17 @@ isolation) and Q3 (cross-process restart survival) cleanly without external netw
 **Learned:** Coupling quantization calibration to frozen ADR-0009 dataset manifests and requiring mandatory post-optimization evaluation (accuracy retention and latency speedup) via ADR-0011 guarantees that optimized deployment candidates are verifiably correct and never degrade task performance silently.
 
 **Left open:** Phase 1 architecture sequence for ADR-0001 through ADR-0012 is fully accepted. ADR-0013 (Monitoring & Active Learning Subsystem) is parked awaiting explicit Official PM instruction and gate authorization.
+
+---
+
+## 2026-09-09 — ADR-0013 Acceptance Synchronization (D-033)
+
+**Did:** Formally marked ADR-0013 (`docs/architecture/adr/ADR-0013-monitoring-active-learning-subsystem.md`) as `Status: Accepted` on `main` following review and squash-merge of PR #11 (`a723f94`). Recorded decision `D-033` in `DECISIONS.md`. Synchronized rolling state ledgers (`STATUS.md`, `AGENT_HANDOFF.md`, `JOURNAL.md`). Deleted and pruned task branch `docs/issue-adr-0013-monitoring-active-learning`. Issue #10 is closed by PR #11.
+
+**Why:** `[P§8]`, `[P§9]`, `[P§16]`, `[P§21]`, `[P§22]`, `[P§24]`, `[P§25]`, `[P§26]`, `[P§27]`, `[P§28]`, `[P§29.6]`, `[P§29.7]`, `[P§34]` — establishes the authoritative monitoring and active learning subsystem architecture (tri-dimensional operational telemetry streaming across Model, System, and Data dimensions per `[P§28]`; baseline drift detection against immutable ADR-0011 baselines via KS, PSI, Wasserstein, and Chi-Square tests; algorithmic active learning candidate selection across uncertainty, feature diversity, and anomaly heuristics; cryptographic frame provenance; zero autonomous retraining invariant; advisory retraining trigger proposals to ADR-0008 Reasoning requiring mandatory human approval per `docs/APPROVALS.md`; and candidate batch handoffs to ADR-0009 Dataset manifests).
+
+**Broke:** Nothing broken. Architecture and governance state synchronization only; zero runtime implementation code altered.
+
+**Learned:** Enforcing the observe $\rightarrow$ detect $\rightarrow$ sample $\rightarrow$ propose separation guarantees that active learning feeds high-value edge data into the data flywheel without ever creating an unconstrained, unsupervised retraining loop that could cause catastrophic forgetting or unbounded compute burn.
+
+**Left open:** Phase 1 architecture sequence (ADR-0001 through ADR-0013) is fully accepted and complete. Phase 2 (Runtime Substrate & Core Type Implementation) is parked awaiting explicit Official PM instruction and milestone sequencing.

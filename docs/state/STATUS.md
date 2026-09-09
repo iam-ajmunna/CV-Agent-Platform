@@ -11,14 +11,16 @@ The repository operates on a single-trunk development flow (`main` + short-lived
 branches) under the sole approval authority of the project owner as Official PM.
 `dev-munna` is permanently retired (D-027).
 
-The frozen project definition is `docs/PROJECT.md`. ADR-0001 through ADR-0012 are
-formally accepted. Decisions Q1–Q5, Q7–Q8, Q10 (D-028), and D-022 through D-032 are
-recorded. The optimization and deployment architecture is settled: model optimization
-pipelines (`OptimizationPlan`), dynamic shape profiles, calibration dataset bindings
-to ADR-0009 manifests, cryptographic artifact lineage, mandatory post-optimization
-verification via ADR-0011, runtime-agnostic deployment architecture (`DeploymentRuntime`:
-Standalone TensorRT, DeepStream, Triton, ONNX Runtime), hardware-locked target profiles
-(`DeploymentTarget`), production human approval gates, and health probing with rollback.
+The frozen project definition is `docs/PROJECT.md`. ADR-0001 through ADR-0013 are
+formally accepted. Decisions Q1–Q5, Q7–Q8, Q10 (D-028), and D-022 through D-033 are
+recorded. The monitoring and active learning architecture is settled: tri-dimensional
+telemetry streaming (Model, System, Data per `[P§28]`), baseline drift detection
+against ADR-0011 benchmarks (KS, PSI, Wasserstein, Chi-Square), algorithmic active
+learning candidate selection, cryptographic frame provenance, zero autonomous retraining
+prohibiting unsupervised feedback loops, advisory retraining trigger proposals to
+ADR-0008 Reasoning, and candidate batch handoffs to ADR-0009 Dataset manifests.
+
+The complete Phase 1 architectural contract chain (ADR-0001 → ADR-0013) is accepted.
 
 ## In flight
 
@@ -28,16 +30,15 @@ Standalone TensorRT, DeepStream, Triton, ONNX Runtime), hardware-locked target p
 
 ## Next 3 actions
 
-1. Await Official PM directive establishing scope for the next architectural milestone (ADR-0013 — Monitoring & Active Learning Subsystem Architecture).
-2. Open GitHub Issue for ADR-0013 upon authorization.
-3. Cut short-lived branch `docs/issue-adr-0013-monitoring` from `main` to draft ADR-0013.
+1. Await Official PM directive concluding Phase 1 architecture and establishing Phase 2 implementation sequencing.
+2. Formulate Phase 2 implementation plan for runtime contracts and substrate.
+3. Open first implementation issue upon PM gate authorization.
 
 ## Blockers
 
-- Downstream implementation work is gated on Phase 1 architecture ADR acceptance.
-- ADR-0013 drafting requires explicit Official PM authorization.
+- Runtime implementation is gated on explicit Official PM authorization to begin Phase 2.
 
 ## Do not start yet
 
-ADR-0013 specification, runtime optimization, deployment execution, or stage runtime code.
+Runtime implementation in `cv_agent/`, external compute execution, or substrate coding.
 These depend on explicit PM gate authorization.

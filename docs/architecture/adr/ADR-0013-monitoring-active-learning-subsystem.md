@@ -1,6 +1,6 @@
 # ADR-0013: Monitoring and Active Learning Subsystem Architecture
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-09-09
 - **Layer:** monitoring / active_learning
 - **Canon:** `[P§8]`, `[P§9]`, `[P§16]`, `[P§21]`, `[P§22]`, `[P§24]`, `[P§25]`, `[P§26]`, `[P§27]`, `[P§28]`, `[P§29.6]`, `[P§29.7]`, `[P§34]`

@@ -8,7 +8,7 @@
 - **Phase:** 1 — Architecture & ADR Specification
 - **Integration baseline:** `main`
 - **Work pattern:** `main` ← short-lived work branches
-- **Current architecture gate:** ADR-0001 through ADR-0012 accepted.
+- **Current architecture gate:** ADR-0001 through ADR-0013 accepted. Complete Phase 1 architecture chain established.
 
 ## ADR status
 
@@ -26,7 +26,7 @@
 | ADR-0010 — Training | **Accepted** |
 | ADR-0011 — Evaluation | **Accepted** |
 | ADR-0012 — Optimization / deployment | **Accepted** |
-| ADR-0013 — Monitoring | Not started |
+| ADR-0013 — Monitoring & Active Learning | **Accepted** |
 
 ## Agreed decisions
 
@@ -53,12 +53,13 @@
 - **D-030:** ADR-0010 Training Subsystem Architecture is accepted as the authoritative decision: immutable TrainingPlan contract; cognitive reasoning strategy proposal (ADR-0008) vs training materialization/lifecycle boundary; TrainingLauncher dispatch contract delegating transport execution to ADR-0005 (LOCAL, REMOTE, MCP_ENDPOINT); mandatory structured cost estimation and human approval preconditions per docs/APPROVALS.md and [P§24]; explicit 11-state training job lifecycle state machine; real-time TrainingTelemetryRecord streaming; CheckpointManifest with content hashes, storage binding, and retention policies; online failure diagnostics (NaN/Inf, loss divergence, early stopping, CUDA OOM recovery); TrainingEnvironmentRecord reproducibility metadata per [P§25]; and clean decoupling from future Evaluation Subsystem (ADR-0011).
 - **D-031:** ADR-0011 Evaluation Subsystem Architecture is accepted as the authoritative decision: co-equal measurement of model quality metrics (MetricResult) and hardware systems performance (BenchmarkResult); immutable bindings to ADR-0009 dataset splits and ADR-0010 model checkpoints; mandatory baseline comparison (BaselineComparisonResult) prohibiting unsubstantiated claims per [P§29.2], [P§29.3]; extensible versioned MetricDefinition and stateless MetricCalculator contracts; hardware-aware benchmarking with warmup/repetitions on target accelerators per [P§13], [P§29.4]; structured diagnostic ErrorAnalysisRecord per [P§27]; EvaluationRunner dispatch delegating physical transport to ADR-0005 (LOCAL, REMOTE, MCP_ENDPOINT); immutable result handoff to ADR-0004 experiment ledger (experiments.sqlite); complete EvaluationEnvironmentRecord per [P§25]; profiling approval checks per docs/APPROVALS.md; and 12 codified architectural invariants.
 - **D-032:** ADR-0012 Optimization and Deployment Subsystem Architecture is accepted as the authoritative decision: model optimization pipeline (OptimizationPlan) covering ONNX export, TensorRT compilation, and precision quantization (FP32/FP16/BF16/FP8/INT8 PTQ/QAT) with dynamic shape profiles; immutable calibration bindings (CalibrationDatasetBinding) to ADR-0009 manifests; cryptographic transformation lineage DAG (OptimizedModelArtifact); mandatory post-optimization verification via ADR-0011 against unoptimized baselines (accuracy_retention_ratio, speedup_ratio); runtime-agnostic deployment architecture (DeploymentRuntime: Standalone TensorRT, DeepStream, Triton, ONNX Runtime); hardware-locked target profiles (DeploymentTarget) per [P§13], [P§29.4], D-014, D-022; production deployment human approval gates per docs/APPROVALS.md and [P§24]; automated health/readiness probing (HealthCheckSpec) with zero-downtime rollback; and 12 codified architectural invariants.
+- **D-033:** ADR-0013 Monitoring and Active Learning Subsystem Architecture is accepted as the authoritative decision: tri-dimensional operational telemetry ingestion (ModelTelemetryRecord, SystemTelemetryRecord, DataTelemetryRecord) per [P§28]; baseline drift and anomaly detection (DriftAnalysisRecord, DriftMetricResult) against immutable ADR-0011 baselines (BaselineReferenceBinding) via statistical hypothesis/distance tests (KS-test, PSI, Wasserstein, Chi-Square, Entropy Divergence) per [P§28], [P§29.6]; algorithmic active learning candidate frame curation (CandidateSample, ActiveLearningCandidateBatch) across uncertainty/entropy sampling, feature-space core-set diversity clustering, and out-of-distribution/environmental anomaly heuristics per [P§26], [P§29.7]; cryptographic frame provenance and lineage; zero autonomous retraining invariant prohibiting unsupervised retraining loops per [P§24], [P§31]; structured retraining trigger proposals (RetrainingTriggerProposal) with advisory handoff to ADR-0008 Reasoning and mandatory human approval per docs/APPROVALS.md; candidate batch handoff to ADR-0009 for content-addressed staging and annotation versioning; and 12 codified architectural invariants.
 
 ## Blocking questions
 
-Q1–Q5, Q7–Q8, Q10 are resolved. ADR-0001 through ADR-0012 are accepted. Downstream implementation work is gated on Phase 1 ADR acceptance.
+Q1–Q5, Q7–Q8, Q10 are resolved. ADR-0001 through ADR-0013 are accepted. Downstream Phase 2 implementation work is gated on explicit Official PM authorization.
 
 ## Next session
 
-1. Await Official PM instruction establishing scope and requirements for ADR-0013 (Monitoring & Active Learning Subsystem Architecture).
-2. Open GitHub Issue and cut short-lived branch for ADR-0013 upon authorization.
+1. Await Official PM directive concluding Phase 1 architecture and authorizing Phase 2 substrate/runtime implementation sequencing.
+2. Establish Phase 2 roadmap, package structure, and foundational test harness.
