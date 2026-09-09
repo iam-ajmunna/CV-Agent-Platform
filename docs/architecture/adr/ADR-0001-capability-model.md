@@ -1,11 +1,13 @@
 # ADR-0001: Capability / Skill / Tool / Agent as four distinct registries
 
 - **Status:** Accepted
+- **Amendment Status:** Frozen
 - **Date:** 2026-08-30
 - **Amended:** 2026-09-09
+- **Last Reviewed:** 2026-09-10
 - **Layer:** cross-cutting
-- **Canon:** `[P§23]`, `[P§15]`, `[P§22]`, `[P§34]`, `[P§32]`
-- **Issue:** #12
+- **Canon:** `[P§6]`, `[P§15]`, `[P§22]`, `[P§23]`, `[P§32]`, `[P§34]`
+- **Issue:** #14
 - **Amendment:** D-034
 
 ## 1. Context
@@ -71,7 +73,7 @@ ToolId       = NewType("ToolId", str)
 AgentId      = NewType("AgentId", str)
 ```
 
-Identity MUST NOT encode implementation version. Versions are separate typed metadata and are resolved through compatibility constraints.
+Each identifier MUST be a non-empty, case-sensitive ASCII string conforming to `[a-z0-9_.-]+(/[a-z0-9_.-]+)*` (namespaced lowercase alphanumeric tokens separated by hyphens, underscores, dots, or hierarchy slashes). Identifiers provide semantic namespace separation and MUST remain independent of implementation/specification version. Versions are separate typed metadata and are resolved through compatibility constraints.
 
 An **Agent** is an execution-capable actor identified by `AgentId`. It is not synonymous with a Tool, Skill, process, runtime, or `ExecutionTarget`. An `ExecutionTarget` describes where execution occurs; ADR-0005 owns its transport and physical execution semantics.
 
@@ -141,7 +143,19 @@ DECLARED
   ≠ AUTHORIZED
 ```
 
-At minimum, resolution MUST be able to represent:
+Operational readiness of the execution chain is modeled by `AvailabilityState`:
+
+```python
+AvailabilityState = Literal[
+    "KNOWN",
+    "DISCOVERED",
+    "CONFIGURED",
+    "AVAILABLE",
+    "EXECUTABLE",
+    "UNAVAILABLE",
+    "KNOWN_BUT_UNAVAILABLE",
+]
+```
 
 - `KNOWN` — authoritative declaration exists;
 - `DISCOVERED` — runtime candidate exists but is not authoritative;
@@ -151,7 +165,7 @@ At minimum, resolution MUST be able to represent:
 - `UNAVAILABLE` — known binding currently cannot execute;
 - `KNOWN_BUT_UNAVAILABLE` — capability/skill is known but no compatible target is currently available.
 
-ADR-0007 owns the detailed Skill lifecycle and discovery mechanics. ADR-0001 consumes those states for capability resolution and MUST NOT duplicate discovery logic.
+`AvailabilityState` measures operational readiness only. It is strictly orthogonal to workflow authorization (`authorized: bool`), which is governed by ADR-0003 and `docs/APPROVALS.md`. Resolution can establish that an execution chain is `EXECUTABLE` without granting authorization to execute. ADR-0007 owns the detailed Skill lifecycle and discovery mechanics. ADR-0001 consumes those states for capability resolution and MUST NOT duplicate discovery logic.
 
 ### 3.6 Deterministic resolution
 
@@ -228,9 +242,13 @@ A runtime-discovered entity becomes authoritative only through the applicable re
 
 ### 3.10 Resolution snapshot and reproducibility
 
-Every execution-relevant resolution MUST be reproducible through an immutable `ResolutionSnapshot` containing, conceptually:
+Every execution-relevant resolution MUST be reproducible through an immutable `ResolutionSnapshot`. Tool bindings are represented as pairwise references to guarantee synchronous version tracking:
 
 ```python
+class ResolvedToolRef(NamedTuple):
+    tool_id: ToolId
+    tool_version: str
+
 class ResolutionSnapshot(Protocol):
     snapshot_id: str
     registry_version: str
@@ -239,16 +257,15 @@ class ResolutionSnapshot(Protocol):
     capability_version: str
     skill_id: SkillId | None
     skill_version: str | None
-    tool_ids: tuple[ToolId, ...]
-    tool_versions: tuple[str, ...]
+    tools: tuple[ResolvedToolRef, ...]
     agent_id: AgentId | None
     target_reference: str | None
     compatibility_result: str
-    availability_state: str
+    availability_state: AvailabilityState
     created_at: str
 ```
 
-The snapshot is a historical resolution fact, not mutable live registry state. ADR-0004 may persist it as part of experiment/workflow lineage.
+The snapshot is a historical resolution fact, not mutable live registry state. It is serializable to a structured dictionary or JSON and may be persisted by ADR-0004 as part of experiment/workflow lineage.
 
 ### 3.11 External vendor invariant
 
@@ -290,6 +307,22 @@ An alternative capability may be proposed only through the appropriate reasoning
 The canonical public surface is conceptual and implementation-neutral:
 
 ```python
+Stage = Literal[
+    "DISCOVER",
+    "DEFINE",
+    "RESEARCH",
+    "DESIGN",
+    "DATA",
+    "BASELINE",
+    "TRAIN",
+    "EVALUATE",
+    "DIAGNOSE",
+    "OPTIMIZE",
+    "BENCHMARK",
+    "DEPLOY",
+    "MONITOR",
+]
+
 class Capability(Protocol):
     id: CapabilityId
     version: str
@@ -301,9 +334,9 @@ class Capability(Protocol):
 class Resolution(NamedTuple):
     capability: Capability
     skill: Skill | None
-    tools: tuple[ToolId, ...]
+    tools: tuple[ResolvedToolRef, ...]
     agent: AgentId | None
-    availability: str
+    availability: AvailabilityState
     compatible: bool
     authorized: bool
     unavailable_reason: str | None
@@ -352,6 +385,7 @@ The implementation of this ADR MUST eventually prove at least:
 - resolution records preserve rejected candidates/reasons;
 - a capability marked as requiring approval cannot be authorized by the capability registry itself;
 - resolution can be serialized into an immutable snapshot sufficient to reproduce the selected binding;
+- a serialized `ResolutionSnapshot` can be stored, retrieved, and deserialized into an identical structure that reproduces the exact resolved binding under the identical resolver policy version;
 - `CapabilityId`, `SkillId`, `ToolId`, and `AgentId` remain statically distinct under type checking;
 - a known NVIDIA capability with no compatible target resolves as known-but-unavailable and does not silently fall back to an unrelated implementation.
 
