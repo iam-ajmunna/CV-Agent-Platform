@@ -1,6 +1,6 @@
 # ADR-0012: Optimization and Deployment Subsystem Architecture
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-09-09
 - **Layer:** optimization / deployment
 - **Canon:** `[P§8]`, `[P§9]`, `[P§13]`, `[P§14]`, `[P§15]`, `[P§21]`, `[P§22]`, `[P§24]`, `[P§25]`, `[P§28]`, `[P§29.4]`, `[P§34]`

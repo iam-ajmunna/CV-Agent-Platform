@@ -316,3 +316,16 @@ isolation) and Q3 (cross-process restart survival) cleanly without external netw
 
 **Left open:** Phase 1 architecture sequence for ADR-0001 through ADR-0011 is fully accepted. ADR-0012 (Optimization & Deployment Subsystem) is parked awaiting explicit Official PM instruction and gate authorization.
 
+---
+
+## 2026-09-09 — ADR-0012 Acceptance Synchronization (D-032)
+
+**Did:** Formally marked ADR-0012 (`docs/architecture/adr/ADR-0012-optimization-deployment-subsystem.md`) as `Status: Accepted` on `main` following review and squash-merge of PR #9 (`02db943`). Recorded decision `D-032` in `DECISIONS.md`. Synchronized rolling state ledgers (`STATUS.md`, `AGENT_HANDOFF.md`, `JOURNAL.md`). Deleted and pruned task branch `docs/issue-adr-0012-optimization-deployment`. Issue #8 is closed by PR #9.
+
+**Why:** `[P§8]`, `[P§9]`, `[P§13]`, `[P§14]`, `[P§15]`, `[P§21]`, `[P§22]`, `[P§24]`, `[P§25]`, `[P§28]`, `[P§29.4]`, `[P§34]` — establishes the authoritative optimization and deployment subsystem architecture (immutable `OptimizationPlan` pipeline covering ONNX export, TensorRT compilation, dynamic shape profiles, and quantization PTQ/QAT; immutable calibration dataset bindings to ADR-0009 manifests; cryptographic transformation lineage DAG; mandatory post-optimization verification via ADR-0011 against unoptimized baselines; runtime-agnostic deployment architecture across Standalone TensorRT, DeepStream, Triton, and ONNX Runtime; hardware-locked target profiles per `[P§13]`, `[P§29.4]`, `D-014`, `D-022`; production deployment human approval gates per `docs/APPROVALS.md` and `[P§24]`; automated health probing with zero-downtime rollback; and 12 codified architectural invariants).
+
+**Broke:** Nothing broken. Architecture and governance state synchronization only; zero runtime implementation code altered.
+
+**Learned:** Coupling quantization calibration to frozen ADR-0009 dataset manifests and requiring mandatory post-optimization evaluation (accuracy retention and latency speedup) via ADR-0011 guarantees that optimized deployment candidates are verifiably correct and never degrade task performance silently.
+
+**Left open:** Phase 1 architecture sequence for ADR-0001 through ADR-0012 is fully accepted. ADR-0013 (Monitoring & Active Learning Subsystem) is parked awaiting explicit Official PM instruction and gate authorization.

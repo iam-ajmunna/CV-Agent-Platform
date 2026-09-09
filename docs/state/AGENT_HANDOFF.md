@@ -8,7 +8,7 @@
 - **Phase:** 1 — Architecture & ADR Specification
 - **Integration baseline:** `main`
 - **Work pattern:** `main` ← short-lived work branches
-- **Current architecture gate:** ADR-0001 through ADR-0008 accepted.
+- **Current architecture gate:** ADR-0001 through ADR-0012 accepted.
 
 ## ADR status
 
@@ -25,7 +25,7 @@
 | ADR-0009 — Dataset subsystem | **Accepted** |
 | ADR-0010 — Training | **Accepted** |
 | ADR-0011 — Evaluation | **Accepted** |
-| ADR-0012 — Optimization / deployment | Not started |
+| ADR-0012 — Optimization / deployment | **Accepted** |
 | ADR-0013 — Monitoring | Not started |
 
 ## Agreed decisions
@@ -52,12 +52,13 @@
 - **D-029:** ADR-0009 Dataset Subsystem Architecture is accepted as the authoritative decision; manifest-first content-addressed storage with pluggable backends (local_fs, s3, gcs, minio); authoritative Git-tracked manifests in .cv_agent/datasets/ covering 16 mandatory fields from docs/DATA.md; raw media payloads addressed by SHA-256 ContentHash externally; zero core runtime dependency on DVC or Git LFS; independent AnnotationManifest versioning; explicit immutable split memberships with 5-point leakage auditing; lineage DAG; remote worker retrieval without Git cloning; and mutation approval gates per docs/APPROVALS.md.
 - **D-030:** ADR-0010 Training Subsystem Architecture is accepted as the authoritative decision: immutable TrainingPlan contract; cognitive reasoning strategy proposal (ADR-0008) vs training materialization/lifecycle boundary; TrainingLauncher dispatch contract delegating transport execution to ADR-0005 (LOCAL, REMOTE, MCP_ENDPOINT); mandatory structured cost estimation and human approval preconditions per docs/APPROVALS.md and [P§24]; explicit 11-state training job lifecycle state machine; real-time TrainingTelemetryRecord streaming; CheckpointManifest with content hashes, storage binding, and retention policies; online failure diagnostics (NaN/Inf, loss divergence, early stopping, CUDA OOM recovery); TrainingEnvironmentRecord reproducibility metadata per [P§25]; and clean decoupling from future Evaluation Subsystem (ADR-0011).
 - **D-031:** ADR-0011 Evaluation Subsystem Architecture is accepted as the authoritative decision: co-equal measurement of model quality metrics (MetricResult) and hardware systems performance (BenchmarkResult); immutable bindings to ADR-0009 dataset splits and ADR-0010 model checkpoints; mandatory baseline comparison (BaselineComparisonResult) prohibiting unsubstantiated claims per [P§29.2], [P§29.3]; extensible versioned MetricDefinition and stateless MetricCalculator contracts; hardware-aware benchmarking with warmup/repetitions on target accelerators per [P§13], [P§29.4]; structured diagnostic ErrorAnalysisRecord per [P§27]; EvaluationRunner dispatch delegating physical transport to ADR-0005 (LOCAL, REMOTE, MCP_ENDPOINT); immutable result handoff to ADR-0004 experiment ledger (experiments.sqlite); complete EvaluationEnvironmentRecord per [P§25]; profiling approval checks per docs/APPROVALS.md; and 12 codified architectural invariants.
+- **D-032:** ADR-0012 Optimization and Deployment Subsystem Architecture is accepted as the authoritative decision: model optimization pipeline (OptimizationPlan) covering ONNX export, TensorRT compilation, and precision quantization (FP32/FP16/BF16/FP8/INT8 PTQ/QAT) with dynamic shape profiles; immutable calibration bindings (CalibrationDatasetBinding) to ADR-0009 manifests; cryptographic transformation lineage DAG (OptimizedModelArtifact); mandatory post-optimization verification via ADR-0011 against unoptimized baselines (accuracy_retention_ratio, speedup_ratio); runtime-agnostic deployment architecture (DeploymentRuntime: Standalone TensorRT, DeepStream, Triton, ONNX Runtime); hardware-locked target profiles (DeploymentTarget) per [P§13], [P§29.4], D-014, D-022; production deployment human approval gates per docs/APPROVALS.md and [P§24]; automated health/readiness probing (HealthCheckSpec) with zero-downtime rollback; and 12 codified architectural invariants.
 
 ## Blocking questions
 
-Q1–Q5, Q7–Q8, Q10 are resolved. ADR-0001 through ADR-0011 are accepted. Downstream implementation work is gated on Phase 1 ADR acceptance.
+Q1–Q5, Q7–Q8, Q10 are resolved. ADR-0001 through ADR-0012 are accepted. Downstream implementation work is gated on Phase 1 ADR acceptance.
 
 ## Next session
 
-1. Await Official PM instruction establishing scope and requirements for ADR-0012 (Optimization & Deployment Subsystem Architecture).
-2. Open GitHub Issue and cut short-lived branch for ADR-0012 upon authorization.
+1. Await Official PM instruction establishing scope and requirements for ADR-0013 (Monitoring & Active Learning Subsystem Architecture).
+2. Open GitHub Issue and cut short-lived branch for ADR-0013 upon authorization.
