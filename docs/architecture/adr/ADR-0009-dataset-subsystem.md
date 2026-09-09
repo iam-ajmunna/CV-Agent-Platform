@@ -1,6 +1,6 @@
 # ADR-0009: Dataset Subsystem Architecture
 
-- **Status:** Accepted
+- **Status:** Accepted — Frozen
 - **Date:** 2026-09-08
 - **Layer:** data / dataset engineering
 - **Canon:** `[P§7]`, `[P§25]`, `[P§26]`, `[P§27]`, `[P§29.5]`, `[P§34]`
@@ -167,6 +167,12 @@ from pydantic import BaseModel, ConfigDict, Field
 # ---------------------------------------------------------------------------
 # Typed Identifiers
 # ---------------------------------------------------------------------------
+# Identifier syntax rules:
+# - DatasetId: conforms to `[a-z0-9_.-]+(/[a-z0-9_.-]+)*` per ADR-0001 §3.1 (e.g. 'cctv.perimeter.intrusion').
+# - DatasetVersion: conforms to `v[0-9]+\.[0-9]+\.[0-9]+(-[a-z0-9_.-]+)?` or monotonic increment string (e.g. 'v1.0.0').
+# - ContentHash: lowercase 64-character hex string conforming to `^[a-f0-9]{64}$` (SHA-256 digest of payload bytes).
+# - AnnotationVersion: conforms to `[a-z0-9_.-]+` (e.g. 'ann-2026.09.01' or 'ann-v1.0.0').
+# - GuidelineRef: URI or commit SHA conforming to `[a-z0-9_./:-]+`.
 
 DatasetId = NewType("DatasetId", str)
 """Authoritative dataset identifier, e.g. 'cctv.perimeter.intrusion'."""
@@ -204,6 +210,7 @@ class SplitName(str, Enum):
     TRAIN = "train"
     VAL = "val"
     TEST = "test"
+    CALIBRATION = "calibration"
 
 
 class LeakageType(str, Enum):
@@ -287,6 +294,10 @@ class SplitMembership(BaseModel):
     train_hashes: tuple[ContentHash, ...]
     val_hashes: tuple[ContentHash, ...]
     test_hashes: tuple[ContentHash, ...]
+    calibration_hashes: tuple[ContentHash, ...] = Field(
+        default_factory=tuple,
+        description="Optional calibration partition for INT8 PTQ quantization without test split leakage.",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -308,7 +319,7 @@ class AnnotationManifest(BaseModel):
         description="e.g. 'yolo_v8', 'coco_instances', 'csv_events'"
     )
     payload_annotations: Mapping[ContentHash, tuple[Mapping[str, Any], ...]] = Field(
-        description="Mapping of content hash to list of annotation primitives.",
+        description="Mapping of content hash to list of annotation primitives. Each primitive must define valid geometric coordinates (e.g. non-negative bounding boxes, polygons, keypoints) and valid class IDs.",
     )
 
 
@@ -433,3 +444,13 @@ class DatasetRegistry(Protocol):
 1. **DVC Ecosystem Integration:** If external enterprise collaborators mandate `.dvc` files, a bidirectional export/import adapter may be introduced without modifying the core `DatasetManifest` authority.
 2. **Video Streaming Datasets:** If multi-camera video streams (`[P§9]`, Q11) require chunked temporal indexing beyond discrete frame files, the `ContentHash` abstraction will be extended to support content-addressed video segment chunks.
 3. **Automated Active Learning Mutators:** If Phase 5 active learning agents require automated dataset relabeling loops, approval thresholds for autonomous mutation will be calibrated per `docs/APPROVALS.md` (Q6).
+
+## 6. Implementation Acceptance Criteria
+
+1. **Manifest Round-Trip & Immutability:** A `DatasetManifest` instantiated with all 16 required fields serializes to JSON under `.cv_agent/datasets/<dataset_id>/<version>.json` and deserializes without loss of fidelity. All models reject attribute mutation (`frozen=True`).
+2. **Deterministic Split Retrieval:** Partitions defined in `SplitMembership` (`train_hashes`, `val_hashes`, `test_hashes`, and optional `calibration_hashes`) retrieve exact byte-identical payloads via `DatasetStore` using `ContentHash` resolution without runtime seed generation.
+3. **Zero Split Contamination:** Disjointness invariants enforce that the intersection of `train_hashes`, `val_hashes`, `test_hashes`, and `calibration_hashes` is empty.
+4. **Mandatory Leakage Gate:** A dataset version cannot be registered or passed to training without recorded `leakage_audit_records` passing all five leakage dimensions (temporal, camera/site, near-duplicate, subject/identity, annotation-round) unless an explicit approved exemption is documented.
+5. **Independent Annotation Decoupling:** Revisions to annotations produce a distinct `AnnotationVersion` manifest referencing existing `ContentHash` items without modifying raw media payload hashes.
+6. **Storage Protocol Independence:** The `DatasetStore` abstraction supports `local_fs`, `s3`, `gcs`, and `minio` backends without leaking transport or SDK details into reasoning, orchestration, or training subsystems.
+7. **Approval Gate Integration:** Invocations of destructive or mutating dataset operations (`dataset.delete`, `dataset.relabel`, `dataset.resplit`, `dataset.mutate`) generate persistent `ApprovalRequest` entities per `docs/APPROVALS.md` requiring human approval before execution.
