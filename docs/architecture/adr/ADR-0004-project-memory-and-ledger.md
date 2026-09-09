@@ -1,7 +1,9 @@
 # ADR-0004: Project Memory and Experiment Ledger Persistence
 
 - **Status:** Accepted
+- **Amendment Status:** Frozen
 - **Date:** 2026-09-02
+- **Last Reviewed:** 2026-09-10
 - **Layer:** memory
 - **Canon:** `[P§10]`, `[P§12]`, `[P§24]`, `[P§25]`, `[P§26]`, `[P§29.2]`, `[P§29.4]`, `[P§29.5]`, `[P§33]`, `[P§34]`
 - **Supersedes / Superseded by:** —
@@ -73,6 +75,18 @@ Project memory captures persistent domain knowledge scoped to the current projec
    - Deployment target platform (e.g. NVIDIA Jetson Orin Nano, AGX Orin, server-grade A100/T4, edge CPU).
    - Resource ceilings: Maximum VRAM allocation, RAM ceiling, thermal/power budget (Watts).
    - Target precision support: FP32, FP16, INT8 (PTQ/QAT).
+   - Canonical schema contract (maps directly to `HardwareConstraints` in §5):
+     ```yaml
+     target_device: "nvidia_jetson_orin_nano_8gb"
+     max_vram_mb: 6144
+     max_ram_mb: 7168
+     power_budget_watts: 15.0
+     latency_ceiling_ms: 33.3
+     supported_precisions:
+       - "FP32"
+       - "FP16"
+       - "INT8"
+     ```
 3. **`architectural_choices.md` (Model Selection & Evolution Rationale):**
    - High-level architectural paradigms selected (e.g. YOLO detector family, RT-DETR, ViT backbone).
    - Traceable justifications for architectural transitions, referencing quantitative results in the Experiment Ledger.
@@ -207,7 +221,7 @@ class HardwareConstraints:
     max_ram_mb: int
     power_budget_watts: float | None
     latency_ceiling_ms: float | None
-    supported_precisions: list[str]
+    supported_precisions: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -218,7 +232,7 @@ class ArchitecturalDecision:
     timestamp: str
     title: str
     rationale: str
-    linked_experiment_ids: list[str]
+    linked_experiment_ids: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -229,7 +243,7 @@ class LearnedHeuristic:
     context: str
     observation: str
     recommendation: str
-    evidence_experiment_ids: list[str]
+    evidence_experiment_ids: tuple[str, ...]
 
 
 class ProjectMemoryReader(Protocol):
@@ -239,11 +253,11 @@ class ProjectMemoryReader(Protocol):
         """Retrieve target deployment hardware budgets."""
         ...
 
-    def get_architectural_decisions(self) -> list[ArchitecturalDecision]:
+    def get_architectural_decisions(self) -> tuple[ArchitecturalDecision, ...]:
         """Retrieve documented architectural decisions and justifications."""
         ...
 
-    def get_learned_heuristics(self) -> list[LearnedHeuristic]:
+    def get_learned_heuristics(self) -> tuple[LearnedHeuristic, ...]:
         """Retrieve empirical engineering heuristics."""
         ...
 
@@ -271,7 +285,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Protocol
+from typing import Any, Mapping, Protocol
 
 
 class ExperimentStatus(str, Enum):
@@ -303,7 +317,7 @@ class AccuracyMetrics:
     precision: float | None = None
     recall: float | None = None
     f1_score: float | None = None
-    additional_metrics: dict[str, float] | None = None
+    additional_metrics: Mapping[str, float] | None = None
 
 
 @dataclass(frozen=True)
@@ -328,7 +342,7 @@ class ArtifactManifest:
     engine_uri: str | None = None
     plots_uri: str | None = None
     failure_analysis_ref: str | None = None
-    checksums: dict[str, str] | None = None
+    checksums: Mapping[str, str] | None = None
 
 
 @dataclass(frozen=True)
@@ -347,7 +361,7 @@ class ExperimentSpec:
     parent_exp_id: str | None = None
     baseline_id: str | None = None
     approval_ref: str | None = None
-    hyperparameters: dict[str, Any] | None = None
+    hyperparameters: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -431,7 +445,7 @@ class ExperimentLedger(Protocol):
         workload_type: WorkloadType | None = None,
         model_name: str | None = None,
         dataset_version: str | None = None,
-    ) -> list[ExperimentRecord]:
+    ) -> tuple[ExperimentRecord, ...]:
         """Query experiment runs matching specified filter criteria."""
         ...
 ```
@@ -472,8 +486,9 @@ Any Phase 2 implementation of ADR-0004 must satisfy the following acceptance cri
   - `Q1 / D-013`: Project-scoped isolation.
   - `Q2 / D-014`: External job execution tracking (`job_id`).
   - `Q3 / D-015`: Persistent approval reference (`approval_ref`).
+  - `Q5 / D-022`: NVIDIA capability inventory and unavailable state reporting.
   - `Q8 / D-018`: Dual-layer persistence foundation.
+  - `Q10 / D-028 / ADR-0009`: Manifest-first content-addressed dataset storage; `dataset_version` in `ExperimentSpec` binds to ADR-0009 `DatasetManifest` identities.
   - `ADR-0003 / D-020`: Runtime checkpoint separation in `checkpoints.sqlite`.
 - **Open Questions:**
-  - `Q5` (NVIDIA capability inventory) remains deferred and does **not** block ADR-0004.
-  - `Q10` (Dataset storage and versioning: DVC, Git LFS, or external object store per `[P§26]`) is an open question in `docs/state/OPEN_QUESTIONS.md`. ADR-0004 defines dataset linkage via string manifest identifiers (`dataset_version`), remaining agnostic to whether the underlying storage transport is DVC, LFS, or S3, thereby unblocking ADR-0004 without preempting Q10.
+  - None. All architectural dependencies for ADR-0004 are resolved and frozen.
