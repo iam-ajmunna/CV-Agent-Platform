@@ -401,3 +401,21 @@ isolation) and Q3 (cross-process restart survival) cleanly without external netw
 **Learned:** Explicit YAML schema definitions for qualitative project memory prevent drift when agents distill hardware budgets and operational limits from project conversations into Git-tracked state.
 
 **Left open:** Proceeding to ADR-0005 freeze review.
+
+---
+
+## 2026-09-10 — ADR-0005 Freeze Synchronization (D-038, PR #23)
+
+**Did:** Hardened and froze ADR-0005 (`docs/architecture/adr/ADR-0005-tools-and-mcp-boundary.md`) on `main` following review and squash-merge of PR #23. Recorded decision `D-038` in `DECISIONS.md`. Updated `STATUS.md` and `AGENT_HANDOFF.md`. Changes made:
+1. Updated amendment status to `Accepted — Frozen`.
+2. Documented identifier syntax rule in §5 (`TargetId`, `ExecutionId`, `MCPServerId`, `ToolId` conforming to `[a-z0-9_.-]+(/[a-z0-9_.-]+)*` per ADR-0001 §3.1).
+3. Added `heartbeat_timeout_seconds: int = 3600` to `ActiveJobHandoff` in §5.
+4. Enforced `Mapping[str, Any]` across dataclasses (`target_metadata`, `input_schema`, `output_schema`, `metadata`, `parameters`, `structured_output`, `diagnostics`) to guarantee immutability and prevent layer leakage.
+
+**Why:** `[P§10]`, `[P§15]`, `[P§22]`, `[P§23]`, `[P§24]`, `[P§29.4]`, `[P§34]` — establishes strict execution boundaries, immutable data transfer objects, and deterministic asynchronous handoffs.
+
+**Broke:** Nothing broken. 99 pytest tests pass, ruff clean, mypy clean.
+
+**Learned:** Enforcing immutable mappings across tool descriptors, invocations, and results prevents tool execution adapters from mutating operational state while maintaining transport independence.
+
+**Left open:** Proceeding to ADR-0006 freeze review.
