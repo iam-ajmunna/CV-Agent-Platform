@@ -1,11 +1,13 @@
 # ADR-0005: Tools and MCP Execution Boundary
 
 - **Status:** Accepted
+- **Amendment Status:** Frozen
 - **Date:** 2026-09-03
+- **Last Reviewed:** 2026-09-10
 - **Layer:** execution / tools
 - **Canon:** `[P§10]`, `[P§15]`, `[P§22]`, `[P§23]`, `[P§24]`, `[P§29.4]`, `[P§34]`
 - **Supersedes / Superseded by:** —
-- **Issue:** #TBD
+- **Issue:** #14
 
 ## 1. Context
 
@@ -204,13 +206,16 @@ Tool execution results are normalized to eliminate CLI-specific bias:
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Literal, NewType, Protocol, runtime_checkable
+from typing import Any, Literal, Mapping, NewType, Protocol, runtime_checkable
 
 from cv_agent.capabilities import ToolId
 
 TargetId = NewType("TargetId", str)
 ExecutionId = NewType("ExecutionId", str)
 MCPServerId = NewType("MCPServerId", str)
+
+# Identifier syntax rule: TargetId, ExecutionId, MCPServerId, and ToolId MUST be
+# non-empty ASCII strings conforming to [a-z0-9_.-]+(/[a-z0-9_.-]+)* per ADR-0001 §3.1.
 
 
 class TargetType(str, Enum):
@@ -254,7 +259,7 @@ class ExecutionTargetDescriptor:
     is_available: bool
     description: str = ""
     unavailable_reason: str | None = None
-    target_metadata: dict[str, Any] = field(default_factory=dict)
+    target_metadata: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -265,8 +270,8 @@ class ToolDescriptor:
     name: str
     description: str
     compatible_target_types: tuple[TargetType, ...]
-    input_schema: dict[str, Any]  # JSON Schema for parameters
-    output_schema: dict[str, Any]  # JSON Schema for structured output
+    input_schema: Mapping[str, Any]  # JSON Schema for parameters
+    output_schema: Mapping[str, Any]  # JSON Schema for structured output
     risk_level: ToolRiskLevel
     requires_approval: bool  # Declares an approval precondition; does not replace authoritative orchestration policy
     default_timeout_seconds: int = 300
@@ -286,7 +291,8 @@ class ActiveJobHandoff:
     target: Literal["local_gpu", "remote_gpu", "cloud"]
     submitted_at: str
     status: Literal["submitted", "running", "completed", "failed"]
-    metadata: dict[str, Any] = field(default_factory=dict)
+    heartbeat_timeout_seconds: int = 3600
+    metadata: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -294,7 +300,7 @@ class ToolInvocation:
     """A concrete request to invoke a tool on a target."""
 
     tool_id: ToolId
-    parameters: dict[str, Any]
+    parameters: Mapping[str, Any]
     target_id: TargetId
     execution_id: ExecutionId
     timeout_seconds: int
@@ -310,8 +316,8 @@ class ToolResult:
     execution_id: ExecutionId
     target_id: TargetId
     status: ToolExecutionStatus  # Terminal outcome for sync tools; dispatch outcome for async tools
-    structured_output: dict[str, Any] = field(default_factory=dict)
-    diagnostics: dict[str, Any] = field(default_factory=dict)  # stdout, stderr, logs
+    structured_output: Mapping[str, Any] = field(default_factory=dict)
+    diagnostics: Mapping[str, Any] = field(default_factory=dict)  # stdout, stderr, logs
     artifacts: tuple[str, ...] = ()
     duration_ms: int = 0
     error_message: str | None = None
