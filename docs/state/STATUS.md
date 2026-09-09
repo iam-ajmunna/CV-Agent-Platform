@@ -3,7 +3,7 @@
 > **Rewritten** every session. Describes **now**, never history — history lives in
 > `JOURNAL.md`. Hard cap: 60 lines. If it exceeds that, you are logging, not stating.
 
-**Updated:** 2026-09-09 · **Phase:** 1 — Architecture & ADR Specification · **Health:** green
+**Updated:** 2026-09-10 · **Phase:** 1 — Architecture & ADR Specification · **Health:** green
 
 ## Where we are
 
@@ -11,26 +11,24 @@ The repository operates on a single-trunk development flow (`main` + short-lived
 branches) under the sole approval authority of the project owner as Official PM.
 `dev-munna` is permanently retired (D-027).
 
-ADR-0001 through ADR-0013 remain formally accepted. ADR-0002 has been amended and
-re-frozen with canonical multimodal content, capability-aware model profiles, explicit
-routing/retry/fallback semantics, idempotency-safe recovery, typed streaming, structured
-outputs, provider/data-governance constraints, reproducibility metadata, and provider
-adapter isolation (D-034).
+ADR-0001 is hardened and frozen (D-035). ADR-0003 is hardened and frozen (Issue #19).
+ADR-0002 amendment is accepted (D-034) and is undergoing final review and freeze audit.
+ADR-0004 through ADR-0013 remain accepted and will be reviewed sequentially.
 
-The complete Phase 1 architectural contract chain remains accepted. Phase 2 is paused
-while the remaining ADRs are reviewed and hardened sequentially by the Official PM.
+The Phase 1 architectural freeze protocol is in active progress. Phase 2 runtime
+implementation remains paused until all 13 ADRs are frozen.
 
 ## In flight
 
 | Item | Issue | State |
 |---|---|---|
-| ADR review | #14 | ADR-0002 amendment accepted; proceed to next ADR review |
+| ADR freeze | #14 | ADR-0001 & ADR-0003 frozen; ADR-0002 under active freeze review |
 
 ## Next 3 actions
 
-1. Deep-review the next ADR against the full Phase 1 architecture and future technology evolution.
-2. Freeze only after all material gaps are resolved and explicitly approved by the Official PM.
-3. Keep Phase 2 runtime implementation paused until the full ADR review sequence is complete.
+1. Review and freeze ADR-0002 (LLM Gateway) resolving all validated findings.
+2. Proceed sequentially to ADR-0004 through ADR-0013 under the freeze protocol.
+3. Perform final system-level dependency audit before closing Phase 1.
 
 ## Blockers
 

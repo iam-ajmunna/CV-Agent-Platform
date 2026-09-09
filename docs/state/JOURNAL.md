@@ -343,3 +343,23 @@ isolation) and Q3 (cross-process restart survival) cleanly without external netw
 **Learned:** Enforcing the observe $\rightarrow$ detect $\rightarrow$ sample $\rightarrow$ propose separation guarantees that active learning feeds high-value edge data into the data flywheel without ever creating an unconstrained, unsupervised retraining loop that could cause catastrophic forgetting or unbounded compute burn.
 
 **Left open:** Phase 1 architecture sequence (ADR-0001 through ADR-0013) is fully accepted and complete. Phase 2 (Runtime Substrate & Core Type Implementation) is parked awaiting explicit Official PM instruction and milestone sequencing.
+
+---
+
+## 2026-09-10 — ADR-0001 Freeze Synchronization (D-035, PR #20)
+
+**Did:** Hardened and froze ADR-0001 (`docs/architecture/adr/ADR-0001-capability-model.md`) on `main` following review and squash-merge of PR #20. Recorded decision `D-035` in `DECISIONS.md`. Updated `STATUS.md` and `AGENT_HANDOFF.md`. Changes made:
+1. Specified canonical namespaced identifier format for `CapabilityId`, `SkillId`, `ToolId`, `AgentId` (`[a-z0-9_.-]+(/[a-z0-9_.-]+)*`).
+2. Formalized `AvailabilityState` Literal type in §3.5 and §5; clarified strict orthogonality between operational readiness and workflow authorization (`authorized: bool`) per ADR-0003/APPROVALS.md.
+3. Coupled tool ID and tool version into `ResolvedToolRef` in `ResolutionSnapshot` §3.10 to eliminate parallel tuple index-drift risks.
+4. Defined `Stage` Literal enum per `[P§6]` in §5 Interface.
+5. Added snapshot deserialization round-trip reproducibility test to §7 Acceptance Tests.
+6. Marked status as `Accepted — Frozen`.
+
+**Why:** `[P§6]`, `[P§15]`, `[P§22]`, `[P§23]`, `[P§32]`, `[P§34]` — enforces strict semantic boundaries and deterministic resolution contracts before runtime implementation.
+
+**Broke:** Nothing broken. 99 pytest tests pass, ruff clean, mypy clean.
+
+**Learned:** Explicitly decoupling `AvailabilityState` (operational readiness of tool/target binding) from `authorized` (workflow/human policy evaluation) prevents the capability resolver from ever usurping authorization authority.
+
+**Left open:** Proceeding to ADR-0002 freeze review.
