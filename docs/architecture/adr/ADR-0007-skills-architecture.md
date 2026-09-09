@@ -1,7 +1,9 @@
 # ADR-0007: Skills Architecture & NVIDIA Capability Discovery
 
 - **Status:** Accepted
+- **Amendment Status:** Frozen
 - **Date:** 2026-09-03
+- **Last Reviewed:** 2026-09-10
 - **Layer:** skills / execution
 - **Canon:** `[P§15]`, `[P§23]`, `[P§29.9]`, `[P§34]`
 - **Supersedes / Superseded by:** —
@@ -111,6 +113,8 @@ A Skill is a declarative specification of procedural expertise. Every skill in t
    - `procedural_recipe`: Structured declarative instructions or recipe template defining parameter mappings, command sequences, and artifact outputs.
    - `parameter_schema`: JSON schema defining typed input parameters.
    - `prerequisites`: Verification checks that must pass before invocation (e.g., input model artifact exists).
+   - `timeout_seconds`: Bounded maximum execution duration for the skill procedure (default 600s).
+   - `deprecated_in_favor_of`: Optional replacement `SkillId` for superseded skills.
    - `requires_approval`: Boolean flag indicating if execution involves expensive/destructive operations.
    - **Approval Invariant:** `requires_approval` is a skill-level execution requirement declaration; approval policy, gate evaluation, and ticket/token validation remain strictly owned by Orchestration (ADR-0003) and `docs/APPROVALS.md`.
 
@@ -216,12 +220,15 @@ Discovery of an external skill or tool via MCP or remote probing **never creates
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, NewType, Protocol, runtime_checkable
+from typing import Any, Mapping, NewType, Protocol, runtime_checkable
 
 from cv_agent.capabilities.registry import CapabilityId
 from cv_agent.tools.types import ExecutionTarget, TargetType, ToolId
 
 SkillId = NewType("SkillId", str)
+
+# Identifier syntax rule: SkillId MUST be a non-empty ASCII string
+# conforming to [a-z0-9_.-]+(/[a-z0-9_.-]+)* per ADR-0001 §3.1.
 
 
 class AvailabilityState(str, Enum):
@@ -265,12 +272,14 @@ class SkillDescriptor:
     satisfies_capabilities: tuple[CapabilityId, ...]
     required_tools: tuple[ToolId, ...]
     target_requirements: TargetRequirements
-    parameter_schema: dict[str, Any]
+    parameter_schema: Mapping[str, Any]
     procedural_recipe: str  # Structured workflow / recipe template
     vendor: str | None = None  # e.g. "nvidia"
     prerequisites: tuple[str, ...] = ()
+    timeout_seconds: int = 600
+    deprecated_in_favor_of: SkillId | None = None
     requires_approval: bool = False
-    metadata: dict[str, Any] = field(default_factory=dict)
+    metadata: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -331,9 +340,9 @@ class SkillExecutor(Protocol):
     async def execute(
         self,
         skill: SkillDescriptor,
-        parameters: dict[str, Any],
+        parameters: Mapping[str, Any],
         target: ExecutionTarget,
-    ) -> dict[str, Any]:
+    ) -> Mapping[str, Any]:
         """Validate parameters, enforce approvals, and invoke dependent tools."""
         ...
 ```
@@ -386,6 +395,7 @@ The Skills subsystem categorizes failures into distinct operational types:
 7. **Known-but-Unavailable Enforcement:** When an NVIDIA skill lacks a compatible GPU execution target, resolution explicitly returns `AvailabilityState.KNOWN_BUT_UNAVAILABLE`; silent fallback to CPU is strictly prohibited.
 8. **Execution-Target Alignment:** `SkillDescriptor` target requirements align with ADR-0005 (`LOCAL`, `REMOTE`, `MCP_ENDPOINT`).
 9. **Discovery Authority Boundary:** Dynamically discovered skills from MCP or remote probes are stored as non-authoritative candidates and do not mutate authoritative capability identities in ADR-0001.
+10. **Bounded Execution & Deprecation Lineage:** `SkillDescriptor` defines an explicit `timeout_seconds` enforced by the executor and an optional `deprecated_in_favor_of` pointer when procedural skills are superseded.
 
 ## 9. References
 
