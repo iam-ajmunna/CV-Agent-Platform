@@ -20,8 +20,8 @@
 | ADR-0004 — Project memory / experiment ledger | **Accepted — Frozen** |
 | ADR-0005 — Tools / MCP | **Accepted — Frozen** |
 | ADR-0006 — Knowledge / RAG | **Accepted — Frozen** |
-| ADR-0007 — Skills | **Accepted — In Freeze Review** |
-| ADR-0008 — Reasoning | **Accepted** |
+| ADR-0007 — Skills | **Accepted — Frozen** |
+| ADR-0008 — Reasoning | **Accepted — In Freeze Review** |
 | ADR-0009 — Dataset subsystem | **Accepted** |
 | ADR-0010 — Training | **Accepted** |
 | ADR-0011 — Evaluation | **Accepted** |
@@ -60,6 +60,7 @@
 - **D-037:** ADR-0004 Project Memory and Experiment Ledger Persistence is frozen; explicit YAML schema for `hardware_constraints.yaml` in §2.3 mapping to `HardwareConstraints`, immutable `Mapping` and `tuple` collection typing in memory and experiment interfaces in §5, and reconciliation of resolved dependencies (Q5 via D-022, Q10 via D-028/ADR-0009 binding to `DatasetManifest`) in §8.
 - **D-038:** ADR-0005 Tools and MCP Execution Boundary is frozen; updated status to 'Accepted — Frozen'; documented identifier syntax rule conforming to `[a-z0-9_.-]+(/[a-z0-9_.-]+)*` per ADR-0001 §3.1 for TargetId, ExecutionId, MCPServerId, and ToolId; added `heartbeat_timeout_seconds` to `ActiveJobHandoff`; enforced `Mapping[str, Any]` across dataclasses to ensure immutability and prevent layer leakage.
 - **D-039:** ADR-0006 Knowledge & RAG Subsystem is frozen; updated status to 'Accepted — Frozen'; added Configurable Horizons Invariant in §3.5 enabling explicit workspace overrides; added Embedding Model Versioning & Re-Indexing Invariant in §3.6 prohibiting cross-model vector distance comparison; documented identifier syntax rule conforming to `[a-z0-9_.-]+(/[a-z0-9_.-]+)*` per ADR-0001 §3.1 for DocumentId and ChunkId; enforced `Mapping[str, Any]` in KnowledgeChunk.metadata; added `embedding_model_id` to ScoredCitation; and added acceptance criterion 10 for embedding model compatibility.
+- **D-040:** ADR-0007 Skills Architecture & NVIDIA Capability Discovery is frozen; updated status to 'Accepted — Frozen'; documented identifier syntax rule conforming to `[a-z0-9_.-]+(/[a-z0-9_.-]+)*` per ADR-0001 §3.1 for SkillId; added `timeout_seconds` and `deprecated_in_favor_of` to `SkillDescriptor` in §3.2 and §4; enforced `Mapping[str, Any]` across parameter schema, metadata, and executor invocation; and added acceptance criterion 10 for bounded execution and deprecation lineage.
 
 ## Blocking questions
 

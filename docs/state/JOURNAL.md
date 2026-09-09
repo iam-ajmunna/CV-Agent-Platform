@@ -440,3 +440,22 @@ isolation) and Q3 (cross-process restart survival) cleanly without external netw
 **Learned:** Tracking embedding model identity directly in index partitions and retrieved citations prevents subtle cosine similarity corruption when underlying embedding models evolve.
 
 **Left open:** Proceeding to ADR-0007 freeze review.
+
+---
+
+## 2026-09-10 — ADR-0007 Freeze Synchronization (D-040, PR #25)
+
+**Did:** Hardened and froze ADR-0007 (`docs/architecture/adr/ADR-0007-skills-architecture.md`) on `main` following review and squash-merge of PR #25. Recorded decision `D-040` in `DECISIONS.md`. Updated `STATUS.md` and `AGENT_HANDOFF.md`. Changes made:
+1. Updated amendment status to `Accepted — Frozen`.
+2. Documented canonical identifier syntax rule in §4 (`SkillId` conforming to `[a-z0-9_.-]+(/[a-z0-9_.-]+)*` per ADR-0001 §3.1).
+3. Added `timeout_seconds: int = 600` and `deprecated_in_favor_of: SkillId | None = None` to `SkillDescriptor` in §3.2 and §4.
+4. Enforced `Mapping[str, Any]` across `parameter_schema`, `metadata`, and `SkillExecutor.execute` parameter/return types to guarantee immutability.
+5. Added acceptance criterion 10 for bounded execution and deprecation lineage.
+
+**Why:** `[P§15]`, `[P§23]`, `[P§29.9]`, `[P§34]` — establishes typed procedural skill descriptors, declarative NVIDIA adapters without code duplication, strict 7-state availability tracking, and deterministic resolution boundaries.
+
+**Broke:** Nothing broken. 99 pytest tests pass, ruff clean, mypy clean.
+
+**Learned:** Bounded execution timeouts and explicit deprecation pointers in skill descriptors give orchestration predictable failure semantics and clean migration paths when procedural recipes are superseded.
+
+**Left open:** Proceeding to ADR-0008 freeze review.
