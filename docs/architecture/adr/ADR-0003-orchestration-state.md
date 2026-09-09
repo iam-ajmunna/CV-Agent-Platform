@@ -1,12 +1,13 @@
 # ADR-0003: Orchestration State Machine, Checkpointing, and Persistent Approvals
 
 - **Status:** Accepted
-- **Amendment Status:** Proposed
+- **Amendment Status:** Frozen
 - **Date:** 2026-09-02
+- **Last Reviewed:** 2026-09-09
 - **Layer:** orchestration
 - **Canon:** `[P§6]`, `[P§21]`, `[P§24]`, `[P§25]`, `[P§29.8]`, `[P§33]`, `[P§34]`
 - **Supersedes / Superseded by:** —
-- **Issue:** #16 (amendment)
+- **Issue:** #18 (freeze review)
 
 ## 1. Context
 
@@ -22,263 +23,291 @@ persistent approval interrupts. ADR-0003 establishes local SQLite checkpoint per
 `.cv_agent/state/checkpoints.sqlite`, distinct from the permanent experiment ledger at
 `.cv_agent/state/experiments.sqlite` owned by ADR-0004.
 
-Deep architectural review identified an additional distributed-systems boundary: a local
-SQLite transaction cannot be atomic with an external process, remote host, cloud service,
-LLM provider, or MCP execution. Therefore orchestration must model effectful operations as
-versioned intents with stable identities and explicit reconciliation rather than assuming
+A local SQLite transaction cannot be atomic with an external process, remote host, cloud
+service, LLM provider, or MCP execution. Therefore orchestration models effectful operations
+as versioned intents with stable identities and explicit reconciliation rather than assuming
 checkpoint commit and external side effect form one transaction.
 
 ## 2. Responsibility (`[P§34]`)
 
-- **This owns:** workflow graph topology, orchestration state, lifecycle transitions,
+- **Owns:** workflow graph topology, orchestration state, lifecycle transitions,
   node-to-node propagation, checkpoint persistence/restoration, approval interrupt/resume,
   operation identity and recovery protocol, session ownership, execution-event sequencing,
   and orchestration-level retry/recovery policy.
-- **This does NOT own:**
-  - LLM provider management or provider APIs → ADR-0002;
-  - domain reasoning and hypothesis generation → ADR-0008;
-  - capability catalogue and authoritative capability/tool identities → ADR-0001;
-  - procedural domain instructions → ADR-0007;
-  - executable tool semantics and transport → ADR-0005;
-  - permanent project memory and experiment ledger → ADR-0004;
-  - dataset storage/versioning → ADR-0009;
-  - training execution → ADR-0010;
-  - offline model/system evaluation → ADR-0011;
-  - optimization/deployment runtime → ADR-0012;
-  - production monitoring/active learning → ADR-0013.
+- **Does NOT own:** LLM provider management (ADR-0002); domain reasoning (ADR-0008);
+  capability identity (ADR-0001); procedural skills (ADR-0007); tool execution/transport
+  (ADR-0005); permanent memory/experiment ledger (ADR-0004); dataset storage (ADR-0009);
+  training (ADR-0010); evaluation (ADR-0011); optimization/deployment (ADR-0012); or
+  production monitoring/active learning (ADR-0013).
 
 ## 3. Decision
 
-We use a LangGraph `StateGraph` with durable SQLite checkpoint persistence at
+Use a LangGraph `StateGraph` with durable SQLite checkpoint persistence at
 `.cv_agent/state/checkpoints.sqlite`. `MemorySaver` is permitted only for isolated tests.
-The architecture is deliberately portable above the checkpoint backend so future migration
-to a server-side checkpointer does not alter operation, approval, or state semantics.
+The public orchestration semantics are independent of the checkpoint backend so future
+migration to a server-side checkpointer does not alter operation, approval, or state semantics.
 
 ### 3.1 Dual-SQLite separation
 
 ```text
 .cv_agent/state/
 ├── checkpoints.sqlite   ← ADR-0003 runtime checkpoint persistence
-│                           retention governed; survives process termination
 └── experiments.sqlite   ← ADR-0004 permanent experiment ledger
-                            immutable historical experiment record
 ```
 
 Checkpoint state is runtime state, not permanent domain memory. Experiment facts are handed
-to ADR-0004 and retained only through stable references in orchestration state.
+to ADR-0004 through stable references. Checkpoints needed by non-terminal or recoverable
+sessions MUST NOT be pruned.
 
-Checkpoint retention is policy-driven. Non-terminal or recoverable sessions MUST NOT be
-pruned. Pruning is permitted only when the session is terminal, no unresolved approval or
-external operation depends on the checkpoint, and the configured retention policy allows it.
+### 3.2 Authoritative state model
 
-### 3.2 State model invariants
+`AgentState` is a transport/state envelope and MUST NOT contain provider SDK objects, clients,
+sockets, file handles, raw secrets, model artifacts, or large domain payloads.
 
-`AgentState` is a transport/state envelope for LangGraph and MUST NOT contain arbitrary
-provider SDK objects, tool clients, sockets, file handles, raw secrets, model artifacts, or
-domain payloads.
+All authoritative persisted records MUST be immutable value objects. Every checkpoint carries
+`checkpoint_schema_version`. Optional values are explicit nullable fields. Arbitrary
+`dict[str, Any]` state is prohibited; extension data MUST use a versioned schema envelope.
+Timestamps are timezone-aware UTC instants. Large artifacts are referenced, never embedded.
+Persistent history is append-only and bounded/redacted.
 
-The implementation contract is:
+### 3.3 Session and execution ownership
 
-- all persisted domain records are immutable value objects (`frozen=True` Pydantic v2 models
-  or an equivalent explicitly immutable representation);
-- every persisted state has a `checkpoint_schema_version`;
-- optional fields are explicit nullable fields rather than `TypedDict(total=False)` semantics;
-- unbounded `dict[str, Any]` is prohibited in authoritative state; extension data must use a
-  versioned, schema-validated envelope;
-- execution history is append-only and sequence-numbered;
-- state contains references to large artifacts, never artifact payloads;
-- timestamps are timezone-aware UTC instants;
-- serialized state is bounded and JSON/msgpack-compatible according to the selected
-  LangGraph checkpointer contract.
+`SessionId` identifies the user-visible orchestration session. `ThreadId` identifies its
+LangGraph execution thread. A session has exactly one stable thread identity for its lifetime.
+Recovery MUST reuse that identity.
 
-### 3.3 Session and ownership identity
+A running session is protected by an `ExecutionLease`:
 
-`SessionId` identifies the user-visible orchestration session. `ThreadId` identifies the
-LangGraph execution thread. A session has exactly one stable thread identity for its lifetime;
-recovery MUST reuse it.
-
-A running session has an `ExecutionLease` containing:
-
-- `lease_id` — unique ownership token;
-- `session_id` / `thread_id`;
+- `lease_id` — unique lease token;
+- `session_id` and `thread_id`;
 - `owner_instance_id`;
 - `acquired_at` and `expires_at`;
 - monotonically increasing `fencing_epoch`.
 
-Only the current lease holder may advance a session. SQLite file locking is an implementation
-mechanism, not the application-level concurrency contract. Stale workers MUST be rejected by
-fencing checks. Independent sessions may execute concurrently.
+Every state mutation MUST carry the lease identity and fencing epoch. The persisted current
+epoch MUST equal the mutation epoch; otherwise the mutation is rejected as stale. Lease expiry
+is evaluated by the store using a monotonic-clock/lease-expiration mechanism; wall-clock time
+is retained only as audit metadata. Renewal is compare-and-swap against the current lease and
+fencing epoch. A worker that loses renewal or fencing MUST stop mutating state and enter stale
+worker shutdown/recovery handling.
 
-### 3.4 Operation identity and idempotency
+SQLite file locking is only a storage mechanism, not the application-level concurrency
+contract. Independent sessions may execute concurrently; a single session is serialized by
+its lease/fencing contract.
 
-Every externally effectful action receives an immutable `OperationId` before dispatch.
-An operation is identified by:
+### 3.4 Canonical operation identity and hashing
+
+Every externally effectful action receives an immutable logical `OperationId` before dispatch.
+The executable identity is:
 
 ```text
-OperationId
- + operation_version
- + canonical_payload_hash
- + target_identity
+OperationIdentity =
+    operation_id
+    + operation_version
+    + canonical_payload_hash
+    + target_identity
 ```
 
-The canonical payload hash covers every execution-relevant parameter, selected tool/capability,
-target, dataset/model/artifact references, and policy-relevant configuration. Equivalent
-requests produce the same canonical representation; materially different requests produce a
-different operation version/hash.
+`operation_id` is a stable logical identifier. `operation_version` identifies a materially
+changed intent. `target_identity` identifies the execution destination. `canonical_payload_hash`
+is the digest of the canonical executable payload.
 
-An operation MUST progress through an explicit orchestration record rather than relying on
-node replay to infer whether the external side effect occurred.
+Canonicalization MUST be deterministic and versioned. The canonical form MUST specify:
 
-### 3.5 External side-effect protocol and crash recovery
+1. UTF-8 encoding;
+2. Unicode normalization policy;
+3. deterministic object-key ordering;
+4. explicit representation of null, omitted, default, boolean, integer, decimal, and string
+   values;
+5. normalized representation of sequences and sets (sets MUST be represented as explicitly
+   sorted sequences before hashing);
+6. inclusion of every execution-relevant parameter, selected capability/tool, target,
+   dataset/model/artifact reference, and policy-relevant configuration;
+7. exclusion of observational metadata such as timestamps, retry counters, worker identity,
+   and log text unless those values change execution semantics;
+8. a versioned canonicalization algorithm identifier; and
+9. SHA-256 or a future approved cryptographic hash algorithm identified by algorithm/version.
 
-SQLite checkpoint atomicity does not imply atomicity with external execution. Effectful actions
-therefore use this protocol:
+Two semantically equivalent requests MUST produce the same canonical representation and hash.
+Materially different executable intent MUST produce a different operation version and/or hash.
+A changed payload MUST invalidate any prior approval.
 
-```text
-CREATE OperationIntent
-        ↓
-VALIDATE + policy checks
-        ↓
-APPROVAL (if required)
-        ↓
-PERSIST dispatch-ready operation
-        ↓
-DISPATCH using OperationId / idempotency key
-        ↓
-PERSIST external reference / dispatch result
-        ↓
-RECONCILE external state after crash or timeout
-        ↓
-TERMINAL operation state
+### 3.5 Typed operation payloads
+
+Authoritative operation payloads MUST be represented by a versioned schema envelope rather than
+an unconstrained `Mapping[str, object]`:
+
+```python
+class OperationPayloadEnvelope(Protocol):
+    schema_id: str
+    schema_version: int
+    payload_hash: str
+    canonicalization_version: str
+    payload: object
 ```
 
-If the process crashes after dispatch but before checkpointing the result, recovery MUST first
-reconcile the external target using `OperationId`, external reference, or target-specific
-idempotency semantics. It MUST NOT blindly redispatch.
+Concrete operation payload schemas are owned by the subsystem performing the operation. ADR-0003
+owns their identity, versioning, canonicalization, approval binding, persistence, and recovery
+semantics. The architectural interface may use `object`/mapping types as conceptual transport
+placeholders, but an implementation MUST NOT persist an unvalidated arbitrary mapping as
+authoritative state.
 
-If reconciliation cannot establish whether the side effect occurred, the operation enters
-`UNKNOWN` and requires target-specific reconciliation or an explicit policy/operator decision.
+### 3.6 External side-effect protocol
 
-Exactly-once execution is NOT claimed where the external target cannot provide idempotency or
-reconciliation. The orchestration guarantee is **at-most-once dispatch attempt when the target
-supports idempotency**, otherwise replay-safe recovery with explicit `UNKNOWN` semantics.
-
-### 3.6 Approval contract
-
-An `ApprovalRequest` is bound to exactly one operation version and canonical payload hash.
-Approval is valid only when the request, operation version, payload hash, policy context, and
-resource scope still match.
-
-`MODIFIED` is never executable approval. It creates a new operation version and payload hash,
-invalidates the previous approval, and returns the operation to the approval-required state.
-
-Approval records contain:
-
-- `request_id`;
-- `operation_id` and `operation_version`;
-- `canonical_payload_hash`;
-- policy/risk classification;
-- requested resources and cost estimate;
-- creation/expiry timestamps;
-- authenticated approval principal reference;
-- final decision and decision timestamp.
-
-Approvals are single-use for the bound operation version unless an explicit policy says
-otherwise. Expired, superseded, or hash-mismatched approvals MUST fail closed.
-
-### 3.7 Lifecycle state machine
-
-Session lifecycle remains:
+SQLite checkpoint atomicity does not imply external atomicity. Effectful actions use:
 
 ```text
+CREATE INTENT
+  → VALIDATE + POLICY CHECK
+  → APPROVAL (if required)
+  → PERSIST DISPATCH-READY INTENT
+  → DISPATCH with OperationIdentity/idempotency key
+  → PERSIST external reference/result
+  → RECONCILE after crash/timeout
+  → TERMINAL STATE
+```
+
+The dispatch boundary MUST accept the operation identity where the target supports idempotency.
+Exactly-once execution is never claimed universally. If the target cannot provide idempotency or
+reconciliation, orchestration exposes explicit `UNKNOWN` semantics rather than claiming safety
+that the target cannot provide.
+
+### 3.7 Recovery authority and reconciliation
+
+Reconciliation is an orchestration responsibility for establishing operation state; the owning
+execution subsystem supplies the target-specific status/query mechanism.
+
+The authoritative recovery state machine is:
+
+```text
+UNKNOWN
+  ↓
+RECONCILIATION_REQUIRED
+  ↓
+RECONCILING
+  ├── CONFIRMED_COMPLETED → COMPLETED
+  ├── CONFIRMED_NOT_SUBMITTED → DISPATCHABLE
+  ├── CONFIRMED_FAILED → FAILED
+  └── UNRESOLVED → OPERATOR_OR_POLICY_DECISION
+```
+
+Repeated reconciliation failures use bounded retry policy and preserve the last known evidence.
+`UNRESOLVED` MUST NOT be silently converted into `FAILED`, `COMPLETED`, or a fresh dispatch.
+Only explicit target evidence, an authoritative owning subsystem result, or an authorized
+operator/policy decision may resolve it.
+
+### 3.8 Approval evidence and validity
+
+An `ApprovalRequest` binds to exactly one operation version, canonical payload hash, policy
+context, and resource scope. Approval is valid only when all bound values still match.
+
+Approval evidence MUST preserve:
+
+- request identity;
+- operation identity/version/hash;
+- policy/risk classification and policy version;
+- requested resource scope and cost estimate;
+- authenticated principal reference and authorization-context reference;
+- creation, expiry, and resolution timestamps;
+- final decision and decision rationale/reference.
+
+`MODIFIED` is never executable approval. It creates a new operation version/hash and requires
+new approval. Expired, superseded, rejected, or hash-mismatched approval MUST fail closed.
+Approval policy itself remains owned by `docs/APPROVALS.md` and the governing subsystem.
+
+### 3.9 Authoritative state-transition protocol
+
+Every session and operation transition MUST be validated as:
+
+```text
+(CurrentState, Event, Preconditions, Authority) → NextState
+```
+
+Illegal transitions MUST be rejected. A persisted transition records the prior state identity,
+event identity, resulting state, sequence number, actor/lease, and schema version. State may
+only advance through the authoritative transition function; nodes MUST NOT mutate lifecycle
+status through ad-hoc field assignment.
+
+The session and external-operation state machines are independent:
+
+```text
+SESSION:
 INITIALIZING → READY → PLANNING → AWAITING_APPROVAL → EXECUTING → EVALUATING
-                                                        ↓
-                                             COMPLETED / FAILED / PAUSED
-```
+                                                          ↓
+                                               COMPLETED / FAILED / PAUSED
 
-External operation lifecycle is independent:
-
-```text
+OPERATION:
 CREATED → VALIDATED → APPROVAL_REQUIRED → DISPATCHING → SUBMITTED → RUNNING
                                                                ↓
-                         ┌────────────── COMPLETED / FAILED / CANCELLED
-                         │
-                         └── UNKNOWN → RECONCILING → terminal state
+                    COMPLETED / FAILED / CANCELLED
+                                                               ↓
+                                      UNKNOWN → RECONCILING → terminal/decision
 ```
 
-`CANCEL_REQUESTED`, `UNKNOWN`, `RECONCILING`, and `LOST` are explicit non-success states and
-must never be silently mapped to `FAILED` or `COMPLETED`.
+`CANCEL_REQUESTED`, `UNKNOWN`, `RECONCILING`, `LOST`, and `RECOVERY_REQUIRED` are explicit
+non-success/recovery states and MUST never be silently mapped to success.
 
-### 3.8 Replay and recovery semantics
+### 3.10 Event ordering and concurrency
 
-The architecture does **not** claim deterministic re-execution of LLM calls, remote tools,
-wall-clock observations, or external systems. It guarantees:
+Execution events are append-only and ordered **per session**. Each session has exactly one
+authoritative sequence domain. Sequence allocation occurs transactionally with the state
+transition. Concurrent workers cannot independently allocate the same sequence because lease
+fencing serializes session mutation.
+
+Cross-session global ordering is explicitly not guaranteed. Wall-clock timestamps are audit
+metadata only and MUST NOT be used to infer authoritative event order.
+
+`step_count` is derived from authoritative event/transition records. `max_step_limit` counts
+orchestration node/super-step executions, not remote job duration. Retry attempts are counted
+according to the declared retry class. Exhaustion produces a defined recovery/terminal state.
+
+### 3.11 Replay and nondeterminism
+
+The architecture guarantees:
 
 1. deterministic deserialization of a valid checkpoint;
-2. deterministic state-transition validation;
-3. replay-safe handling of already-created operation identities;
-4. reconciliation before retrying unresolved external effects;
-5. immutable event ordering through sequence numbers.
+2. deterministic validation of state transitions;
+3. replay-safe handling of existing operation identities;
+4. reconciliation before retrying unresolved external effects; and
+5. immutable per-session event ordering.
 
-LLM responses and other nondeterministic external observations are recorded by reference or
-redacted metadata when needed for audit/reproduction; replay may reproduce the orchestration
-state without reproducing the original external response byte-for-byte.
+It does **not** claim deterministic byte-for-byte re-execution of LLM calls, remote tools,
+wall-clock observations, or external systems. Nondeterministic observations are retained by
+reference or redacted metadata sufficient for audit and reproduction policy.
 
-### 3.9 Event history and step limits
-
-Every node execution and operation transition emits an append-only `ExecutionEvent` with a
-monotonic sequence number. `step_count` is derived from the authoritative sequence rather than
-maintained as an independent mutable counter.
-
-`max_step_limit` counts orchestration node/super-step executions, not remote job duration.
-Retries consume steps unless explicitly classified as transport-level retry events. Exhaustion
-transitions the session to a defined terminal/recovery state and prevents an infinite loop.
-
-Inputs and outputs stored in event summaries are bounded, structured, and automatically
-redacted. Secrets, credentials, authorization tokens, raw prompts containing secrets, and large
-binary payloads MUST NOT enter persistent orchestration history.
-
-### 3.10 Retry semantics
+### 3.12 Retry semantics
 
 Retry policy is explicit by failure class:
 
 - deterministic validation/configuration errors: no automatic retry;
 - transient transport errors: bounded retry with exponential backoff and jitter;
-- effectful operation after ambiguous dispatch: reconcile first, never blind retry;
+- ambiguous effectful dispatch: reconcile first, never blind retry;
 - remote job failure: defer to the owning subsystem's job policy;
 - approval rejection/expiry: no automatic retry;
-- stale lease/fencing failure: abort the stale worker and reacquire through the session owner;
+- stale lease/fencing failure: terminate stale worker and reacquire through session ownership;
 - repeated failure beyond policy limit: terminal `FAILED` with structured diagnostics.
 
-Retry policy MUST be represented independently from operation identity so retrying an operation
-does not create a semantically different operation unless parameters change.
+Retrying an operation does not create a new semantic operation unless executable parameters change.
 
-### 3.11 Checkpoint durability, versioning, and corruption
+### 3.13 Checkpoint durability, migration, and corruption
 
-SQLite checkpoints use WAL where supported and a configured durability mode appropriate to the
-local reliability requirement. The architecture does not equate WAL with universal durability;
-filesystem/storage failures remain possible.
+SQLite checkpoints SHOULD use WAL where supported and an explicitly configured durability mode.
+WAL is not treated as universal durability. Filesystem/storage failures remain possible.
 
-Each checkpoint carries `checkpoint_schema_version`. Version migrations are explicit and
-backward compatibility is required for all supported retained checkpoints. Unsupported schema
-versions fail closed and require migration or operator intervention.
+Each checkpoint carries `checkpoint_schema_version`. Supported retained versions require explicit
+migration rules. Unsupported versions fail closed and require migration or operator intervention.
 
-Checkpoint integrity failures MUST NOT silently restore arbitrary data. Recovery attempts the
-latest valid checkpoint according to the checkpointer's integrity guarantees; otherwise the
-session becomes `RECOVERY_REQUIRED`/`FAILED` with diagnostic evidence preserved outside the
-corrupt record where possible.
+Integrity failures MUST NOT silently restore arbitrary data. Recovery selects the newest valid
+checkpoint supported by the integrity contract. If none is valid, the session enters
+`RECOVERY_REQUIRED` and preserves diagnostic evidence outside the corrupt record where possible.
 
-### 3.12 Safe retention and pruning
+### 3.14 Safe retention and pruning
 
-`prune_checkpoints()` MUST NOT delete checkpoints needed by:
+`prune_checkpoints()` MUST NOT delete checkpoints required by approvals, running/submitted/
+dispatching/unknown/lost/reconciling operations, unresolved recovery state, migration, or audit
+procedures. Pruning MUST be idempotent and MUST never modify `experiments.sqlite`.
 
-- `AWAITING_APPROVAL` or expired-but-unresolved approvals;
-- `RUNNING`, `SUBMITTED`, `DISPATCHING`, `UNKNOWN`, `LOST`, or `RECONCILING` operations;
-- sessions whose recovery lease/state has not reached a safe terminal condition;
-- migrations or audit procedures explicitly retaining a checkpoint.
-
-The default retention duration is a configurable policy, not an architectural invariant.
-Pruning MUST be idempotent and MUST never modify `experiments.sqlite`.
+Retention duration is configurable policy, not an architectural invariant.
 
 ## 4. Alternatives considered
 
@@ -286,9 +315,9 @@ Pruning MUST be idempotent and MUST never modify `experiments.sqlite`.
 |---|---|
 | MemorySaver only | Cannot survive process termination or persistent approvals. |
 | Single SQLite database | Blurs runtime checkpoint and permanent experiment-ledger lifecycles. |
-| Custom FSM/Celery/Airflow | Conflicts with the mandated LangGraph orchestration boundary and adds unnecessary infrastructure for the local agent. |
+| Custom FSM/Celery/Airflow | Conflicts with the mandated LangGraph orchestration boundary and adds unnecessary infrastructure for the current local agent. |
 | PostgreSQL/Redis as default | Enterprise concurrency is useful but violates the current local, repository-scoped zero-service baseline. It remains a future migration option. |
-| Blind retry after crash | Cannot distinguish dispatch success from checkpoint failure and can duplicate expensive/destructive external effects. |
+| Blind retry after crash | Cannot distinguish dispatch success from checkpoint failure and can duplicate expensive/destructive effects. |
 
 ## 5. Interface
 
@@ -360,14 +389,22 @@ class OperationId(BaseModel):
     value: str = Field(min_length=1)
 
 
+class OperationPayloadEnvelope(BaseModel):
+    model_config = ConfigDict(frozen=True)
+    schema_id: str = Field(min_length=1)
+    schema_version: int = Field(ge=1)
+    canonicalization_version: str = Field(min_length=1)
+    payload_hash: str = Field(min_length=1)
+    payload: object
+
+
 class OperationIntent(BaseModel):
     model_config = ConfigDict(frozen=True)
     operation_id: OperationId
     operation_version: int = Field(ge=1)
     operation_type: str = Field(min_length=1)
-    canonical_payload_hash: str = Field(min_length=1)
+    canonical_payload: OperationPayloadEnvelope
     target_identity: str = Field(min_length=1)
-    payload: Mapping[str, object]
     created_at: datetime
 
 
@@ -388,6 +425,7 @@ class ApprovalRequest(BaseModel):
     operation_id: OperationId
     operation_version: int = Field(ge=1)
     canonical_payload_hash: str
+    policy_version: str
     action_type: str
     description: str
     risk_level: ApprovalRiskLevel
@@ -406,9 +444,10 @@ class ApprovalResponse(BaseModel):
     canonical_payload_hash: str
     action: ApprovalAction
     feedback: str | None = None
-    modified_parameters: Mapping[str, object] | None = None
+    modified_parameters: object | None = None
     resolved_at: datetime
     approval_principal_ref: str
+    authorization_context_ref: str | None = None
 
 
 class ExternalReference(BaseModel):
@@ -512,63 +551,50 @@ def prune_checkpoints(
 ) -> int: ...
 ```
 
-## 6. Consequences
+## 6. Architectural invariants
 
-- Durable orchestration survives process termination while remaining separate from permanent
-  experiment history.
-- External side effects have explicit identity, approval binding, and crash reconciliation.
+1. **Persistence separation:** runtime checkpoints and permanent experiment records use separate stores and lifecycles.
+2. **State immutability:** authoritative persisted records are immutable and schema-versioned.
+3. **Session ownership:** only the current lease/fencing epoch may mutate a session.
+4. **Canonical identity:** executable operation identity is stable, deterministic, and hash-versioned.
+5. **Typed payloads:** authoritative operation payloads are schema envelopes, never unconstrained mappings.
+6. **Approval binding:** approval is valid only for the exact operation version/hash/policy context it authorizes.
+7. **No false exactly-once:** orchestration never claims guarantees unsupported by the external target.
+8. **Reconciliation first:** ambiguous external effects are reconciled before retry or redispatch.
+9. **Explicit unknown:** unresolved external state remains explicit and cannot be silently treated as success/failure.
+10. **Transition authority:** lifecycle changes occur only through validated state transitions.
+11. **Per-session ordering:** event sequence is authoritative per session; cross-session order is not implied.
+12. **Replay honesty:** state recovery is deterministic where specified; external/LLM side effects are not claimed deterministic.
+13. **Redaction:** secrets, credentials, raw sensitive prompts, and large binary payloads never enter persistent history.
+14. **Bounded execution:** step/retry policies prevent unbounded orchestration loops.
+15. **Safe retention:** pruning cannot remove state required for approval, execution, reconciliation, migration, or audit.
+16. **Boundary integrity:** ADR-0003 does not absorb provider, tool, dataset, training, evaluation, deployment, or monitoring ownership.
+
+## 7. Acceptance criteria
+
+The eventual runtime implementation MUST demonstrate at least:
+
+- identical canonical operation payloads generate identical hashes across repeated processes;
+- semantically different executable payloads cannot collide except at cryptographic-hash failure assumptions;
+- stale lease/fencing mutations are rejected;
+- an ambiguous dispatch enters reconciliation and cannot blindly redispatch;
+- unresolved reconciliation reaches an explicit operator/policy decision state;
+- modified approval requests invalidate previous approvals;
+- illegal lifecycle transitions are rejected;
+- per-session event ordering remains monotonic under concurrent worker attempts;
+- checkpoint schema migration rejects unsupported versions safely;
+- pruning never removes a checkpoint required by an active or recoverable operation;
+- persistent history is bounded and redacted;
+- no runtime dependency on a specific future checkpointer is required by the architectural contract.
+
+## 8. Consequences
+
+- Durable orchestration survives process termination while remaining separate from permanent experiment history.
+- External effects have explicit identity, approval binding, and crash reconciliation semantics.
 - Stale workers cannot mutate sessions after lease ownership changes.
-- Approval modification cannot accidentally reuse authorization for a different operation.
-- Replay semantics are honest about nondeterministic external systems and LLM responses.
-- State is versioned and bounded, making future checkpointer/backend migration safer.
-- The additional operation/lease/event machinery increases implementation complexity, but this
-  complexity is necessary at the orchestration boundary for expensive, remote, and destructive
-  operations.
+- Future execution targets may provide stronger idempotency/reconciliation without changing the orchestration contract.
+- The architecture deliberately imposes more metadata and validation than an in-memory workflow; this cost is required for reproducibility, auditability, and safe recovery.
 
-## 7. Complete Acceptance Criteria
+## 9. Revisit triggers
 
-1. **State schema:** persisted state validates against a versioned immutable schema; arbitrary
-   `Any` and mutable authoritative records are rejected.
-2. **Lifecycle:** invalid lifecycle and operation transitions are rejected explicitly.
-3. **Persistence:** checkpoints survive process termination and preserve schema version.
-4. **Approval:** approval requires exact operation/version/hash matching; modification creates
-   a new version and requires re-approval; expired approvals fail closed.
-5. **Idempotency:** replay of a checkpoint containing an existing `OperationId` does not blindly
-   dispatch the same external effect again.
-6. **Crash recovery:** a crash between external dispatch and checkpoint persistence triggers
-   reconciliation before retry; unresolved status becomes `UNKNOWN` rather than guessed success.
-7. **Lease fencing:** a stale execution owner cannot commit state after lease loss.
-8. **Concurrency:** one active owner exists per session while independent sessions remain
-   concurrently executable.
-9. **Event history:** sequence numbers are monotonic and execution history is append-only.
-10. **Redaction:** secrets and oversized payloads cannot enter persistent execution history.
-11. **Retry:** transient failures retry within bounded policy; ambiguous effectful failures
-    reconcile before retry.
-12. **Checkpoint integrity:** unsupported schema versions and corruption fail closed with
-    recovery diagnostics.
-13. **Retention:** non-terminal/recoverable sessions are never pruned; pruning is idempotent
-    and isolated from ADR-0004's experiment ledger.
-14. **Boundary compliance:** orchestration imports neither provider SDKs nor domain execution
-    implementations and delegates executable work to ADR-0005/subsystems.
-15. **Portability:** orchestration contracts remain valid if the SQLite checkpointer is later
-    replaced by a server-side backend.
-
-## 8. Revisit triggers
-
-Reopen this decision if:
-
-1. shared multi-user/cloud orchestration becomes a baseline requirement;
-2. checkpoint volume exceeds the practical local SQLite envelope;
-3. the external execution ecosystem cannot provide sufficient idempotency/reconciliation and a
-   durable operation broker becomes necessary;
-4. LangGraph changes break the required state/checkpoint/interrupt contracts;
-5. regulatory or security requirements require tamper-evident external audit storage;
-6. orchestration becomes distributed across independent agent processes and requires a durable
-   coordinator beyond local session leases.
-
-## 9. Amendment freeze rule
-
-This amendment is **not frozen** until the PM explicitly approves the concrete contract changes.
-Once approved, the amendment must be merged as a separate architectural change, CI-validated,
-and recorded in the decision ledger. Phase 2 runtime implementation remains paused until the
-amended ADR is frozen.
+Revisit this ADR only if the platform changes its authoritative orchestration engine, requires a materially different persistence/concurrency model, adopts a distributed execution architecture that invalidates the local-session ownership assumptions, or introduces a target class whose effect semantics cannot be represented by the operation/reconciliation contract. A larger number of providers, tools, GPUs, or workflows alone is not grounds for weakening these invariants.
