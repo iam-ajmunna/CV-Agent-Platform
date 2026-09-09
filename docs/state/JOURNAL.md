@@ -479,3 +479,22 @@ isolation) and Q3 (cross-process restart survival) cleanly without external netw
 **Learned:** Explicit terminal states and parent pointers in hypothesis tracking prevent reasoning engines from getting trapped in circular diagnostic loops or leaving abandoned investigations without an audit trail.
 
 **Left open:** Proceeding to ADR-0009 freeze review.
+
+---
+
+## 2026-09-10 — ADR-0009 Freeze Synchronization (D-042, PR #27)
+
+**Did:** Hardened and froze ADR-0009 (`docs/architecture/adr/ADR-0009-dataset-subsystem.md`) on `main` following review and squash-merge of PR #27. Recorded decision `D-042` in `DECISIONS.md`. Updated `STATUS.md` and `AGENT_HANDOFF.md`. Changes made:
+1. Updated amendment status to `Accepted — Frozen`.
+2. Documented canonical identifier syntax rules in §4 for `DatasetId`, `DatasetVersion`, `ContentHash`, `AnnotationVersion`, and `GuidelineRef`.
+3. Added `CALIBRATION = "calibration"` to `SplitName` and `calibration_hashes` to `SplitMembership` to support leakage-free INT8 PTQ quantization without compromising test splits per ADR-0012.
+4. Documented geometric validity and non-negative class ID invariants for annotation primitives in `AnnotationManifest`.
+5. Added Section 6 (`Implementation Acceptance Criteria`) covering manifest round-trips, deterministic retrieval, disjoint partitions, mandatory leakage gate, annotation decoupling, storage protocol independence, and approval gate integration.
+
+**Why:** `[P§7]`, `[P§25]`, `[P§26]`, `[P§27]`, `[P§29.5]`, `[P§34]` — establishes authoritative manifest-first dataset management, cryptographic content-addressed payload identity, decoupled annotation versioning, and rigorous leakage audit guarantees.
+
+**Broke:** Nothing broken. 99 pytest tests pass, ruff clean, mypy clean.
+
+**Learned:** Codifying a dedicated calibration split directly in dataset split membership prevents downstream optimization pipelines (ADR-0012) from inadvertently sampling frames from evaluation test splits for INT8 PTQ histograms.
+
+**Left open:** Proceeding to ADR-0010 freeze review.
