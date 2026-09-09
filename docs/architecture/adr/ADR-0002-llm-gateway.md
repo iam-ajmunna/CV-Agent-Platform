@@ -1,6 +1,6 @@
 # ADR-0002: LLM Gateway and Provider Abstraction
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-09-01
 - **Amended:** 2026-09-09
 - **Layer:** cross-cutting
