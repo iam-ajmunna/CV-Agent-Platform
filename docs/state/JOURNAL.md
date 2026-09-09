@@ -419,3 +419,24 @@ isolation) and Q3 (cross-process restart survival) cleanly without external netw
 **Learned:** Enforcing immutable mappings across tool descriptors, invocations, and results prevents tool execution adapters from mutating operational state while maintaining transport independence.
 
 **Left open:** Proceeding to ADR-0006 freeze review.
+
+---
+
+## 2026-09-10 — ADR-0006 Freeze Synchronization (D-039, PR #24)
+
+**Did:** Hardened and froze ADR-0006 (`docs/architecture/adr/ADR-0006-knowledge-and-rag.md`) on `main` following review and squash-merge of PR #24. Recorded decision `D-039` in `DECISIONS.md`. Updated `STATUS.md` and `AGENT_HANDOFF.md`. Changes made:
+1. Updated amendment status to `Accepted — Frozen`.
+2. Added Configurable Horizons Invariant in §3.5 enabling explicit workspace configuration overrides via `.cv_agent/config/knowledge.yaml`.
+3. Added Embedding Model Versioning & Re-Indexing Invariant in §3.6 prohibiting mathematical comparison across disparate embedding models or vector dimensions and mandating partition invalidation/re-indexing on model change.
+4. Documented canonical identifier syntax rule in §4 (`DocumentId` and `ChunkId` conforming to `[a-z0-9_.-]+(/[a-z0-9_.-]+)*` per ADR-0001 §3.1).
+5. Enforced `Mapping[str, Any]` in `KnowledgeChunk.metadata` to guarantee immutability.
+6. Added `embedding_model_id: str = ""` to `ScoredCitation`.
+7. Added acceptance criterion 10 for embedding model compatibility and re-indexing.
+
+**Why:** `[P§16]`, `[P§17]`, `[P§18]`, `[P§19]`, `[P§20]`, `[P§29.3]`, `[P§29.7]`, `[P§34]` — establishes rigorous knowledge provenance, configurable topic freshness horizons, mathematically valid hybrid vector scoring, and strict quarantine against prompt injection.
+
+**Broke:** Nothing broken. 99 pytest tests pass, ruff clean, mypy clean.
+
+**Learned:** Tracking embedding model identity directly in index partitions and retrieved citations prevents subtle cosine similarity corruption when underlying embedding models evolve.
+
+**Left open:** Proceeding to ADR-0007 freeze review.

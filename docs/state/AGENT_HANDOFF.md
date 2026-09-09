@@ -19,8 +19,8 @@
 | ADR-0003 — Orchestration state | **Accepted — Frozen** |
 | ADR-0004 — Project memory / experiment ledger | **Accepted — Frozen** |
 | ADR-0005 — Tools / MCP | **Accepted — Frozen** |
-| ADR-0006 — Knowledge / RAG | **Accepted — In Freeze Review** |
-| ADR-0007 — Skills | **Accepted** |
+| ADR-0006 — Knowledge / RAG | **Accepted — Frozen** |
+| ADR-0007 — Skills | **Accepted — In Freeze Review** |
 | ADR-0008 — Reasoning | **Accepted** |
 | ADR-0009 — Dataset subsystem | **Accepted** |
 | ADR-0010 — Training | **Accepted** |
@@ -59,6 +59,7 @@
 - **D-036:** ADR-0002 LLM Gateway is frozen; typed `frozenset[FailureCategory]` in `FallbackPolicy` §4.3, `ImageBlock` `__post_init__` validation in §6, recursion-free `ToolContentBlock` in `ToolResultBlock.content` §6, request metadata sensitive key rejection in §7, streaming `UsageEvent` before `StreamDoneEvent` ordering in §10, `Decimal` monetary amount in `CostRecord` §12, and explicit model-resolution gateway responsibility in §16.
 - **D-037:** ADR-0004 Project Memory and Experiment Ledger Persistence is frozen; explicit YAML schema for `hardware_constraints.yaml` in §2.3 mapping to `HardwareConstraints`, immutable `Mapping` and `tuple` collection typing in memory and experiment interfaces in §5, and reconciliation of resolved dependencies (Q5 via D-022, Q10 via D-028/ADR-0009 binding to `DatasetManifest`) in §8.
 - **D-038:** ADR-0005 Tools and MCP Execution Boundary is frozen; updated status to 'Accepted — Frozen'; documented identifier syntax rule conforming to `[a-z0-9_.-]+(/[a-z0-9_.-]+)*` per ADR-0001 §3.1 for TargetId, ExecutionId, MCPServerId, and ToolId; added `heartbeat_timeout_seconds` to `ActiveJobHandoff`; enforced `Mapping[str, Any]` across dataclasses to ensure immutability and prevent layer leakage.
+- **D-039:** ADR-0006 Knowledge & RAG Subsystem is frozen; updated status to 'Accepted — Frozen'; added Configurable Horizons Invariant in §3.5 enabling explicit workspace overrides; added Embedding Model Versioning & Re-Indexing Invariant in §3.6 prohibiting cross-model vector distance comparison; documented identifier syntax rule conforming to `[a-z0-9_.-]+(/[a-z0-9_.-]+)*` per ADR-0001 §3.1 for DocumentId and ChunkId; enforced `Mapping[str, Any]` in KnowledgeChunk.metadata; added `embedding_model_id` to ScoredCitation; and added acceptance criterion 10 for embedding model compatibility.
 
 ## Blocking questions
 
