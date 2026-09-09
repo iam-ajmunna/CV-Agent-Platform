@@ -459,3 +459,23 @@ isolation) and Q3 (cross-process restart survival) cleanly without external netw
 **Learned:** Bounded execution timeouts and explicit deprecation pointers in skill descriptors give orchestration predictable failure semantics and clean migration paths when procedural recipes are superseded.
 
 **Left open:** Proceeding to ADR-0008 freeze review.
+
+---
+
+## 2026-09-10 — ADR-0008 Freeze Synchronization (D-041, PR #26)
+
+**Did:** Hardened and froze ADR-0008 (`docs/architecture/adr/ADR-0008-reasoning-subsystem.md`) on `main` following review and squash-merge of PR #26. Recorded decision `D-041` in `DECISIONS.md`. Updated `STATUS.md` and `AGENT_HANDOFF.md`. Changes made:
+1. Updated amendment status to `Accepted — Frozen`.
+2. Documented canonical identifier syntax rule in §4 (`HypothesisId` conforming to `[a-z0-9_.-]+(/[a-z0-9_.-]+)*` per ADR-0001 §3.1).
+3. Hardened `ReasoningChain` and `DiagnosticEvaluation` schemas with immutable `Mapping[str, Any]` and `tuple` collection fields.
+4. Added hypothesis lifecycle states (`ABANDONED`, `INCONCLUSIVE`) to `HypothesisStatus` Literal to guarantee explicit terminal resolution and prevent orphaned hypothesis branches.
+5. Added `parent_hypothesis_id: HypothesisId | None = None` to `HypothesisRecord` to track causal lineage of revised hypotheses.
+6. Added acceptance criterion 11 for terminal hypothesis resolution and lineage tracking.
+
+**Why:** `[P§4]`, `[P§5]`, `[P§7]`, `[P§12]`, `[P§19]`, `[P§20]`, `[P§21]`, `[P§29.1]`, `[P§29.2]`, `[P§29.3]`, `[P§29.10]`, `[P§34]` — establishes cognitive judgment decoupled from execution, provider-isolated reasoning, grounded evidence validation, and explicit hypothesis lifecycle semantics.
+
+**Broke:** Nothing broken. 99 pytest tests pass, ruff clean, mypy clean.
+
+**Learned:** Explicit terminal states and parent pointers in hypothesis tracking prevent reasoning engines from getting trapped in circular diagnostic loops or leaving abandoned investigations without an audit trail.
+
+**Left open:** Proceeding to ADR-0009 freeze review.

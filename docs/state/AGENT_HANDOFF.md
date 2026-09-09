@@ -21,8 +21,8 @@
 | ADR-0005 — Tools / MCP | **Accepted — Frozen** |
 | ADR-0006 — Knowledge / RAG | **Accepted — Frozen** |
 | ADR-0007 — Skills | **Accepted — Frozen** |
-| ADR-0008 — Reasoning | **Accepted — In Freeze Review** |
-| ADR-0009 — Dataset subsystem | **Accepted** |
+| ADR-0008 — Reasoning | **Accepted — Frozen** |
+| ADR-0009 — Dataset subsystem | **Accepted — In Freeze Review** |
 | ADR-0010 — Training | **Accepted** |
 | ADR-0011 — Evaluation | **Accepted** |
 | ADR-0012 — Optimization / deployment | **Accepted** |
@@ -61,6 +61,7 @@
 - **D-038:** ADR-0005 Tools and MCP Execution Boundary is frozen; updated status to 'Accepted — Frozen'; documented identifier syntax rule conforming to `[a-z0-9_.-]+(/[a-z0-9_.-]+)*` per ADR-0001 §3.1 for TargetId, ExecutionId, MCPServerId, and ToolId; added `heartbeat_timeout_seconds` to `ActiveJobHandoff`; enforced `Mapping[str, Any]` across dataclasses to ensure immutability and prevent layer leakage.
 - **D-039:** ADR-0006 Knowledge & RAG Subsystem is frozen; updated status to 'Accepted — Frozen'; added Configurable Horizons Invariant in §3.5 enabling explicit workspace overrides; added Embedding Model Versioning & Re-Indexing Invariant in §3.6 prohibiting cross-model vector distance comparison; documented identifier syntax rule conforming to `[a-z0-9_.-]+(/[a-z0-9_.-]+)*` per ADR-0001 §3.1 for DocumentId and ChunkId; enforced `Mapping[str, Any]` in KnowledgeChunk.metadata; added `embedding_model_id` to ScoredCitation; and added acceptance criterion 10 for embedding model compatibility.
 - **D-040:** ADR-0007 Skills Architecture & NVIDIA Capability Discovery is frozen; updated status to 'Accepted — Frozen'; documented identifier syntax rule conforming to `[a-z0-9_.-]+(/[a-z0-9_.-]+)*` per ADR-0001 §3.1 for SkillId; added `timeout_seconds` and `deprecated_in_favor_of` to `SkillDescriptor` in §3.2 and §4; enforced `Mapping[str, Any]` across parameter schema, metadata, and executor invocation; and added acceptance criterion 10 for bounded execution and deprecation lineage.
+- **D-041:** ADR-0008 Reasoning Subsystem Architecture is frozen; updated status to 'Accepted — Frozen'; documented identifier syntax rule conforming to `[a-z0-9_.-]+(/[a-z0-9_.-]+)*` per ADR-0001 §3.1 for HypothesisId; hardened `ReasoningChain` and `DiagnosticEvaluation` with immutable `Mapping[str, Any]` and `tuple` collection fields; added hypothesis lifecycle states (`ABANDONED`, `INCONCLUSIVE`) to prevent orphaned hypotheses; added `parent_hypothesis_id` for lineage tracking; and added acceptance criterion 11 for terminal hypothesis resolution.
 
 ## Blocking questions
 
