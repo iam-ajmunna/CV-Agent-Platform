@@ -11,34 +11,32 @@ The repository operates on a single-trunk development flow (`main` + short-lived
 branches) under the sole approval authority of the project owner as Official PM.
 `dev-munna` is permanently retired (D-027).
 
-The frozen project definition is `docs/PROJECT.md`. ADR-0001 through ADR-0013 are
-formally accepted. Decisions Q1–Q5, Q7–Q8, Q10 (D-028), and D-022 through D-033 are
-recorded. The monitoring and active learning architecture is settled: tri-dimensional
-telemetry streaming (Model, System, Data per `[P§28]`), baseline drift detection
-against ADR-0011 benchmarks (KS, PSI, Wasserstein, Chi-Square), algorithmic active
-learning candidate selection, cryptographic frame provenance, zero autonomous retraining
-prohibiting unsupervised feedback loops, advisory retraining trigger proposals to
-ADR-0008 Reasoning, and candidate batch handoffs to ADR-0009 Dataset manifests.
+ADR-0001 through ADR-0013 remain formally accepted. ADR-0002 has been amended and
+re-frozen with canonical multimodal content, capability-aware model profiles, explicit
+routing/retry/fallback semantics, idempotency-safe recovery, typed streaming, structured
+outputs, provider/data-governance constraints, reproducibility metadata, and provider
+adapter isolation (D-034).
 
-The complete Phase 1 architectural contract chain (ADR-0001 → ADR-0013) is accepted.
+The complete Phase 1 architectural contract chain remains accepted. Phase 2 is paused
+while the remaining ADRs are reviewed and hardened sequentially by the Official PM.
 
 ## In flight
 
 | Item | Issue | State |
 |---|---|---|
-| None | — | — |
+| ADR review | #14 | ADR-0002 amendment accepted; proceed to next ADR review |
 
 ## Next 3 actions
 
-1. Await Official PM directive concluding Phase 1 architecture and establishing Phase 2 implementation sequencing.
-2. Formulate Phase 2 implementation plan for runtime contracts and substrate.
-3. Open first implementation issue upon PM gate authorization.
+1. Deep-review the next ADR against the full Phase 1 architecture and future technology evolution.
+2. Freeze only after all material gaps are resolved and explicitly approved by the Official PM.
+3. Keep Phase 2 runtime implementation paused until the full ADR review sequence is complete.
 
 ## Blockers
 
-- Runtime implementation is gated on explicit Official PM authorization to begin Phase 2.
+- Phase 2 runtime implementation is intentionally paused pending completion of the ADR review/freeze program.
 
 ## Do not start yet
 
 Runtime implementation in `cv_agent/`, external compute execution, or substrate coding.
-These depend on explicit PM gate authorization.
+These remain gated until the Official PM explicitly concludes the ADR review program.
