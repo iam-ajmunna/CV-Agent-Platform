@@ -576,3 +576,27 @@ isolation) and Q3 (cross-process restart survival) cleanly without external netw
 **Learned:** Enforcing `target_dataset_id: DatasetId` on candidate batches and `evaluation_id: EvaluationId` on baseline bindings connects the online monitoring loop back to the offline dataset and evaluation ledgers without creating cyclic subsystem dependencies.
 
 **Left open:** Phase 1 architectural freeze program complete. All 13 ADRs (ADR-0001 through ADR-0013) are frozen on `main`. Proceeding to final system-level dependency audit before Phase 2 milestone scheduling.
+
+---
+
+## 2026-09-10 — Cross-ADR Architectural Hardening Pass (D-047, PR #32)
+
+**Did:** Executed the second validation pass and final cross-ADR hardening across all 13 ADRs following deep review. Merged PR #32 to `main` with passing CI on Python 3.10–3.13. Recorded decision `D-047` in `DECISIONS.md`. Updated `STATUS.md`, `AGENT_HANDOFF.md`, and review artifacts. Remediations applied:
+1. **ADR-0002 (§3.2):** Replaced forward-reference string with typed `frozenset[FailureCategory]` Literal for strict type-checking of fallback policies.
+2. **ADR-0003 (§3.1, §5):** Enforced Invariant #17 defining `EVALUATING` as terminal-adjacent (`COMPLETED`, `FAILED`, `PAUSED` only), forbidding illegal loops back to `EXECUTING`. Updated `Last Reviewed: 2026-09-10`.
+3. **ADR-0004 (§3.1):** Formalized `{operation_id}:{request_id}` dereference format for `approval_ref` and added Invariant #5 mandating `PRAGMA foreign_keys = ON` on all SQLite connections.
+4. **ADR-0005 (§3.2, §4):** Added `expires_at: str | None` to `ActiveJobHandoff` and mandated remote credential resolution via `TargetId` secrets vault.
+5. **ADR-0009 (§6):** Elevated annotation bounding box and polygon validity checks into formal Acceptance Criterion #8 (`Annotation Geometry Validation Gate`). Added `Last Reviewed: 2026-09-10`.
+6. **ADR-0010 (§4):** Bound `CheckpointManifest.weights_uri` to valid URI schemes (`file://`, `s3://`, `gs://`, `minio://`) via regex validation. Added `Last Reviewed: 2026-09-10`.
+7. **ADR-0011 (§3.12, §4):** Reconciled `baseline_experiment_id` optionality (restricted `None` solely to root baselines) and mandated rejection of unresolved `"default_evaluator"` compute target. Added `Last Reviewed: 2026-09-10`.
+8. **ADR-0012 (§3.7, §4):** Bound `OptimizationPlan` to `verification_dataset_binding: EvaluationDatasetBinding` and formalized first-deployment rollback failure escalation to `OPERATOR_REQUIRED`. Added `Last Reviewed: 2026-09-10`.
+9. **ADR-0013 (§4):** Expanded `BaselineReferenceBinding` to multi-percentile metrics (`fps_p50`, `fps_p05`, `latency_p95`, `latency_p99`), decoupled drift thresholds (`statistic_threshold` vs `p_value_threshold`), and added `expires_at` to `CandidateSample`. Added `Last Reviewed: 2026-09-10`.
+
+**Why:** `[P§6]`, `[P§7]`, `[P§8]`, `[P§9]`, `[P§10]`, `[P§11]`, `[P§12]`, `[P§13]`, `[P§14]`, `[P§15]`, `[P§16]`, `[P§20]`, `[P§21]`, `[P§22]`, `[P§24]`, `[P§25]`, `[P§26]`, `[P§27]`, `[P§28]`, `[P§29.1]`–`[P§29.10]`, `[P§34]` — resolves all 15 identified architectural contract defects, cross-ADR contradictions, data-integrity risks, and unrecoverable states, completing Phase 1 architecture with zero remaining critical or important defects.
+
+**Broke:** Nothing broken. 99 pytest tests pass, ruff clean, mypy clean across matrix Python 3.10, 3.11, 3.12, 3.13.
+
+**Learned:** Rigorous second-pass triaging against strict architectural criteria (contract defects vs implementation details) prevents specification bloat while ensuring rock-solid boundary interfaces before runtime substrate coding begins.
+
+**Left open:** Phase 1 architecture is 100% frozen, hardened, and verified. Ready for Phase 2 issue hierarchy and milestone scheduling under Official PM approval.
+

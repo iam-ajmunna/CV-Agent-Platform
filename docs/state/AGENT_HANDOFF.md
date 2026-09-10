@@ -5,10 +5,10 @@
 
 ## Current state
 
-- **Phase:** 1 — Architecture & ADR Specification
+- **Phase:** 1 Complete / Transition to Phase 2
 - **Integration baseline:** `main`
 - **Work pattern:** `main` ← short-lived work branches
-- **Current architecture gate:** ADR-0001 through ADR-0013 accepted; ADR-0002 amended and re-frozen. Phase 2 remains paused pending sequential ADR review.
+- **Current architecture gate:** ADR-0001 through ADR-0013 accepted, hardened, and 100% frozen (D-047, PR #32). Phase 1 program is fully settled. Phase 2 runtime implementation is ready for milestone scheduling.
 
 ## ADR status
 
@@ -67,10 +67,11 @@
 - **D-044:** ADR-0011 Evaluation Subsystem Architecture is frozen; updated status to 'Accepted — Frozen'; documented canonical identifier syntax rules in §4 for EvaluationId, MetricId, and BenchmarkId; enforced immutable `tuple` types across collection fields in MetricResult, BenchmarkConfiguration, ErrorAnalysisRecord, EvaluationPlan, and EvaluationResult; bound EvaluationExecution directly to ADR-0005 execution tokens via `execution_id: ExecutionId | None` and `target_id: TargetId | None`, and updated `EvaluationRunner.execute` with optional `target_id`; and added Section 7 Implementation Acceptance Criteria covering plan immutability, co-equal quality and systems benchmarking, mandatory baseline comparison, structured error analysis, hardware benchmark guardrails, execution token traceability, and immutable result handoff to ADR-0004.
 - **D-045:** ADR-0012 Optimization & Deployment Subsystem Architecture is frozen; updated status to 'Accepted — Frozen'; documented canonical identifier syntax rules in §4 for OptimizationPlanId, OptimizedArtifactId, and DeploymentId; enforced immutable `tuple` types for `shape_profiles` in OptimizationPlan and OptimizedModelArtifact; bound `CalibrationDatasetBinding` to default `split_name = "calibration"` per ADR-0009 Invariant 13 to prevent test-split leakage; bound OptimizedModelArtifact and DeploymentRecord directly to ADR-0005 execution tokens via `execution_id: ExecutionId | None` and `target_id: TargetId | None`, and updated `ModelOptimizer.compile` and `DeploymentManager.stage` with optional `target_id`; and added Section 7 Implementation Acceptance Criteria covering plan immutability, calibration dataset leakage gate, dynamic shape bounds, transformation lineage DAG, post-optimization verification gate, target-locked compilation, production deployment human approval, automated readiness probe gate, zero-downtime rollback guarantee, execution token traceability, and persistence protocol independence.
 - **D-046:** ADR-0013 Monitoring and Active Learning Subsystem Architecture is frozen; updated status to 'Accepted — Frozen'; documented canonical identifier syntax rules in §4 for DriftAnalysisId, CandidateBatchId, CandidateSampleId, AlertId, TriggerProposalId, and SnapshotId; enforced immutable `tuple` and `Mapping` collection types across all telemetry, drift analysis, candidate curation, and trigger proposal models; bound `BaselineReferenceBinding` to ADR-0011 `evaluation_id` and ADR-0009 `ContentHash` manifests; bound `ActiveLearningCandidateBatch` to `target_dataset_id: DatasetId`; verified mandatory `requires_human_approval = True` and added `approval_id: ApprovalId | None` link; and added Section 14 Implementation Acceptance Criteria covering telemetry immutability, mandatory baseline comparison gate, statistical drift algorithmic verification, zero autonomous retraining invariant, cryptographic frame content hashing, active learning buffer bounds, candidate batch handoff to ADR-0009, structured advisory proposal formulation, persistence protocol independence, and transport agnosticism.
+- **D-047:** Final cross-ADR architectural hardening pass across ADR-0002 through ADR-0013 merged via PR #32: resolved 15 confirmed architectural contract defects, cross-ADR contradictions, data-integrity risks, and unrecoverable states from the second validation pass; all 13 ADRs confirmed 100% frozen, hardened, and verified with passing CI test suite (99 passed, matrix Python 3.10–3.13).
 
 ## Blocking questions
 
-Q1–Q5, Q7–Q8, Q10 are resolved. All 13 ADRs (ADR-0001 through ADR-0013) are formally frozen. The Phase 1 architectural contract is complete and verified. Phase 2 runtime implementation is ready for scheduling and execution under explicit Official PM gate approval.
+Q1–Q5, Q7–Q8, Q10 are resolved. All 13 ADRs (ADR-0001 through ADR-0013) are formally frozen and hardened. The Phase 1 architectural contract is complete and verified with zero open architectural defects. Phase 2 runtime implementation is ready for scheduling and execution under explicit Official PM gate approval.
 
 ## Next session
 
