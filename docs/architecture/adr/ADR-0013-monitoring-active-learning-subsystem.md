@@ -1,7 +1,7 @@
 # ADR-0013: Monitoring and Active Learning Subsystem Architecture
 
-- **Status:** Accepted
-- **Date:** 2026-09-09
+- **Status:** Accepted — Frozen
+- **Date:** 2026-09-09 (Frozen: 2026-09-10)
 - **Layer:** monitoring / active_learning
 - **Canon:** `[P§8]`, `[P§9]`, `[P§16]`, `[P§21]`, `[P§22]`, `[P§24]`, `[P§25]`, `[P§26]`, `[P§27]`, `[P§28]`, `[P§29.6]`, `[P§29.7]`, `[P§34]`
 - **Supersedes / Superseded by:** —
@@ -104,8 +104,21 @@ Per `[P§28]`, monitoring a deployed computer vision system requires concurrent 
 ```python
 from datetime import datetime
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Mapping, NewType, Protocol, Sequence, runtime_checkable
 from pydantic import BaseModel, ConfigDict, Field
+
+from cv_agent.dataset.types import ContentHash, DatasetId, DatasetVersion
+from cv_agent.evaluation.types import EvaluationId
+from cv_agent.optimization.types import DeploymentId
+from cv_agent.training.types import ApprovalId
+
+# Canonical identifier format conforming to [a-z0-9_.-]+(/[a-z0-9_.-]+)* per ADR-0001 §3.1.
+DriftAnalysisId = NewType("DriftAnalysisId", str)
+CandidateBatchId = NewType("CandidateBatchId", str)
+CandidateSampleId = NewType("CandidateSampleId", str)
+AlertId = NewType("AlertId", str)
+TriggerProposalId = NewType("TriggerProposalId", str)
+SnapshotId = NewType("SnapshotId", str)
 
 
 class TelemetryDimension(str, Enum):
@@ -121,7 +134,7 @@ class ModelTelemetryRecord(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    deployment_id: str = Field(
+    deployment_id: DeploymentId = Field(
         ..., description="ID of the deployed runtime (ADR-0012)."
     )
     window_start: datetime = Field(
@@ -138,7 +151,7 @@ class ModelTelemetryRecord(BaseModel):
     )
 
     # Confidence distribution
-    confidence_histogram: Dict[str, int] = Field(
+    confidence_histogram: Mapping[str, int] = Field(
         ...,
         description="Binned prediction confidence histogram (e.g. '0.0-0.1': 12, '0.9-1.0': 850).",
     )
@@ -154,10 +167,10 @@ class ModelTelemetryRecord(BaseModel):
     )
 
     # Class distribution and detection rates
-    class_counts: Dict[str, int] = Field(
+    class_counts: Mapping[str, int] = Field(
         ..., description="Total detections per predicted class."
     )
-    class_proportions: Dict[str, float] = Field(
+    class_proportions: Mapping[str, float] = Field(
         ...,
         description="Proportion of total detections per class (sums to 1.0).",
     )
@@ -177,15 +190,15 @@ class ModelTelemetryRecord(BaseModel):
         ge=0.0,
         description="Mean Shannon entropy across output probability distributions.",
     )
-    out_of_distribution_score_mean: Optional[float] = Field(
+    out_of_distribution_score_mean: float | None = Field(
         None,
         ge=0.0,
         description="Mean OOD/reconstruction error score if an OOD detector is active.",
     )
 
     # Optional feedback metrics (when operator ground-truth or human feedback exists)
-    empirical_false_positive_count: Optional[int] = Field(None, ge=0)
-    empirical_false_negative_count: Optional[int] = Field(None, ge=0)
+    empirical_false_positive_count: int | None = Field(None, ge=0)
+    empirical_false_negative_count: int | None = Field(None, ge=0)
 
 
 class SystemTelemetryRecord(BaseModel):
@@ -193,7 +206,7 @@ class SystemTelemetryRecord(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    deployment_id: str = Field(
+    deployment_id: DeploymentId = Field(
         ..., description="ID of the deployed runtime (ADR-0012)."
     )
     timestamp: datetime = Field(
@@ -301,8 +314,8 @@ class UnifiedTelemetrySnapshot(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    snapshot_id: str = Field(..., description="Unique snapshot identifier.")
-    deployment_id: str = Field(..., description="Deployment runtime ID.")
+    snapshot_id: SnapshotId = Field(..., description="Unique snapshot identifier.")
+    deployment_id: DeploymentId = Field(..., description="Deployment runtime ID.")
     stream_id: str = Field(..., description="Stream identifier.")
     timestamp: datetime = Field(..., description="Synchronization timestamp (UTC).")
     model_telemetry: ModelTelemetryRecord
@@ -351,15 +364,15 @@ class BaselineReferenceBinding(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    evaluation_report_id: str = Field(
+    evaluation_id: EvaluationId = Field(
         ...,
         description="ID of the authoritative ADR-0011 EvaluationReport.",
     )
-    dataset_manifest_hash: str = Field(
+    dataset_manifest_hash: ContentHash = Field(
         ...,
         description="SHA-256 hash of the ADR-0009 evaluation split manifest.",
     )
-    model_checkpoint_hash: str = Field(
+    model_checkpoint_hash: ContentHash = Field(
         ...,
         description="SHA-256 hash of the unquantized or deployed checkpoint.",
     )
@@ -370,7 +383,7 @@ class BaselineReferenceBinding(BaseModel):
         ..., gt=0.0, description="Validated baseline latency."
     )
     baseline_confidence_mean: float = Field(..., ge=0.0, le=1.0)
-    baseline_class_distribution: Dict[str, float] = Field(
+    baseline_class_distribution: Mapping[str, float] = Field(
         ..., description="Baseline class balance."
     )
 
@@ -389,7 +402,7 @@ class DriftMetricResult(BaseModel):
     statistic_value: float = Field(
         ..., description="Computed test statistic (e.g. KS statistic, PSI value)."
     )
-    p_value: Optional[float] = Field(
+    p_value: float | None = Field(
         None, ge=0.0, le=1.0, description="P-value if hypothesis test."
     )
     threshold: float = Field(..., description="Pre-configured critical threshold.")
@@ -397,7 +410,7 @@ class DriftMetricResult(BaseModel):
         ..., description="True if statistic exceeds threshold."
     )
     severity: DriftSeverity
-    details: Dict[str, Any] = Field(
+    details: Mapping[str, Any] = Field(
         default_factory=dict, description="Diagnostic parameters."
     )
 
@@ -407,8 +420,12 @@ class DriftAnalysisRecord(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    analysis_id: str = Field(..., description="Unique analysis record identifier.")
-    deployment_id: str = Field(..., description="Evaluated deployment runtime ID.")
+    analysis_id: DriftAnalysisId = Field(
+        ..., description="Unique analysis record identifier."
+    )
+    deployment_id: DeploymentId = Field(
+        ..., description="Evaluated deployment runtime ID."
+    )
     baseline_binding: BaselineReferenceBinding
     timestamp: datetime = Field(
         ..., description="Timestamp of analysis generation (UTC)."
@@ -420,7 +437,7 @@ class DriftAnalysisRecord(BaseModel):
     )
 
     # Detailed test results
-    metric_results: List[DriftMetricResult] = Field(
+    metric_results: tuple[DriftMetricResult, ...] = Field(
         ...,
         description="Individual drift test evaluations across model, system, and data.",
     )
@@ -467,11 +484,11 @@ class CandidateSample(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    sample_id: str = Field(..., description="Unique sample identifier.")
+    sample_id: CandidateSampleId = Field(..., description="Unique sample identifier.")
     stream_id: str = Field(..., description="Source camera or stream identifier.")
     frame_index: int = Field(..., ge=0, description="Frame sequence index in stream.")
     timestamp: datetime = Field(..., description="Timestamp of frame capture (UTC).")
-    frame_content_hash: str = Field(
+    frame_content_hash: ContentHash = Field(
         ..., description="SHA-256 hash of the uncompressed raw frame payload."
     )
     temporary_payload_uri: str = Field(
@@ -485,15 +502,15 @@ class CandidateSample(BaseModel):
         ge=0.0,
         description="Priority score; higher means higher curation priority.",
     )
-    model_predictions: List[Dict[str, Any]] = Field(
-        default_factory=list,
+    model_predictions: tuple[Mapping[str, Any], ...] = Field(
+        default_factory=tuple,
         description="Inference detections at capture time (classes, boxes, confidences).",
     )
-    embedding_vector: Optional[List[float]] = Field(
+    embedding_vector: tuple[float, ...] | None = Field(
         None,
         description="Feature embedding for diversity / core-set clustering.",
     )
-    optical_metadata: Dict[str, float] = Field(
+    optical_metadata: Mapping[str, float] = Field(
         default_factory=dict,
         description="Luminance, contrast, and blur metrics at frame capture.",
     )
@@ -504,18 +521,22 @@ class ActiveLearningCandidateBatch(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    batch_id: str = Field(..., description="Unique candidate batch identifier.")
-    deployment_id: str = Field(..., description="Deployment ID producing the stream.")
+    batch_id: CandidateBatchId = Field(
+        ..., description="Unique candidate batch identifier."
+    )
+    deployment_id: DeploymentId = Field(
+        ..., description="Deployment ID producing the stream."
+    )
     created_at: datetime = Field(..., description="Batch creation timestamp (UTC).")
-    strategies_used: List[ActiveLearningStrategy]
+    strategies_used: tuple[ActiveLearningStrategy, ...]
     total_candidates: int = Field(..., gt=0, description="Number of samples in batch.")
-    sample_manifest: List[CandidateSample] = Field(
+    sample_manifest: tuple[CandidateSample, ...] = Field(
         ..., description="Curated candidate samples."
     )
     selection_rationale: str = Field(
         ..., description="Algorithmic rationale for batch curation."
     )
-    target_dataset_name: str = Field(
+    target_dataset_id: DatasetId = Field(
         ...,
         description="Target ADR-0009 dataset designated to receive this candidate batch.",
     )
@@ -554,8 +575,8 @@ class MonitoringAlertRecord(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    alert_id: str = Field(..., description="Unique alert identifier.")
-    deployment_id: str = Field(..., description="Source deployment ID.")
+    alert_id: AlertId = Field(..., description="Unique alert identifier.")
+    deployment_id: DeploymentId = Field(..., description="Source deployment ID.")
     severity: DriftSeverity
     timestamp: datetime = Field(..., description="Alert timestamp (UTC).")
     dimension: TelemetryDimension
@@ -573,8 +594,12 @@ class RetrainingTriggerProposal(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    proposal_id: str = Field(..., description="Unique trigger proposal identifier.")
-    deployment_id: str = Field(..., description="Active deployment runtime ID.")
+    proposal_id: TriggerProposalId = Field(
+        ..., description="Unique trigger proposal identifier."
+    )
+    deployment_id: DeploymentId = Field(
+        ..., description="Active deployment runtime ID."
+    )
     created_at: datetime = Field(
         ..., description="Timestamp of proposal emission (UTC)."
     )
@@ -582,11 +607,11 @@ class RetrainingTriggerProposal(BaseModel):
     severity: DriftSeverity
 
     # Evidence bindings
-    drift_analysis_id: Optional[str] = Field(
+    drift_analysis_id: DriftAnalysisId | None = Field(
         None,
         description="Reference to the originating DriftAnalysisRecord.",
     )
-    candidate_batch_id: Optional[str] = Field(
+    candidate_batch_id: CandidateBatchId | None = Field(
         None,
         description="Reference to the curated ActiveLearningCandidateBatch.",
     )
@@ -603,13 +628,17 @@ class RetrainingTriggerProposal(BaseModel):
         True,
         description="Invariant: must always be True. Autonomous retraining is strictly forbidden.",
     )
+    approval_id: ApprovalId | None = Field(
+        None,
+        description="Identifier of the formal approval record once authorized per docs/APPROVALS.md.",
+    )
     approved: bool = Field(
         False, description="True only after explicit PM/human approval."
     )
-    approved_by: Optional[str] = Field(
+    approved_by: str | None = Field(
         None, description="Identity of approving human operator."
     )
-    approval_timestamp: Optional[datetime] = Field(None)
+    approval_timestamp: datetime | None = Field(None)
 ```
 
 ## 8. Subsystem Boundary Contracts & Interfaces
@@ -617,9 +646,6 @@ class RetrainingTriggerProposal(BaseModel):
 To maintain strict layer isolation `[P§19]`–`[P§22]`, the monitoring subsystem defines abstract interfaces for stream observation, statistical calculation, and active learning curation:
 
 ```python
-from typing import Protocol, runtime_checkable
-
-
 @runtime_checkable
 class TelemetryIngestionSink(Protocol):
     """Contract for consuming continuous runtime telemetry streams."""
@@ -657,17 +683,17 @@ class ActiveLearningSelector(Protocol):
     def evaluate_candidate(
         self,
         frame_payload: bytes,
-        predictions: List[Dict[str, Any]],
-        optical_metrics: Dict[str, float],
-    ) -> Optional[CandidateSample]:
+        predictions: Sequence[Mapping[str, Any]],
+        optical_metrics: Mapping[str, float],
+    ) -> CandidateSample | None:
         """Evaluate whether a stream frame qualifies as an active learning candidate."""
         ...
 
     def assemble_batch(
         self,
         min_candidates: int,
-        target_dataset: str,
-    ) -> Optional[ActiveLearningCandidateBatch]:
+        target_dataset_id: DatasetId,
+    ) -> ActiveLearningCandidateBatch | None:
         """Assemble buffered candidates into a bounded candidate batch for ADR-0009."""
         ...
 
@@ -769,3 +795,18 @@ Every implementation of the Monitoring & Active Learning Subsystem must enforce 
 - **Phase 3 (Capabilities & Tools):** Development of statistical drift calculation tools (KS-test, PSI) and active learning sampling heuristics under ADR-0005/ADR-0007.
 - **Phase 4 (Reasoning Integration):** Connecting `RetrainingTriggerProposal` handoffs into ADR-0008 reasoning nodes for cognitive diagnosis.
 - **Phase 8 (Full Production Loop):** Complete end-to-end telemetry streaming against active TensorRT / DeepStream deployments per `ROADMAP.md` Phase 8.
+
+## 14. Implementation Acceptance Criteria
+
+When Phase 2 runtime implementation begins, the implementation of this subsystem MUST satisfy the following empirical acceptance tests before being considered complete:
+
+1. **Tri-Dimensional Telemetry Immutability & Validation:** `ModelTelemetryRecord`, `SystemTelemetryRecord`, `DataTelemetryRecord`, and `UnifiedTelemetrySnapshot` instances are strictly validated and immutable. Telemetry windows with invalid ranges, out-of-order timestamps, or probabilities not summing to valid bounds are rejected at instantiation time.
+2. **Mandatory Baseline Comparison Gate:** Any attempt by `StatisticalDriftDetector` to compute drift metrics without an authoritative `BaselineReferenceBinding` linked to a verified ADR-0011 `EvaluationReport` and ADR-0009 dataset manifest hash raises an explicit precondition error.
+3. **Statistical Drift Algorithmic Verification:** Drift calculations against controlled synthetic distributions correctly detect known shifts: KS-test on confidence distributions ($p < 0.05$), PSI on binned distributions ($PSI \ge 0.25$ for critical drift), Wasserstein distance on latency, and Chi-Square on class balance.
+4. **Zero Autonomous Retraining Invariant:** Every `RetrainingTriggerProposal` enforces `requires_human_approval = True`. Invoking training pipelines directly from monitoring without explicit human approval generated per `docs/APPROVALS.md` and ADR-0003 is mechanically prohibited.
+5. **Cryptographic Frame Content Hashing:** Every `CandidateSample` extracted by active learning computes and records a SHA-256 payload hash (`ContentHash`) matching the raw frame bytes, bound to source stream ID and frame index.
+6. **Active Learning Buffer Bounds & Deterministic Eviction:** Active learning candidate memory/storage buffers enforce configured maximum capacity limits. When capacity is exceeded, lower-priority samples are evicted deterministically according to strategy scores.
+7. **Candidate Batch Handoff to Dataset Subsystem:** `ActiveLearningCandidateBatch` instances serialize cleanly and transfer to ADR-0009, generating unannotated draft manifests without mutating existing dataset versions or train/val splits.
+8. **Structured Advisory Proposal Formulation:** Drift alerts and retraining proposals format quantitative evidence summaries linking causal telemetry dimensions (model vs. system vs. data) and hand off cleanly to ADR-0008 reasoning nodes.
+9. **Persistence Protocol Independence:** All telemetry snapshots, drift analysis records, and trigger proposals serialize to immutable JSON/Pydantic representations for persistence in ADR-0004 without ADR-0013 managing direct database connections.
+10. **Transport Agnosticism & Resource Overhead Guardrails:** Telemetry ingestion interfaces operate independently of physical transport protocols (file buffer, MQTT, Kafka, HTTP), consuming less than 5% target compute overhead during edge execution per `[P§13]`, `[P§29.4]`.
