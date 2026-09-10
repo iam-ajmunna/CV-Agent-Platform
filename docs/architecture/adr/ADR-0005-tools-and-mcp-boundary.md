@@ -293,7 +293,9 @@ class ActiveJobHandoff:
     submitted_at: str
     status: Literal["submitted", "running", "completed", "failed"]
     heartbeat_timeout_seconds: int = 3600
-    expires_at: str | None = None  # ISO-8601 UTC; if set, handoff is invalid after this instant
+    expires_at: str | None = (
+        None  # ISO-8601 UTC; if set, handoff is invalid after this instant
+    )
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
 

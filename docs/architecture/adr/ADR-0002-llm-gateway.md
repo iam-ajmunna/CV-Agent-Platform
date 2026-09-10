@@ -146,7 +146,9 @@ Fallback means moving to another eligible provider/model after a failed attempt.
 @dataclass(frozen=True)
 class FallbackPolicy:
     enabled: bool
-    allowed_failure_categories: frozenset[FailureCategory]  # Must use the typed Literal, not str
+    allowed_failure_categories: frozenset[
+        FailureCategory
+    ]  # Must use the typed Literal, not str
     max_provider_switches: int
 ```
 

@@ -378,19 +378,23 @@ class BaselineReferenceBinding(BaseModel):
         description="SHA-256 hash of the unquantized or deployed checkpoint.",
     )
     baseline_fps_p50: float = Field(
-        ..., gt=0.0,
+        ...,
+        gt=0.0,
         description="50th-percentile validated baseline throughput (FPS).",
     )
     baseline_fps_p05: float = Field(
-        ..., gt=0.0,
+        ...,
+        gt=0.0,
         description="5th-percentile baseline throughput; defines the lower operational bound.",
     )
     baseline_latency_p95_ms: float = Field(
-        ..., gt=0.0,
+        ...,
+        gt=0.0,
         description="95th-percentile validated baseline latency (ms); alerts fire when online p95 exceeds this.",
     )
     baseline_latency_p99_ms: float = Field(
-        ..., gt=0.0,
+        ...,
+        gt=0.0,
         description="99th-percentile validated baseline latency (ms); defines the worst-case SLA ceiling.",
     )
     baseline_confidence_mean: float = Field(..., ge=0.0, le=1.0)
@@ -411,10 +415,14 @@ class DriftMetricResult(BaseModel):
     )
     drift_type: DriftMetricType
     statistic_value: float = Field(
-        ..., description="Computed test statistic (e.g. KS statistic, PSI value, Wasserstein distance)."
+        ...,
+        description="Computed test statistic (e.g. KS statistic, PSI value, Wasserstein distance).",
     )
     p_value: float | None = Field(
-        None, ge=0.0, le=1.0, description="P-value if the test is a hypothesis test (KS, Chi-Square)."
+        None,
+        ge=0.0,
+        le=1.0,
+        description="P-value if the test is a hypothesis test (KS, Chi-Square).",
     )
     statistic_threshold: float = Field(
         ...,
@@ -438,7 +446,8 @@ class DriftMetricResult(BaseModel):
         ),
     )
     drift_detected: bool = Field(
-        ..., description="True if statistic exceeds statistic_threshold or p_value < p_value_threshold."
+        ...,
+        description="True if statistic exceeds statistic_threshold or p_value < p_value_threshold.",
     )
     severity: DriftSeverity
     details: Mapping[str, Any] = Field(
