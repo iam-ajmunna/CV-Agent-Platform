@@ -2,6 +2,7 @@
 
 - **Status:** Accepted — Frozen
 - **Date:** 2026-09-09 (Frozen: 2026-09-10)
+- **Last Reviewed:** 2026-09-10
 - **Layer:** monitoring / active_learning
 - **Canon:** `[P§8]`, `[P§9]`, `[P§16]`, `[P§21]`, `[P§22]`, `[P§24]`, `[P§25]`, `[P§26]`, `[P§27]`, `[P§28]`, `[P§29.6]`, `[P§29.7]`, `[P§34]`
 - **Supersedes / Superseded by:** —
@@ -376,11 +377,25 @@ class BaselineReferenceBinding(BaseModel):
         ...,
         description="SHA-256 hash of the unquantized or deployed checkpoint.",
     )
-    baseline_fps: float = Field(
-        ..., gt=0.0, description="Validated baseline throughput."
+    baseline_fps_p50: float = Field(
+        ...,
+        gt=0.0,
+        description="50th-percentile validated baseline throughput (FPS).",
+    )
+    baseline_fps_p05: float = Field(
+        ...,
+        gt=0.0,
+        description="5th-percentile baseline throughput; defines the lower operational bound.",
     )
     baseline_latency_p95_ms: float = Field(
-        ..., gt=0.0, description="Validated baseline latency."
+        ...,
+        gt=0.0,
+        description="95th-percentile validated baseline latency (ms); alerts fire when online p95 exceeds this.",
+    )
+    baseline_latency_p99_ms: float = Field(
+        ...,
+        gt=0.0,
+        description="99th-percentile validated baseline latency (ms); defines the worst-case SLA ceiling.",
     )
     baseline_confidence_mean: float = Field(..., ge=0.0, le=1.0)
     baseline_class_distribution: Mapping[str, float] = Field(
@@ -400,14 +415,39 @@ class DriftMetricResult(BaseModel):
     )
     drift_type: DriftMetricType
     statistic_value: float = Field(
-        ..., description="Computed test statistic (e.g. KS statistic, PSI value)."
+        ...,
+        description="Computed test statistic (e.g. KS statistic, PSI value, Wasserstein distance).",
     )
     p_value: float | None = Field(
-        None, ge=0.0, le=1.0, description="P-value if hypothesis test."
+        None,
+        ge=0.0,
+        le=1.0,
+        description="P-value if the test is a hypothesis test (KS, Chi-Square).",
     )
-    threshold: float = Field(..., description="Pre-configured critical threshold.")
+    statistic_threshold: float = Field(
+        ...,
+        ge=0.0,
+        description=(
+            "Pre-configured critical threshold for statistic_value. "
+            "Drift is detected when statistic_value >= statistic_threshold. "
+            "Examples: KS threshold = 0.1, PSI threshold = 0.25, Wasserstein threshold = 0.05. "
+            "MUST NOT be interpreted as a p-value."
+        ),
+    )
+    p_value_threshold: float | None = Field(
+        None,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Pre-configured significance level for p_value (e.g. 0.05). "
+            "Only set when the test produces a p_value. "
+            "Drift is detected when p_value < p_value_threshold. "
+            "MUST NOT be interpreted as a statistic threshold."
+        ),
+    )
     drift_detected: bool = Field(
-        ..., description="True if statistic exceeds threshold."
+        ...,
+        description="True if statistic exceeds statistic_threshold or p_value < p_value_threshold.",
     )
     severity: DriftSeverity
     details: Mapping[str, Any] = Field(
@@ -493,6 +533,16 @@ class CandidateSample(BaseModel):
     )
     temporary_payload_uri: str = Field(
         ..., description="Staging URI (local scratch or object storage)."
+    )
+    expires_at: datetime | None = Field(
+        None,
+        description=(
+            "UTC expiry time of the staging payload at temporary_payload_uri. "
+            "Candidate buffers and pre-signed storage URIs expire; if this field "
+            "is set, the ActiveLearningSelector MUST evict or escalate this sample "
+            "before the expiry instant rather than assembling it into a batch after "
+            "the payload has become irrecoverable."
+        ),
     )
 
     # Sampling justification

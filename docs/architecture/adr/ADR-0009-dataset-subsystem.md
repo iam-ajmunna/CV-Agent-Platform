@@ -2,6 +2,7 @@
 
 - **Status:** Accepted — Frozen
 - **Date:** 2026-09-08
+- **Last Reviewed:** 2026-09-10
 - **Layer:** data / dataset engineering
 - **Canon:** `[P§7]`, `[P§25]`, `[P§26]`, `[P§27]`, `[P§29.5]`, `[P§34]`
 - **Supersedes / Superseded by:** —
@@ -454,3 +455,5 @@ class DatasetRegistry(Protocol):
 5. **Independent Annotation Decoupling:** Revisions to annotations produce a distinct `AnnotationVersion` manifest referencing existing `ContentHash` items without modifying raw media payload hashes.
 6. **Storage Protocol Independence:** The `DatasetStore` abstraction supports `local_fs`, `s3`, `gcs`, and `minio` backends without leaking transport or SDK details into reasoning, orchestration, or training subsystems.
 7. **Approval Gate Integration:** Invocations of destructive or mutating dataset operations (`dataset.delete`, `dataset.relabel`, `dataset.resplit`, `dataset.mutate`) generate persistent `ApprovalRequest` entities per `docs/APPROVALS.md` requiring human approval before execution.
+8. **Annotation Geometry Validation Gate:** Every `AnnotationManifest` registered against a `DatasetManifest` MUST pass a formal geometry validity check prior to registration. Specifically: bounding box coordinates must satisfy `x_min >= 0`, `y_min >= 0`, `x_min < x_max`, `y_min < y_max`, and coordinates must not exceed the declared image resolution; polygon winding must be consistent; class IDs must map to valid entries in `class_definitions`. An `AnnotationManifest` containing any annotation primitive failing this check is rejected with `INVALID_GEOMETRY` before it can reach the training subsystem (ADR-0010). This gate is the sole data-integrity control preventing corrupt label geometries from propagating into training.
+

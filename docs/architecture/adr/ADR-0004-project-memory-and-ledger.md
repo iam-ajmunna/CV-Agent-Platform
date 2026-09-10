@@ -145,7 +145,7 @@ Metric completeness requirements are consistently defined across all four worklo
 - `workload_type`: Type of experiment (`training`, `evaluation`, `optimization`, `benchmark`).
 - `target`: Execution environment (`local_gpu`, `remote_gpu`, `cloud`) per `Q2 / D-014`.
 - `job_id`: External out-of-process execution job handle.
-- `approval_ref`: Persistent approval record ID if the experiment exceeded cost/resource thresholds in `docs/APPROVALS.md` (`Q3 / D-015`).
+- `approval_ref`: Persistent approval record ID if the experiment exceeded cost/resource thresholds in `docs/APPROVALS.md` (`Q3 / D-015`). Format: `{operation_id}:{request_id}` where `operation_id` and `request_id` correspond to the `OperationId.value` and `ApprovalRequest.request_id` fields of the authoritative ADR-0003 approval record. This format is sufficient to dereference the approval context from the orchestration store without duplicating approval engine state.
 - `created_at`, `started_at`, `completed_at`: Standard ISO-8601 UTC timestamps.
 - `error_message`: Diagnostic failure reason or cancellation explanation (`str | None`).
 
@@ -185,6 +185,7 @@ ADR-0004 defines architectural schema invariants while explicitly deferring impl
    - `parent_exp_id REFERENCES experiments(exp_id) ON DELETE RESTRICT` (nullable).
    - `baseline_id REFERENCES experiments(exp_id) ON DELETE RESTRICT` (nullable).
 4. **Concurrency & Atomicity:** SQLite Write-Ahead Logging (`PRAGMA journal_mode=WAL;`) enabled. Terminal completion of an experiment (writing metrics, updating status to `completed`) must execute within a single atomic database transaction.
+5. **Foreign Key Enforcement:** Every database connection to `experiments.sqlite` MUST execute `PRAGMA foreign_keys = ON` before any DML statement. SQLite does not enforce foreign keys by default; failure to set this pragma silently voids all relational integrity guarantees (lineage, baseline, artifact FK links). Omission is an implementation defect.
 
 ### Explicitly Deferred Implementation Choices (Phase 2):
 - Database access layer: Python standard library `sqlite3`, `aiosqlite`, or lightweight ORM/Query builder.

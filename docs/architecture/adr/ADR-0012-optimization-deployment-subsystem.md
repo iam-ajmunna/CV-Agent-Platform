@@ -2,6 +2,7 @@
 
 - **Status:** Accepted — Frozen
 - **Date:** 2026-09-09 (Frozen: 2026-09-10)
+- **Last Reviewed:** 2026-09-10
 - **Layer:** optimization / deployment
 - **Canon:** `[P§8]`, `[P§9]`, `[P§13]`, `[P§14]`, `[P§15]`, `[P§21]`, `[P§22]`, `[P§24]`, `[P§25]`, `[P§28]`, `[P§29.4]`, `[P§34]`
 - **Supersedes / Superseded by:** —
@@ -256,7 +257,7 @@ To protect production camera feeds from bad deployments:
 2. **Zero-Downtime Routing:** Live camera streams or inference queues continue routing to the currently active deployment while the new candidate deployment is in `STAGING` and `VERIFYING`.
 3. **Automated Rollback:** If the candidate fails readiness probing or crashes within the initial verification window, the subsystem automatically:
    - Aborts activation and flags status as `FAILED`.
-   - Initiates rollback to the designated `rollback_target_id`.
+   - Initiates rollback to the designated `rollback_target_id`. If `rollback_target_id is None` (first deployment with no predecessor), rollback cannot be executed automatically; the subsystem MUST escalate to `OPERATOR_REQUIRED` state, preserve all failure diagnostics, and block any further deployment attempts until an operator resolves the condition. Silent failure or ignoring the null target is prohibited.
    - Records failure diagnostics for Reasoning (ADR-0008).
 
 ### 3.8. Required Architectural Invariants
@@ -384,6 +385,16 @@ class OptimizationPlan(BaseModel):
     target_compute_capability: str  # e.g. "8.7", "8.9"
     shape_profiles: tuple[DynamicShapeProfile, ...] = Field(default_factory=tuple)
     calibration_binding: CalibrationDatasetBinding | None = None
+    verification_dataset_binding: EvaluationDatasetBinding = Field(
+        ...,
+        description=(
+            "Binding to the ADR-0009/ADR-0011 evaluation split used to verify that "
+            "optimization did not exceed max_accuracy_drop_tolerance. MUST reference the "
+            "identical test split used in the pre-optimization ADR-0011 baseline evaluation "
+            "so that accuracy comparison is statistically valid. This binding is mandatory: "
+            "an OptimizationPlan without it cannot pass the verification gate (\u00a73.2)."
+        ),
+    )
     max_accuracy_drop_tolerance: float = Field(ge=0.0, default=0.015)
     parameters: Mapping[str, Any] = Field(default_factory=dict)
     created_at: datetime
