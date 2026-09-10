@@ -26,7 +26,7 @@
 | ADR-0010 — Training | **Accepted — Frozen** |
 | ADR-0011 — Evaluation | **Accepted — Frozen** |
 | ADR-0012 — Optimization / deployment | **Accepted — Frozen** |
-| ADR-0013 — Monitoring & Active Learning | **Accepted — In Freeze Review** |
+| ADR-0013 — Monitoring & Active Learning | **Accepted — Frozen** |
 
 ## Agreed decisions
 
@@ -66,13 +66,14 @@
 - **D-043:** ADR-0010 Training Subsystem Architecture is frozen; updated status to 'Accepted — Frozen'; documented canonical identifier syntax rules in §4 for PlanId, TrainingJobId, CheckpointId, and ApprovalId; hardened `losses` in TrainingPlan and `devices_info` in TrainingEnvironmentRecord to immutable `tuple` types; bound TrainingJobRecord directly to ADR-0005 execution tokens via `execution_id: ExecutionId | None` and `target_id: TargetId | None`, and updated `TrainingLauncher.launch` with optional `target_id`; and added Section 7 Implementation Acceptance Criteria covering plan immutability, cost estimation preconditions, approval gating, transport delegation, execution token traceability, telemetry normalization, online diagnostics, checkpoint lineage, and reproducibility packaging.
 - **D-044:** ADR-0011 Evaluation Subsystem Architecture is frozen; updated status to 'Accepted — Frozen'; documented canonical identifier syntax rules in §4 for EvaluationId, MetricId, and BenchmarkId; enforced immutable `tuple` types across collection fields in MetricResult, BenchmarkConfiguration, ErrorAnalysisRecord, EvaluationPlan, and EvaluationResult; bound EvaluationExecution directly to ADR-0005 execution tokens via `execution_id: ExecutionId | None` and `target_id: TargetId | None`, and updated `EvaluationRunner.execute` with optional `target_id`; and added Section 7 Implementation Acceptance Criteria covering plan immutability, co-equal quality and systems benchmarking, mandatory baseline comparison, structured error analysis, hardware benchmark guardrails, execution token traceability, and immutable result handoff to ADR-0004.
 - **D-045:** ADR-0012 Optimization & Deployment Subsystem Architecture is frozen; updated status to 'Accepted — Frozen'; documented canonical identifier syntax rules in §4 for OptimizationPlanId, OptimizedArtifactId, and DeploymentId; enforced immutable `tuple` types for `shape_profiles` in OptimizationPlan and OptimizedModelArtifact; bound `CalibrationDatasetBinding` to default `split_name = "calibration"` per ADR-0009 Invariant 13 to prevent test-split leakage; bound OptimizedModelArtifact and DeploymentRecord directly to ADR-0005 execution tokens via `execution_id: ExecutionId | None` and `target_id: TargetId | None`, and updated `ModelOptimizer.compile` and `DeploymentManager.stage` with optional `target_id`; and added Section 7 Implementation Acceptance Criteria covering plan immutability, calibration dataset leakage gate, dynamic shape bounds, transformation lineage DAG, post-optimization verification gate, target-locked compilation, production deployment human approval, automated readiness probe gate, zero-downtime rollback guarantee, execution token traceability, and persistence protocol independence.
+- **D-046:** ADR-0013 Monitoring and Active Learning Subsystem Architecture is frozen; updated status to 'Accepted — Frozen'; documented canonical identifier syntax rules in §4 for DriftAnalysisId, CandidateBatchId, CandidateSampleId, AlertId, TriggerProposalId, and SnapshotId; enforced immutable `tuple` and `Mapping` collection types across all telemetry, drift analysis, candidate curation, and trigger proposal models; bound `BaselineReferenceBinding` to ADR-0011 `evaluation_id` and ADR-0009 `ContentHash` manifests; bound `ActiveLearningCandidateBatch` to `target_dataset_id: DatasetId`; verified mandatory `requires_human_approval = True` and added `approval_id: ApprovalId | None` link; and added Section 14 Implementation Acceptance Criteria covering telemetry immutability, mandatory baseline comparison gate, statistical drift algorithmic verification, zero autonomous retraining invariant, cryptographic frame content hashing, active learning buffer bounds, candidate batch handoff to ADR-0009, structured advisory proposal formulation, persistence protocol independence, and transport agnosticism.
 
 ## Blocking questions
 
-Q1–Q5, Q7–Q8, Q10 are resolved. ADR-0001 through ADR-0013 are accepted, with ADR-0001 through ADR-0012 frozen. Phase 2 implementation remains intentionally gated while the ADR review program concludes with ADR-0013.
+Q1–Q5, Q7–Q8, Q10 are resolved. All 13 ADRs (ADR-0001 through ADR-0013) are formally frozen. The Phase 1 architectural contract is complete and verified. Phase 2 runtime implementation is ready for scheduling and execution under explicit Official PM gate approval.
 
 ## Next session
 
-1. Deep-review and freeze ADR-0013 (Monitoring & Active Learning Subsystem Architecture).
-2. Perform final system-level cross-ADR dependency audit.
-3. Keep runtime implementation paused until the full ADR review sequence is complete and explicitly approved by the Official PM.
+1. Await Official PM instruction and milestone sequencing for Phase 2 (Runtime Substrate & Core Type Implementation).
+2. Begin Phase 2 implementation following the strict dependency order: Capabilities → LLM Gateway → Orchestration → Memory → Tools.
+3. Keep all 13 ADR contracts frozen unless an explicit ADR amendment PR is authorized by the Official PM.

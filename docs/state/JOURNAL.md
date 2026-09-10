@@ -555,3 +555,24 @@ isolation) and Q3 (cross-process restart survival) cleanly without external netw
 **Learned:** Tracking `execution_id` and `target_id` across model compilation and deployment records guarantees end-to-end auditability from training checkpoint to edge container execution.
 
 **Left open:** Proceeding to ADR-0013 freeze review.
+
+---
+
+## 2026-09-10 — ADR-0013 Freeze Synchronization (D-046, PR #31)
+
+**Did:** Hardened and froze ADR-0013 (`docs/architecture/adr/ADR-0013-monitoring-active-learning-subsystem.md`) on `main` following review and squash-merge of PR #31. Recorded decision `D-046` in `DECISIONS.md`. Updated `STATUS.md` and `AGENT_HANDOFF.md`. Changes made:
+1. Updated amendment status to `Accepted — Frozen`.
+2. Documented canonical identifier syntax rules in §4 for `DriftAnalysisId`, `CandidateBatchId`, `CandidateSampleId`, `AlertId`, `TriggerProposalId`, and `SnapshotId` conforming to `[a-z0-9_.-]+(/[a-z0-9_.-]+)*` per ADR-0001 §3.1.
+3. Enforced immutable `tuple` and `Mapping` collection types across all telemetry, drift analysis, candidate curation, and trigger proposal models.
+4. Bound `BaselineReferenceBinding` directly to ADR-0011 `evaluation_id` and ADR-0009 `ContentHash` manifests.
+5. Bound `ActiveLearningCandidateBatch` to `target_dataset_id: DatasetId`.
+6. Verified mandatory `requires_human_approval = True` and added `approval_id: ApprovalId | None` link.
+7. Added Section 14 (`Implementation Acceptance Criteria`) covering telemetry immutability, mandatory baseline comparison gate, statistical drift algorithmic verification, zero autonomous retraining invariant, cryptographic frame content hashing, active learning buffer bounds, candidate batch handoff to ADR-0009, structured advisory proposal formulation, persistence protocol independence, and transport agnosticism.
+
+**Why:** `[P§8]`, `[P§9]`, `[P§16]`, `[P§21]`, `[P§22]`, `[P§24]`, `[P§25]`, `[P§26]`, `[P§27]`, `[P§28]`, `[P§29.6]`, `[P§29.7]`, `[P§34]` — establishes tri-dimensional operational telemetry streaming across Model, System, and Data dimensions, baseline drift detection against immutable ADR-0011 baselines via formal statistical tests, algorithmic active learning candidate selection, cryptographic frame provenance, zero autonomous retraining invariant, advisory retraining proposals to ADR-0008, and candidate batch handoffs to ADR-0009.
+
+**Broke:** Nothing broken. 99 pytest tests pass, ruff clean, mypy clean.
+
+**Learned:** Enforcing `target_dataset_id: DatasetId` on candidate batches and `evaluation_id: EvaluationId` on baseline bindings connects the online monitoring loop back to the offline dataset and evaluation ledgers without creating cyclic subsystem dependencies.
+
+**Left open:** Phase 1 architectural freeze program complete. All 13 ADRs (ADR-0001 through ADR-0013) are frozen on `main`. Proceeding to final system-level dependency audit before Phase 2 milestone scheduling.
