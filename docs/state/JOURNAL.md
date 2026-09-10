@@ -517,3 +517,21 @@ isolation) and Q3 (cross-process restart survival) cleanly without external netw
 **Learned:** Explicitly recording ADR-0005 `execution_id` and `target_id` inside `TrainingJobRecord` maintains direct causal auditability from high-level training lifecycle states to low-level physical container and process handles.
 
 **Left open:** Proceeding to ADR-0011 freeze review.
+
+---
+
+## 2026-09-10 — ADR-0011 Freeze Synchronization (D-044, PR #29)
+
+**Did:** Hardened and froze ADR-0011 (`docs/architecture/adr/ADR-0011-evaluation-subsystem.md`) on `main` following review and squash-merge of PR #29. Recorded decision `D-044` in `DECISIONS.md`. Updated `STATUS.md` and `AGENT_HANDOFF.md`. Changes made:
+1. Updated amendment status to `Accepted — Frozen`.
+2. Documented canonical identifier syntax rules in §4 for `EvaluationId`, `MetricId`, and `BenchmarkId` conforming to `[a-z0-9_.-]+(/[a-z0-9_.-]+)*` per ADR-0001 §3.1.
+3. Enforced immutable `tuple` types across collection fields in `MetricResult`, `BenchmarkConfiguration`, `ErrorAnalysisRecord`, `EvaluationPlan`, and `EvaluationResult`.
+4. Bound `EvaluationExecution` directly to ADR-0005 execution tokens via `execution_id: ExecutionId | None` and `target_id: TargetId | None`, and updated `EvaluationRunner.execute` with optional `target_id`.
+5. Added Section 7 (`Implementation Acceptance Criteria`) covering plan immutability, co-equal quality and systems benchmarking, mandatory baseline comparison, structured error analysis, hardware benchmark guardrails, execution token traceability, and immutable result handoff to ADR-0004.
+
+**Why:** `[P§7]`, `[P§12]`, `[P§13]`, `[P§21]`, `[P§22]`, `[P§24]`, `[P§25]`, `[P§27]`, `[P§29.2]`, `[P§29.3]`, `[P§29.4]`, `[P§29.10]`, `[P§34]` — establishes co-equal model quality and systems evaluation, immutable dataset split and checkpoint bindings, mandatory baseline comparison prohibiting unsubstantiated claims, and structured diagnostic error analysis.
+
+**Broke:** Nothing broken. 99 pytest tests pass, ruff clean, mypy clean.
+
+**Learned:** Binding evaluation execution directly to ADR-0005 execution tokens guarantees that hardware benchmark measurements (e.g. inference latency, peak VRAM) are verifiably tied to the specific physical execution target and container run.
+**Left open:** Proceeding to ADR-0012 freeze review.
