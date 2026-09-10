@@ -3,7 +3,7 @@
 - **Status:** Accepted
 - **Amendment Status:** Frozen
 - **Date:** 2026-09-02
-- **Last Reviewed:** 2026-09-09
+- **Last Reviewed:** 2026-09-10
 - **Layer:** orchestration
 - **Canon:** `[P§6]`, `[P§21]`, `[P§24]`, `[P§25]`, `[P§29.8]`, `[P§33]`, `[P§34]`
 - **Issue:** #18 (freeze review)
@@ -176,6 +176,8 @@ INITIALIZING → READY → PLANNING → AWAITING_APPROVAL → EXECUTING → EVAL
                                                           ↓
                                                COMPLETED / FAILED / PAUSED
 ```
+
+`EVALUATING` is terminal-adjacent: it transitions exclusively to `COMPLETED`, `FAILED`, or `PAUSED`. It MUST NOT loop back to `EXECUTING`. If evaluation triggers a new experiment iteration, that iteration begins a new session cycle (fresh `EXECUTING` → `EVALUATING` arc) after the current session reaches a terminal state or is explicitly `PAUSED` and resumed via orchestration.
 
 External operation lifecycle:
 
@@ -376,6 +378,7 @@ class OrchestratorConfig:
 14. Retry and step policies prevent unbounded orchestration loops.
 15. Pruning cannot remove state required for recovery, approval, execution, migration, or audit.
 16. ADR-0003 does not absorb ownership from the other accepted ADRs.
+17. `EVALUATING` is terminal-adjacent: valid exit transitions are `COMPLETED`, `FAILED`, and `PAUSED` only. Re-entry to `EXECUTING` from `EVALUATING` is an illegal transition and MUST be rejected.
 
 ## 6. Acceptance criteria
 

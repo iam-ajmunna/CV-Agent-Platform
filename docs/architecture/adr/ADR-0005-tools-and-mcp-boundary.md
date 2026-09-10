@@ -160,6 +160,7 @@ The Tool Layer enforces execution safety before dispatching any invocation. Secu
 - **Prohibition of Raw Shell Interpretation:** Local tool invocation disallows raw shell string execution. Local command execution MUST use structured argument vectors (`argv: list[str]`) and MUST NOT rely on shell interpretation. This eliminates command and shell injection vulnerabilities at the architectural boundary.
 - **Workspace Path Containment:** Local file path parameters must be validated to reside within the workspace directory before execution. Attempts to reference paths outside the workspace without explicit authorization are blocked as policy violations.
 - **Secret Isolation:** Authentication tokens, SSH keys, and credentials must not be passed as plain command-line parameters or recorded in invocation logs.
+- **Remote Target Credential Binding:** Credentials for `REMOTE` execution targets (SSH keys, API tokens, cloud provider keys) MUST be resolved from a deployment-managed secrets vault keyed by `TargetId`. Credentials MUST NOT appear in any logged, persisted, or serialized `ToolInvocation`, `ActiveJobHandoff`, or `ToolResult` record. The secrets vault integration mechanism is a Phase 2 implementation concern; the architectural invariant is the absence of credentials from all typed boundary records.
 - **Approval Precondition Enforcement:** When invoking a tool subject to an approval requirement, the Tool Layer verifies that the orchestration layer has authorized the action. If no valid authorization is present, the invocation is refused.
 
 #### C. Phase 2+ Implementation Hardening (Deferred)
@@ -292,6 +293,7 @@ class ActiveJobHandoff:
     submitted_at: str
     status: Literal["submitted", "running", "completed", "failed"]
     heartbeat_timeout_seconds: int = 3600
+    expires_at: str | None = None  # ISO-8601 UTC; if set, handoff is invalid after this instant
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
 

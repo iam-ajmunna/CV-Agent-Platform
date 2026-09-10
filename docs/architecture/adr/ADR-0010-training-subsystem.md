@@ -2,6 +2,7 @@
 
 - **Status:** Accepted — Frozen
 - **Date:** 2026-09-08
+- **Last Reviewed:** 2026-09-10
 - **Layer:** training / execution orchestration
 - **Canon:** `[P§10]`, `[P§11]`, `[P§13]`, `[P§15]`, `[P§21]`, `[P§22]`, `[P§24]`, `[P§25]`, `[P§29.2]`, `[P§29.4]`, `[P§29.8]`, `[P§34]`
 - **Supersedes / Superseded by:** —
@@ -495,7 +496,17 @@ class CheckpointManifest(BaseModel):
     epoch: int = Field(ge=0)
     step: int = Field(ge=0)
     weights_hash: ContentHash
-    weights_uri: str
+    weights_uri: str = Field(
+        ...,
+        description=(
+            "Storage URI for the checkpoint weights file. MUST begin with one of the "
+            "scheme prefixes recognized by ADR-0005 DatasetStore transport adapters: "
+            "'file://' (local filesystem), 's3://' (AWS S3), 'gs://' (Google Cloud Storage), "
+            "or 'minio://' (MinIO / S3-compatible). A bare filesystem path without a scheme "
+            "prefix is invalid and MUST be rejected at instantiation time."
+        ),
+        pattern=r"^(file://|s3://|gs://|minio://).+",
+    )
     optimizer_state_included: bool = False
     metrics: Mapping[str, float] = Field(default_factory=dict)
     created_at: datetime

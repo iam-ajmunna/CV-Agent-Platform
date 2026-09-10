@@ -2,6 +2,7 @@
 
 - **Status:** Accepted — Frozen
 - **Date:** 2026-09-09
+- **Last Reviewed:** 2026-09-10
 - **Layer:** evaluation / empirical measurement
 - **Canon:** `[P§7]`, `[P§12]`, `[P§13]`, `[P§21]`, `[P§22]`, `[P§24]`, `[P§25]`, `[P§27]`, `[P§29.2]`, `[P§29.3]`, `[P§29.4]`, `[P§29.10]`, `[P§34]`
 - **Supersedes / Superseded by:** —
@@ -224,7 +225,7 @@ Per `[P§25]`, every evaluation outcome compiles an immutable `EvaluationEnviron
 The Evaluation Subsystem strictly enforces twelve non-negotiable architectural invariants:
 1. **Immutable Dataset Versioning (`[P§26]`, ADR-0009):** Evaluation references an authoritative, immutable `DatasetManifest` version and content hash. Evaluating implicit "current" or unversioned data directories is strictly prohibited.
 2. **Immutable Model Artifacts (`[P§25]`, ADR-0010):** Evaluation binds to a specific model checkpoint identified by `CheckpointId` and SHA-256 `ContentHash`. Evaluating transient in-memory weights is barred.
-3. **Mandatory Baseline Reference (`[P§29.2]`, `[P§29.3]`):** Every evaluation plan declares a baseline reference. Claims such as "model improved" without quantitative empirical comparison are architecturally barred.
+3. **Mandatory Baseline Reference (`[P§29.2]`, `[P§29.3]`):** Every evaluation plan declares a baseline reference. Claims such as "model improved" without quantitative empirical comparison are architecturally barred. *Exception:* a root baseline evaluation — one explicitly designated as the active baseline via `ADR-0004.ExperimentLedger.set_active_baseline()` — may set `baseline_experiment_id = None` to indicate it is itself the reference point. All other evaluation plans MUST provide a non-null `baseline_experiment_id` resolving to an existing completed experiment in the ADR-0004 ledger.
 4. **Versioned Metric Definitions:** Metric definitions are declarative, versioned, and parameter-explicit (`MetricDefinition`), avoiding monolithic conditional evaluation scripts.
 5. **Separation of Quality and Systems Metrics (`[P§12]`):** Model quality metrics (`MetricResult`) and systems performance metrics (`BenchmarkResult`) remain distinct, co-equal measurement dimensions.
 6. **Hardware Execution Identification (`[P§13]`, `[P§29.4]`, `D-014`, `D-022`):** All systems benchmarks explicitly record their physical hardware target, device name, and execution environment.
@@ -450,7 +451,15 @@ class EvaluationPlan(BaseModel):
     metrics: tuple[MetricDefinition, ...]
     benchmark_config: BenchmarkConfiguration | None = None
     baseline_experiment_id: str | None = None
+    # None is permitted ONLY for root baseline experiments (see §3.11 Invariant #3).
+    # All other evaluation plans MUST provide a non-null value resolving to a
+    # completed experiment in the ADR-0004 ledger.
     compute_target_id: str = "default_evaluator"
+    # WARNING: "default_evaluator" is a placeholder default that MUST be overridden
+    # before dispatch. The actual value must be a valid TargetId registered in the
+    # ADR-0005 ExecutionTargetRegistry. Dispatching an EvaluationPlan with this
+    # unresolved placeholder value to EvaluationRunner.run() MUST raise a
+    # TargetNotFoundError rather than silently creating an unresolvable job.
     evaluation_requirements: Mapping[str, Any] = Field(default_factory=dict)
     reproducibility_requirements: Mapping[str, Any] = Field(default_factory=dict)
 
