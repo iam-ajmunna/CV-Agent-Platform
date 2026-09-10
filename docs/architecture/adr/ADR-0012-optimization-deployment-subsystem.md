@@ -1,7 +1,7 @@
 # ADR-0012: Optimization and Deployment Subsystem Architecture
 
-- **Status:** Accepted
-- **Date:** 2026-09-09
+- **Status:** Accepted — Frozen
+- **Date:** 2026-09-09 (Frozen: 2026-09-10)
 - **Layer:** optimization / deployment
 - **Canon:** `[P§8]`, `[P§9]`, `[P§13]`, `[P§14]`, `[P§15]`, `[P§21]`, `[P§22]`, `[P§24]`, `[P§25]`, `[P§28]`, `[P§29.4]`, `[P§34]`
 - **Supersedes / Superseded by:** —
@@ -292,8 +292,10 @@ from pydantic import BaseModel, ConfigDict, Field
 from cv_agent.capabilities import CapabilityId, ToolId
 from cv_agent.dataset.types import ContentHash, DatasetId, DatasetVersion
 from cv_agent.evaluation.types import BaselineComparisonResult, EvaluationResult
+from cv_agent.tools.types import ExecutionId, TargetId
 from cv_agent.training.types import ApprovalId, CheckpointId
 
+# Canonical identifier format conforming to [a-z0-9_.-]+(/[a-z0-9_.-]+)* per ADR-0001 §3.1.
 OptimizationPlanId = NewType("OptimizationPlanId", str)
 OptimizedArtifactId = NewType("OptimizedArtifactId", str)
 DeploymentId = NewType("DeploymentId", str)
@@ -329,14 +331,18 @@ class DynamicShapeProfile(BaseModel):
 
 
 class CalibrationDatasetBinding(BaseModel):
-    """Binding to an immutable dataset split for quantization calibration."""
+    """Binding to an immutable dataset split for quantization calibration.
+
+    Frames must be sampled strictly from the dedicated 'calibration' split
+    (or verified validation split) per ADR-0009 Invariant 13 to prevent test-split leakage.
+    """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     dataset_id: DatasetId
     dataset_version: DatasetVersion
     dataset_manifest_hash: ContentHash
-    split_name: str = "val"
+    split_name: str = "calibration"
     num_calibration_samples: int = Field(ge=10, default=512)
     calibration_algorithm: str = "entropy"  # e.g. entropy, minmax, percentile
 
@@ -376,7 +382,7 @@ class OptimizationPlan(BaseModel):
     target_precision: OptimizationPrecision
     target_platform: str  # e.g. "nvidia_jetson_orin", "rtx_4090"
     target_compute_capability: str  # e.g. "8.7", "8.9"
-    shape_profiles: Sequence[DynamicShapeProfile] = Field(default_factory=list)
+    shape_profiles: tuple[DynamicShapeProfile, ...] = Field(default_factory=tuple)
     calibration_binding: CalibrationDatasetBinding | None = None
     max_accuracy_drop_tolerance: float = Field(ge=0.0, default=0.015)
     parameters: Mapping[str, Any] = Field(default_factory=dict)
@@ -399,7 +405,9 @@ class OptimizedModelArtifact(BaseModel):
     artifact_hash: ContentHash
     artifact_uri: str
     artifact_size_bytes: int = Field(gt=0)
-    shape_profiles: Sequence[DynamicShapeProfile]
+    shape_profiles: tuple[DynamicShapeProfile, ...] = Field(default_factory=tuple)
+    execution_id: ExecutionId | None = None
+    target_id: TargetId | None = None
     created_at: datetime
 
 
@@ -424,7 +432,7 @@ class DeploymentTarget(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    target_id: str
+    target_id: TargetId
     hostname_or_ip: str
     platform_type: str  # e.g. "nvidia_jetson_agx_orin"
     gpu_device_name: str
@@ -485,6 +493,8 @@ class DeploymentRecord(BaseModel):
     plan: DeploymentPlan
     status: DeploymentStatus
     readiness_result: ReadinessProbeResult | None = None
+    execution_id: ExecutionId | None = None
+    target_id: TargetId | None = None
     activated_at: datetime | None = None
     superseded_at: datetime | None = None
     rolled_back_at: datetime | None = None
@@ -499,6 +509,7 @@ class ModelOptimizer(Protocol):
         self,
         plan: OptimizationPlan,
         tool_id: ToolId,
+        target_id: TargetId | None = None,
     ) -> OptimizedModelArtifact: ...
 
 
@@ -517,7 +528,11 @@ class OptimizationVerifier(Protocol):
 class DeploymentManager(Protocol):
     """Coordinates deployment staging, readiness verification, and rollbacks."""
 
-    def stage(self, plan: DeploymentPlan) -> DeploymentRecord: ...
+    def stage(
+        self,
+        plan: DeploymentPlan,
+        target_id: TargetId | None = None,
+    ) -> DeploymentRecord: ...
 
     def verify_readiness(
         self,
@@ -568,3 +583,19 @@ class DeploymentManager(Protocol):
 - ADR-0009: Dataset Subsystem (`D-029`)
 - ADR-0010: Training Subsystem (`D-030`)
 - ADR-0011: Evaluation Subsystem (`D-031`)
+
+## 7. Implementation Acceptance Criteria
+
+When Phase 2 runtime implementation begins, the implementation of this subsystem MUST satisfy the following empirical acceptance tests before being considered complete:
+
+1. **Optimization Plan Immutability & Validation:** `OptimizationPlan` instances are strictly validated and immutable. Plans referencing non-existent checkpoints, invalid precision levels, or out-of-order dynamic shape profiles ($\text{min\_shape} \le \text{opt\_shape} \le \text{max\_shape}$) are rejected at instantiation time.
+2. **Calibration Dataset Leakage Gate:** INT8 PTQ quantization plans referencing calibration datasets that overlap with test splits or lack valid ADR-0009 manifest bindings are rejected before compilation begins.
+3. **Dynamic Shape Bound Verification:** Engine compilation processes with dynamic shapes enforce minimum, optimal, and maximum shape bounds. Attempting inference with tensor dimensions outside validated shape profiles raises explicit runtime exceptions.
+4. **Cryptographic Transformation Lineage DAG:** Every compiled `OptimizedModelArtifact` computes and records an immutable content hash derived deterministically from the parent checkpoint hash, optimization parameters, calibration dataset hash, and target architecture profile.
+5. **Mandatory Post-Optimization Verification Gate:** Any attempt to promote or deploy an `OptimizedModelArtifact` without a verified `OptimizationResult` confirming that accuracy degradation does not exceed `max_accuracy_drop_tolerance` against the unoptimized baseline (via ADR-0011) is strictly rejected.
+6. **Hardware-Locked Compilation Integrity:** Binary engines (e.g. TensorRT) compiled for a specific compute capability (e.g. SM 8.7 Jetson Orin) fail fast with a descriptive error when target profile verification detects a mismatched execution hardware environment per `D-022`.
+7. **Production Deployment Human Approval Gate:** Invoking `DeploymentManager.activate` without an authorized `ApprovalId` generated per `docs/APPROVALS.md` and ADR-0003 raises an authorization failure and halts deployment execution.
+8. **Automated Readiness Probe Gate:** Candidate deployments in `STAGING` undergo automated warmup and readiness probing via `HealthCheckSpec`. Deployments that fail latency budgets, memory headroom, or throw execution faults transition to `FAILED` without routing production traffic.
+9. **Deterministic Zero-Downtime Rollback:** When an active deployment experiences failure or manual operator rollback is triggered, `DeploymentManager.rollback` immediately restores the verified predecessor `rollback_target_id` manifest without downtime or pipeline stalls.
+10. **Execution Token Traceability:** Optimization compilation and deployment execution jobs track `execution_id` and `target_id` from ADR-0005, maintaining complete causal auditability to physical containers, processes, or remote daemon executions.
+11. **Persistence Protocol Independence:** All optimization results, artifacts, and deployment lifecycle records serialize cleanly to immutable JSON/Pydantic representations for persistence in ADR-0004 (`experiments.sqlite`) without ADR-0012 directly owning database connections.
