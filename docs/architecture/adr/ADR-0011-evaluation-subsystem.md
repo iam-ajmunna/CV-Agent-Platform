@@ -1,6 +1,6 @@
 # ADR-0011: Evaluation Subsystem Architecture
 
-- **Status:** Accepted
+- **Status:** Accepted — Frozen
 - **Date:** 2026-09-09
 - **Layer:** evaluation / empirical measurement
 - **Canon:** `[P§7]`, `[P§12]`, `[P§13]`, `[P§21]`, `[P§22]`, `[P§24]`, `[P§25]`, `[P§27]`, `[P§29.2]`, `[P§29.3]`, `[P§29.4]`, `[P§29.10]`, `[P§34]`
@@ -251,8 +251,11 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from cv_agent.capabilities import CapabilityId, ToolId
 from cv_agent.dataset.types import ContentHash, DatasetId, DatasetVersion
+from cv_agent.tools.types import ExecutionId, TargetId
 from cv_agent.training.types import CheckpointId, TrainingPrecision
 
+# Identifier syntax rules:
+# - EvaluationId, MetricId, BenchmarkId: conform to `[a-z0-9_.-]+(/[a-z0-9_.-]+)*` per ADR-0001 §3.1.
 EvaluationId = NewType("EvaluationId", str)
 MetricId = NewType("MetricId", str)
 BenchmarkId = NewType("BenchmarkId", str)
@@ -340,7 +343,7 @@ class MetricResult(BaseModel):
     primary_value: float
     per_class_values: Mapping[str, float] = Field(default_factory=dict)
     confidence_interval: tuple[float, float] | None = None
-    curve_data: Mapping[str, Sequence[float]] = Field(default_factory=dict)
+    curve_data: Mapping[str, tuple[float, ...]] = Field(default_factory=dict)
     metadata: Mapping[str, Any] = Field(default_factory=dict)
 
 
@@ -350,7 +353,7 @@ class BenchmarkConfiguration(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     benchmark_id: BenchmarkId
-    batch_sizes: Sequence[int] = (1,)
+    batch_sizes: tuple[int, ...] = (1,)
     warmup_iterations: int = Field(ge=5, default=10)
     measured_iterations: int = Field(ge=20, default=100)
     precision: TrainingPrecision = TrainingPrecision.FP16_AMP
@@ -389,12 +392,14 @@ class ErrorAnalysisRecord(BaseModel):
     failed_samples_count: int
     false_positive_count: int
     false_negative_count: int
-    confusion_matrix: Sequence[Sequence[int]] = Field(default_factory=list)
-    class_labels: Sequence[str] = Field(default_factory=list)
+    confusion_matrix: tuple[tuple[int, ...], ...] = Field(default_factory=tuple)
+    class_labels: tuple[str, ...] = Field(default_factory=tuple)
     localization_errors: int = 0
     classification_errors: int = 0
     slice_performance: Mapping[str, float] = Field(default_factory=dict)
-    representative_failure_hashes: Sequence[ContentHash] = Field(default_factory=list)
+    representative_failure_hashes: tuple[ContentHash, ...] = Field(
+        default_factory=tuple
+    )
     diagnostics_summary: str
 
 
@@ -442,7 +447,7 @@ class EvaluationPlan(BaseModel):
     dataset_binding: EvaluationDatasetBinding
     model_artifact: ModelArtifactReference
     task_type: TaskType
-    metrics: Sequence[MetricDefinition]
+    metrics: tuple[MetricDefinition, ...]
     benchmark_config: BenchmarkConfiguration | None = None
     baseline_experiment_id: str | None = None
     compute_target_id: str = "default_evaluator"
@@ -460,9 +465,8 @@ class EvaluationExecution(BaseModel):
     status: EvaluationStatus
     started_at: datetime
     target: EvaluationTarget
-    active_job_ref: Mapping[str, Any] | None = (
-        None  # Aligned with ADR-0005 ActiveJobHandoff
-    )
+    execution_id: ExecutionId | None = None
+    target_id: TargetId | None = None
 
 
 class EvaluationResult(BaseModel):
@@ -473,8 +477,8 @@ class EvaluationResult(BaseModel):
     evaluation_id: EvaluationId
     plan: EvaluationPlan
     status: EvaluationStatus
-    quality_metrics: Sequence[MetricResult]
-    system_benchmarks: Sequence[BenchmarkResult] = Field(default_factory=list)
+    quality_metrics: tuple[MetricResult, ...]
+    system_benchmarks: tuple[BenchmarkResult, ...] = Field(default_factory=tuple)
     baseline_comparison: BaselineComparisonResult | None = None
     error_analysis: ErrorAnalysisRecord | None = None
     environment: EvaluationEnvironmentRecord
@@ -542,6 +546,7 @@ class EvaluationRunner(Protocol):
         self,
         plan: EvaluationPlan,
         tool_id: ToolId,
+        target_id: TargetId | None = None,
     ) -> EvaluationResult: ...
 ```
 
@@ -575,3 +580,13 @@ class EvaluationRunner(Protocol):
 - ADR-0008: Reasoning Subsystem (`D-026`)
 - ADR-0009: Dataset Subsystem (`D-029`)
 - ADR-0010: Training Subsystem (`D-030`)
+
+## 7. Implementation Acceptance Criteria
+
+1. **Plan Validation & Immutability:** An `EvaluationPlan` enforces frozen validation (`frozen=True`, `extra='forbid'`), validates required metrics and task types, and binds authoritatively to `DatasetId`, `DatasetVersion`, `split_name`, and `weights_hash` per ADR-0009 and ADR-0010.
+2. **Co-Equal Quality and Systems Measurement:** `EvaluationResult` requires both `quality_metrics` and, when benchmark configuration is specified, `system_benchmarks` (latency percentiles, throughput FPS, VRAM), rejecting evaluations that assess quality without hardware deployability per `[P§12]`.
+3. **Mandatory Baseline Comparison:** If an evaluation specifies `baseline_experiment_id`, `BaselineComparisonResult` must compute quantitative metric deltas and Pareto dominance flags, prohibiting unsubstantiated claims of improvement per `[P§29.2]`, `[P§29.3]`.
+4. **Structured Error Analysis:** The evaluation engine extracts an evidence-based `ErrorAnalysisRecord` containing confusion matrices, failure counts, slice performances, and representative failure hashes for consumption by Reasoning (ADR-0008).
+5. **Hardware Benchmark Guardrails:** Systems benchmarking executes on configured execution targets with warmup iterations ($\ge 5$) and hardware-synchronized timers, reporting "known but unavailable" when target accelerators are unconfigured per `D-022`.
+6. **Transport and Execution Traceability:** `EvaluationExecution` binds to ADR-0005 execution tokens via `execution_id: ExecutionId | None` and `target_id: TargetId | None`, delegating physical execution through declared tools.
+7. **Immutable Result Handoff:** Completed evaluation outcomes package an immutable `EvaluationEnvironmentRecord` and serialize structured results for persistence into ADR-0004 `experiments.sqlite` without owning database storage.
