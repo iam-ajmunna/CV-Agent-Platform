@@ -161,10 +161,10 @@ A `TrainingPlan` is an immutable, Pydantic v2 frozen specification containing al
    - `gradient_accumulation_steps`: Number of steps before optimizer update (effective batch size = per-device × devices × accumulation).
    - `epochs`: Total target epochs.
    - `precision`: Computation mode (`fp32`, `fp16_amp`, `bf16_amp`, `int8_ptq_aware`).
-7. **Augmentation Recipe (`[P§10]`):**
+7. **Augmentation Recipe (`[P§10]`):
    - Training pipeline transforms (spatial transforms, photometric distortion, mosaic, mixup, copy-paste) with explicit parameters.
    - Deterministic validation transform pipeline (resize, normalization mean/std).
-8. **Compute Requirements (`[P§13]`, `[P§29.4]`):**
+8. **Compute Requirements (`[P§13]`, `[P§29.4]`):
    - `min_vram_gb`: Minimum GPU memory required per worker to prevent OOM.
    - `min_cuda_compute_capability`: Target architecture constraint (e.g. `8.0` for Ampere, `8.9` for Ada, `9.0` for Hopper).
    - `num_devices`: Requested accelerator count.
@@ -499,13 +499,13 @@ class CheckpointManifest(BaseModel):
     weights_uri: str = Field(
         ...,
         description=(
-            "Storage URI for the checkpoint weights file. MUST begin with one of the "
-            "scheme prefixes recognized by ADR-0005 DatasetStore transport adapters: "
-            "'file://' (local filesystem), 's3://' (AWS S3), 'gs://' (Google Cloud Storage), "
-            "or 'minio://' (MinIO / S3-compatible). A bare filesystem path without a scheme "
-            "prefix is invalid and MUST be rejected at instantiation time."
+            "Storage URI for the checkpoint weights file. MUST begin with a scheme "
+            "recognized by the configured artifact/object-storage adapter; a bare "
+            "filesystem path without a scheme prefix is invalid and MUST be rejected "
+            "at instantiation time. The concrete adapter and URI scheme are deployment "
+            "configuration concerns; dataset storage ownership remains with ADR-0009."
         ),
-        pattern=r"^(file://|s3://|gs://|minio://).+",
+        pattern=r"^[a-zA-Z][a-zA-Z0-9+.-]*://.+",
     )
     optimizer_state_included: bool = False
     metrics: Mapping[str, float] = Field(default_factory=dict)
@@ -624,3 +624,4 @@ class TrainingLauncher(Protocol):
 7. **Online Failure Diagnostics:** Automated `TrainingMonitor` triggers immediate job abort on detecting NaN/Inf values, loss explosion, or unrecoverable CUDA OOM, recording structured `failure_reason` and `failure_details` in `TrainingJobRecord`.
 8. **Deterministic Checkpoint Lineage:** Checkpoint manifests record `checkpoint_id`, `weights_hash` (SHA-256), training step, epoch, and metric snapshot, enforcing disk retention policies (`keep_best`, `keep_last`, `keep_final`).
 9. **Reproducibility Metadata Packaging:** Completed runs package an immutable `TrainingEnvironmentRecord` (`seed_*`, git commit SHA, dependency versions, device topology) and hand off to ADR-0004 `experiments.sqlite` and ADR-0011 Evaluation.
+10. **Checkpoint Storage Boundary:** `CheckpointManifest.weights_uri` uses a URI scheme supported by the configured artifact/object-storage adapter. ADR-0010 does not assign dataset storage transport ownership to ADR-0005; authoritative dataset manifests and dataset payload storage remain governed by ADR-0009.

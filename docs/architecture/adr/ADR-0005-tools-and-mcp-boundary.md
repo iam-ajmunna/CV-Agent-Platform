@@ -189,6 +189,7 @@ ADR-0005 interfaces with the orchestration, approval, and asynchronous execution
   - A synchronous invocation produces a terminal `ToolResult` directly to the calling graph node (e.g., inspection tools, dataset file checks, local git operations), where `ToolResult.status` represents the terminal outcome of execution.
   - An accepted asynchronous invocation (e.g., multi-hour training, hyperparameter sweeps, complex video profiling) produces a `ToolResult` containing an `ActiveJobHandoff` reference (`active_job_ref`). For asynchronous invocations, `ToolResult.status == SUCCESS` denotes that the tool invocation/dispatch itself succeeded (the job was accepted by the target), not that the underlying job has finished. `active_job_ref.status` represents the underlying job's initial lifecycle state (`submitted` or `running`).
   - **`ActiveJobHandoff`** mirrors the externally visible fields of ADR-0003's `ActiveJobRef` (`job_id`, `job_type`, `target`, `submitted_at`, `status`, `metadata`) for the asynchronous handoff boundary. ADR-0003 converts and records it as the authoritative `ActiveJobRef` in `AgentState` and owns all subsequent lifecycle monitoring, state transitions, restart recovery, and checkpointing. ADR-0005 does not own or duplicate asynchronous job state machines.
+  - **Handoff-expiry reconciliation invariant:** An `ActiveJobHandoff` whose heartbeat has expired or whose `expires_at` has passed indicates that the handoff can no longer be trusted as a live observation; it does **not** by itself establish that the underlying execution failed, was cancelled, or reached any other terminal state. ADR-0003 MUST reconcile the external job outcome through its authoritative observation/recovery path before classifying the operation as failed, cancelled, completed, or otherwise terminal.
 
 ### 3.9. Result Normalization and Memory Handoff (ADR-0004)
 
@@ -433,6 +434,7 @@ The Tool Layer normalizes failures into distinct architectural categories, clean
 7. **Provider Isolation:** LLM Gateway classes and imports (`cv_agent.llm`) remain completely isolated from Tool Layer adapters.
 8. **Transport-Independent Results:** Tool outputs adhere to the structured `ToolResult` specification, separating structured output and artifacts from transport-specific diagnostics (`stderr`, protocol logs).
 9. **Asynchronous Execution Handoff:** An accepted asynchronous tool invocation returns a `ToolResult` carrying an `ActiveJobHandoff` contract whose fields mechanically mirror ADR-0003's `ActiveJobRef`, where `ToolResult.status == SUCCESS` denotes successful dispatch rather than completion of the underlying job, leaving job persistence, lifecycle transitions, restart recovery, and observation strictly to orchestration.
+10. **Handoff Expiry Is Not Failure:** An expired heartbeat or `expires_at` on `ActiveJobHandoff` MUST NOT be interpreted by ADR-0005 as proof of execution failure. ADR-0003 MUST reconcile the external job outcome before assigning a terminal execution classification.
 
 ## 9. References
 
