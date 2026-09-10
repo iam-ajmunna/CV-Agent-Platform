@@ -535,3 +535,23 @@ isolation) and Q3 (cross-process restart survival) cleanly without external netw
 
 **Learned:** Binding evaluation execution directly to ADR-0005 execution tokens guarantees that hardware benchmark measurements (e.g. inference latency, peak VRAM) are verifiably tied to the specific physical execution target and container run.
 **Left open:** Proceeding to ADR-0012 freeze review.
+
+---
+
+## 2026-09-10 — ADR-0012 Freeze Synchronization (D-045, PR #30)
+
+**Did:** Hardened and froze ADR-0012 (`docs/architecture/adr/ADR-0012-optimization-deployment-subsystem.md`) on `main` following review and squash-merge of PR #30. Recorded decision `D-045` in `DECISIONS.md`. Updated `STATUS.md` and `AGENT_HANDOFF.md`. Changes made:
+1. Updated amendment status to `Accepted — Frozen`.
+2. Documented canonical identifier syntax rules in §4 for `OptimizationPlanId`, `OptimizedArtifactId`, and `DeploymentId` conforming to `[a-z0-9_.-]+(/[a-z0-9_.-]+)*` per ADR-0001 §3.1.
+3. Enforced immutable `tuple` types for `shape_profiles` in `OptimizationPlan` and `OptimizedModelArtifact`.
+4. Bound `CalibrationDatasetBinding` to default `split_name = "calibration"` per ADR-0009 Invariant 13 to prevent test-split leakage.
+5. Bound `OptimizedModelArtifact` and `DeploymentRecord` directly to ADR-0005 execution tokens via `execution_id: ExecutionId | None` and `target_id: TargetId | None`, and updated `ModelOptimizer.compile` and `DeploymentManager.stage` with optional `target_id`.
+6. Added Section 7 (`Implementation Acceptance Criteria`) covering plan immutability, calibration dataset leakage gate, dynamic shape bounds, transformation lineage DAG, post-optimization verification gate, target-locked compilation, production deployment human approval, automated readiness probe gate, zero-downtime rollback guarantee, execution token traceability, and persistence protocol independence.
+
+**Why:** `[P§8]`, `[P§9]`, `[P§13]`, `[P§14]`, `[P§15]`, `[P§21]`, `[P§22]`, `[P§24]`, `[P§25]`, `[P§28]`, `[P§29.4]`, `[P§34]` — establishes typed optimization plans, cryptographic artifact transformation lineage, mandatory post-optimization evaluation verification prohibiting accuracy drops, hardware-locked compilation, human-approved deployment, and zero-downtime automated rollback.
+
+**Broke:** Nothing broken. 99 pytest tests pass, ruff clean, mypy clean.
+
+**Learned:** Tracking `execution_id` and `target_id` across model compilation and deployment records guarantees end-to-end auditability from training checkpoint to edge container execution.
+
+**Left open:** Proceeding to ADR-0013 freeze review.
