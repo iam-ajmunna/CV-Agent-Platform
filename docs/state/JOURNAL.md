@@ -600,3 +600,26 @@ isolation) and Q3 (cross-process restart survival) cleanly without external netw
 
 **Left open:** Phase 1 architecture is 100% frozen, hardened, and verified. Ready for Phase 2 issue hierarchy and milestone scheduling under Official PM approval.
 
+---
+
+## 2026-09-11 — Issue #35 Phase 2A Domain Contracts
+
+**Did:** Implemented the scoped ADR-0001 domain substrate on
+`feature/ajmunna/phase-2a-domain-contracts`: validated semantic identifiers,
+immutable capability/skill/tool/agent bindings, availability and provenance value objects,
+deterministic execution-free resolution, and UTC immutable resolution-snapshot
+serialization. Added 11 focused contract tests, including deterministic ordering,
+known-but-unavailable NVIDIA resolution, and snapshot round-trips.
+
+**Why:** `[P§15]`, `[P§23]`, `[P§34]` — preserves the distinct capability, skill, tool,
+and agent identities; reports unavailable NVIDIA capability honestly; and keeps capability
+resolution separate from discovery, execution, approvals, and persistence.
+
+**Broke:** Nothing. Ruff, format, Mypy, and the full pytest suite pass (110 tests;
+one pre-existing `importlib.abc.Traversable` deprecation warning).
+
+**Learned:** Accepting compatibility, policy-eligibility, and authorization as external
+facts lets ADR-0001 record reproducible resolution outcomes without duplicating the
+ADR-0003 approval authority or ADR-0005/ADR-0007 execution and discovery boundaries.
+
+**Left open:** PR review for Issue #35; all Phase 2B and later subsystems remain out of scope.
