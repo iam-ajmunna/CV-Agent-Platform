@@ -15,12 +15,12 @@ discovery, persistence, or authorization policy `[P§23]`, `[P§34]`.
 
 | Item | Issue | State |
 |---|---|---|
-| Foundational domain contracts | #35 | Implemented on `feature/ajmunna/phase-2a-domain-contracts`; validated locally; PR preparation pending |
+| Foundational domain contracts | #35 / PR #36 | Implemented, validated locally, and awaiting Official PM review |
 
 ## Next 3 actions
 
-1. Inspect and commit the focused Issue #35 diff with rolling-state records.
-2. Push the short-lived branch and open a PR to `main` for Official PM review.
+1. Obtain Official PM review and CI for PR #36.
+2. Merge PR #36 to `main` only after review and passing CI.
 3. Schedule the next approved Phase 2 issue; do not begin Phase 2B without it.
 
 ## Blockers
