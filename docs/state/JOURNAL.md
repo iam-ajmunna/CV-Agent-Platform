@@ -650,3 +650,23 @@ scope boundaries, modified files, tests, commits, and validation status for Issu
 **Broke:** Nothing. PR #36's Python 3.10–3.13 CI matrix and GitGuardian checks pass.
 
 **Left open:** Official PM review and merge of PR #36.
+
+---
+
+## 2026-09-11 — PR #36 Deterministic Tie-Breaker Resolution Correction
+
+**Did:** Implemented canonical candidate fact extraction (`canonical_candidate_facts`), a deterministic
+canonical JSON tie-breaker (`candidate_tie_breaker`), and integrated it into `DeterministicCapabilityResolver.resolve()`
+as the final sorting key. Added regression tests verifying order-independent resolution and deterministic
+rejected-candidate ordering when priority, skill_id, and skill_version are identical.
+
+**Why:** Addresses PR #36 blocking review finding, ADR-0001 §3.6, and Determinism Invariant #7: Python's
+stable sort previously preserved registration/input order for candidates with identical priority,
+skill_id, and skill_version.
+
+**Broke:** Nothing. All 112 pytest tests, Ruff lint/format checks, and Mypy (including Python 3.10 target) pass.
+
+**Learned:** Candidate facts must be canonicalized into a total-ordered JSON string (`canonical_json`) to
+avoid Python comparison `TypeError` when optional candidate fields (e.g. `agent_id`, `target_reference`) contain `None`.
+
+**Left open:** Push correction to PR #36 and await full CI matrix run.

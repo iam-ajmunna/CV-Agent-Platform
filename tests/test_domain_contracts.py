@@ -183,3 +183,129 @@ def test_resolution_snapshot_is_immutable_and_round_trips() -> None:
     assert snapshot.tools == (ResolvedToolRef(ToolId("tool.nvidia.trtexec"), "10.0.0"),)
     assert ResolutionSnapshot.from_json(snapshot.to_json()) == snapshot
     assert ResolutionSnapshot.from_dict(snapshot.to_dict()) == snapshot
+
+
+def test_resolver_breaks_ties_deterministically_when_priority_and_version_are_identical() -> (
+    None
+):
+    capability = _capability()
+    binding_a = SkillBinding(
+        capability_id=capability.capability_id,
+        skill_id=SkillId("nvidia.tensorrt.inference_optimization"),
+        compatibility=CompatibilityConstraint(requirements={"accelerator": "h100"}),
+        priority=10,
+        provenance=Provenance(
+            kind=ProvenanceKind.OFFICIAL_VENDOR,
+            publisher="NVIDIA Enterprise",
+            source="registry/enterprise",
+        ),
+    )
+    binding_b = SkillBinding(
+        capability_id=capability.capability_id,
+        skill_id=SkillId("nvidia.tensorrt.inference_optimization"),
+        compatibility=CompatibilityConstraint(requirements={"accelerator": "l40s"}),
+        priority=10,
+        provenance=Provenance(
+            kind=ProvenanceKind.OFFICIAL_VENDOR,
+            publisher="NVIDIA Community",
+            source="registry/community",
+        ),
+    )
+
+    candidate_a = ResolutionCandidate(
+        binding=binding_a,
+        skill_version="1.0.0",
+        tools=(ResolvedToolRef(ToolId("tool.nvidia.trtexec"), "10.0.0"),),
+        agent_id=AgentId("agent.remote.gpu-a"),
+        target_reference="target/gpu-a",
+        compatibility_result="compatible: sm_89",
+        availability_state=AvailabilityState.EXECUTABLE,
+        compatible=True,
+        policy_eligible=True,
+        authorized=False,
+    )
+    candidate_b = ResolutionCandidate(
+        binding=binding_b,
+        skill_version="1.0.0",
+        tools=(ResolvedToolRef(ToolId("tool.nvidia.trtexec"), "10.1.0"),),
+        agent_id=AgentId("agent.remote.gpu-b"),
+        target_reference="target/gpu-b",
+        compatibility_result="compatible: sm_90",
+        availability_state=AvailabilityState.EXECUTABLE,
+        compatible=True,
+        policy_eligible=True,
+        authorized=False,
+    )
+
+    resolver = DeterministicCapabilityResolver(policy_version="1")
+    first = resolver.resolve(capability, (candidate_a, candidate_b))
+    second = resolver.resolve(capability, (candidate_b, candidate_a))
+
+    assert first == second
+    assert first.skill_id == SkillId("nvidia.tensorrt.inference_optimization")
+    assert first.skill_version == "1.0.0"
+    # Deterministic tie-breaker selects one deterministically regardless of order
+    assert first.agent_id in (
+        AgentId("agent.remote.gpu-a"),
+        AgentId("agent.remote.gpu-b"),
+    )
+
+
+def test_rejected_candidate_ordering_is_deterministic_when_priority_and_version_are_identical() -> (
+    None
+):
+    capability = _capability()
+    binding_a = SkillBinding(
+        capability_id=capability.capability_id,
+        skill_id=SkillId("nvidia.tensorrt.inference_optimization"),
+        compatibility=CompatibilityConstraint(requirements={"accelerator": "h100"}),
+        priority=10,
+        provenance=Provenance(
+            kind=ProvenanceKind.OFFICIAL_VENDOR,
+            publisher="NVIDIA Enterprise",
+        ),
+    )
+    binding_b = SkillBinding(
+        capability_id=capability.capability_id,
+        skill_id=SkillId("nvidia.tensorrt.inference_optimization"),
+        compatibility=CompatibilityConstraint(requirements={"accelerator": "l40s"}),
+        priority=10,
+        provenance=Provenance(
+            kind=ProvenanceKind.OFFICIAL_VENDOR,
+            publisher="NVIDIA Community",
+        ),
+    )
+
+    rejected_a = ResolutionCandidate(
+        binding=binding_a,
+        skill_version="1.0.0",
+        tools=(ResolvedToolRef(ToolId("tool.nvidia.trtexec"), "10.0.0"),),
+        agent_id=AgentId("agent.remote.gpu-a"),
+        target_reference="target/gpu-a",
+        compatibility_result="incompatible driver version",
+        availability_state=AvailabilityState.EXECUTABLE,
+        compatible=False,
+        policy_eligible=True,
+        authorized=False,
+    )
+    rejected_b = ResolutionCandidate(
+        binding=binding_b,
+        skill_version="1.0.0",
+        tools=(ResolvedToolRef(ToolId("tool.nvidia.trtexec"), "10.1.0"),),
+        agent_id=AgentId("agent.remote.gpu-b"),
+        target_reference="target/gpu-b",
+        compatibility_result="incompatible cuda version",
+        availability_state=AvailabilityState.EXECUTABLE,
+        compatible=False,
+        policy_eligible=True,
+        authorized=False,
+    )
+
+    resolver = DeterministicCapabilityResolver(policy_version="1")
+    first = resolver.resolve(capability, (rejected_a, rejected_b))
+    second = resolver.resolve(capability, (rejected_b, rejected_a))
+
+    assert first == second
+    assert first.skill_id is None
+    assert len(first.rejected_candidates) == 2
+    assert first.rejected_candidates == second.rejected_candidates

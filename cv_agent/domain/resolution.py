@@ -11,6 +11,7 @@ from cv_agent.domain.contracts import (
 )
 from cv_agent.domain.errors import DomainValidationError, ValidationCode
 from cv_agent.domain.identifiers import AgentId, SkillId, ToolId
+from cv_agent.domain.serialization import canonical_json, to_json_value
 
 
 @dataclass(frozen=True)
@@ -95,6 +96,50 @@ class Resolution:
         object.__setattr__(self, "rejected_candidates", tuple(self.rejected_candidates))
 
 
+def canonical_candidate_facts(candidate: ResolutionCandidate) -> dict[str, object]:
+    """Extract canonicalized dictionary of candidate facts for deterministic comparison."""
+    return {
+        "agent_id": str(candidate.agent_id) if candidate.agent_id is not None else None,
+        "authorized": candidate.authorized,
+        "availability_state": candidate.availability_state.value,
+        "capability_id": str(candidate.binding.capability_id),
+        "compatibility_requirements": to_json_value(
+            candidate.binding.compatibility.requirements
+        ),
+        "compatibility_result": candidate.compatibility_result,
+        "compatible": candidate.compatible,
+        "policy_eligible": candidate.policy_eligible,
+        "priority": candidate.binding.priority,
+        "provenance": {
+            "kind": candidate.binding.provenance.kind.value,
+            "metadata": to_json_value(candidate.binding.provenance.metadata),
+            "publisher": candidate.binding.provenance.publisher,
+            "source": candidate.binding.provenance.source,
+            "specification_version": candidate.binding.provenance.specification_version,
+            "verified": candidate.binding.provenance.verified,
+        },
+        "skill_id": str(candidate.binding.skill_id),
+        "skill_version": candidate.skill_version,
+        "target_reference": candidate.target_reference,
+        "tools": [
+            {
+                "tool_id": str(tool.tool_id),
+                "tool_version": tool.tool_version,
+            }
+            for tool in sorted(
+                candidate.tools,
+                key=lambda tool: (str(tool.tool_id), tool.tool_version),
+            )
+        ],
+        "unavailable_reason": candidate.unavailable_reason,
+    }
+
+
+def candidate_tie_breaker(candidate: ResolutionCandidate) -> str:
+    """Deterministic canonical string representation of candidate facts for tie-breaking."""
+    return canonical_json(canonical_candidate_facts(candidate))
+
+
 class DeterministicCapabilityResolver:
     """Select an already-evaluated binding without discovery, policy, or execution."""
 
@@ -112,6 +157,10 @@ class DeterministicCapabilityResolver:
     def policy_version(self) -> str:
         """Version identifying the declared deterministic suitability ordering."""
         return self._policy_version
+
+    @staticmethod
+    def _candidate_tie_breaker(candidate: ResolutionCandidate) -> str:
+        return candidate_tie_breaker(candidate)
 
     def resolve(
         self,
@@ -135,6 +184,7 @@ class DeterministicCapabilityResolver:
                     -candidate.binding.priority,
                     str(candidate.binding.skill_id),
                     candidate.skill_version,
+                    self._candidate_tie_breaker(candidate),
                 ),
             )
         )

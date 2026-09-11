@@ -45,6 +45,8 @@ The implementation maintains the distinct capability, skill, tool, and agent voc
 - Runtime distinction of all four identifier classes.
 - Binding immutability and identity boundaries.
 - Deterministic resolution independent of candidate registration order.
+- Deterministic resolution tie-breaking for candidates sharing identical priority, skill_id, and skill_version.
+- Deterministic rejected-candidate ordering under tie-breaking.
 - Known-but-unavailable NVIDIA resolution with no substitute implementation.
 - Snapshot attribute and collection immutability.
 - Snapshot dictionary and JSON round-trips.
@@ -57,7 +59,7 @@ The implementation maintains the distinct capability, skill, tool, and agent voc
 | Ruff format check | Pass |
 | Mypy | Pass |
 | Mypy, Python 3.10 target (`cv_agent/domain`) | Pass |
-| Pytest | Pass — 110 tests |
+| Pytest | Pass — 112 tests |
 | Git diff check | Pass |
 | GitHub CI, Python 3.10–3.13 | Pass |
 | GitGuardian | Pass |
