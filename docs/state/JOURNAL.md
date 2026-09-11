@@ -639,3 +639,14 @@ the package supports Python 3.10 and the domain substrate must preserve that com
 Mypy with `--python-version 3.10`, and local Ruff, default Mypy, and 110 pytest tests pass.
 
 **Left open:** Push the correction and await the CI matrix rerun before review.
+
+---
+
+## 2026-09-11 — Issue #35 Review Report
+
+**Did:** Added `docs/reports/ISSUE-35-PHASE-2A-REPORT.md`, recording the implementation,
+scope boundaries, modified files, tests, commits, and validation status for Issue #35 / PR #36.
+
+**Broke:** Nothing. PR #36's Python 3.10–3.13 CI matrix and GitGuardian checks pass.
+
+**Left open:** Official PM review and merge of PR #36.
