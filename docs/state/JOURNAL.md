@@ -623,3 +623,19 @@ facts lets ADR-0001 record reproducible resolution outcomes without duplicating 
 ADR-0003 approval authority or ADR-0005/ADR-0007 execution and discovery boundaries.
 
 **Left open:** PR review for Issue #35; all Phase 2B and later subsystems remain out of scope.
+
+---
+
+## 2026-09-11 — PR #36 Python 3.10 Compatibility Correction
+
+**Did:** Replaced Python 3.11-only `StrEnum`, `typing.Self`, and `datetime.UTC` in
+the Issue #35 domain contracts with Python 3.10-compatible `str`/`Enum`,
+`typing_extensions.Self`, and `datetime.timezone.utc` equivalents.
+
+**Why:** The PR's Python 3.10 Mypy job correctly rejected the initial implementation;
+the package supports Python 3.10 and the domain substrate must preserve that compatibility.
+
+**Broke:** Initial PR #36 Python 3.10 CI failed in Mypy. The domain package now passes
+Mypy with `--python-version 3.10`, and local Ruff, default Mypy, and 110 pytest tests pass.
+
+**Left open:** Push the correction and await the CI matrix rerun before review.

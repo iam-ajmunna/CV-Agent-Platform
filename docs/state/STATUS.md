@@ -15,12 +15,12 @@ discovery, persistence, or authorization policy `[P§23]`, `[P§34]`.
 
 | Item | Issue | State |
 |---|---|---|
-| Foundational domain contracts | #35 / PR #36 | Implemented, validated locally, and awaiting Official PM review |
+| Foundational domain contracts | #35 / PR #36 | Python 3.10 compatibility correction validated locally; CI rerun pending |
 
 ## Next 3 actions
 
-1. Obtain Official PM review and CI for PR #36.
-2. Merge PR #36 to `main` only after review and passing CI.
+1. Push the Python 3.10 compatibility correction and await CI for PR #36.
+2. Obtain Official PM review and merge only after CI passes.
 3. Schedule the next approved Phase 2 issue; do not begin Phase 2B without it.
 
 ## Blockers

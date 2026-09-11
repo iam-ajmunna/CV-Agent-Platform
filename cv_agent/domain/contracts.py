@@ -4,14 +4,14 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from enum import StrEnum
+from enum import Enum
 
 from cv_agent.domain.errors import DomainValidationError, ValidationCode
 from cv_agent.domain.identifiers import AgentId, CapabilityId, SkillId, ToolId
 from cv_agent.domain.serialization import FrozenJsonValue, freeze_json_mapping
 
 
-class Stage(StrEnum):
+class Stage(str, Enum):
     """Canonical CV engineering stages owned by the capability model."""
 
     DISCOVER = "DISCOVER"
@@ -29,7 +29,7 @@ class Stage(StrEnum):
     MONITOR = "MONITOR"
 
 
-class AvailabilityState(StrEnum):
+class AvailabilityState(str, Enum):
     """Operational readiness, deliberately separate from authorization."""
 
     KNOWN = "KNOWN"
@@ -41,7 +41,7 @@ class AvailabilityState(StrEnum):
     KNOWN_BUT_UNAVAILABLE = "KNOWN_BUT_UNAVAILABLE"
 
 
-class ProvenanceKind(StrEnum):
+class ProvenanceKind(str, Enum):
     """Extensible provenance classes required for trustworthy resolution records."""
 
     INTERNAL = "internal"

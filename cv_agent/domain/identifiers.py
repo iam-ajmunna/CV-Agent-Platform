@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import re
-from typing import Self
+
+from typing_extensions import Self
 
 from cv_agent.domain.errors import DomainValidationError, ValidationCode
 

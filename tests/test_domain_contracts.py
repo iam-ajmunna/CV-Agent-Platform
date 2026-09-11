@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import FrozenInstanceError
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 
 import pytest
 
@@ -173,7 +173,7 @@ def test_resolution_snapshot_is_immutable_and_round_trips() -> None:
         target_reference="target/gpu-a",
         compatibility_result="compatible",
         availability_state=AvailabilityState.EXECUTABLE,
-        created_at=datetime(2026, 9, 11, 10, 15, tzinfo=UTC),
+        created_at=datetime(2026, 9, 11, 10, 15, tzinfo=timezone.utc),
     )
 
     with pytest.raises(FrozenInstanceError):

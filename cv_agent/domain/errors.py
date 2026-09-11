@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from enum import StrEnum
+from enum import Enum
 
 
-class ValidationCode(StrEnum):
+class ValidationCode(str, Enum):
     """Machine-readable categories for domain input validation failures."""
 
     INVALID_IDENTIFIER = "INVALID_IDENTIFIER"

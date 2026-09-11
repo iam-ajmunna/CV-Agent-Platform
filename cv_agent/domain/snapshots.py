@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from cv_agent.domain.contracts import AvailabilityState
 from cv_agent.domain.errors import DomainValidationError, ValidationCode
@@ -31,7 +31,7 @@ def _as_utc(value: datetime) -> datetime:
             "must be timezone-aware UTC",
             value,
         )
-    return value.astimezone(UTC)
+    return value.astimezone(timezone.utc)
 
 
 def _format_utc(value: datetime) -> str:
