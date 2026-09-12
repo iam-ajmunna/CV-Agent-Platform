@@ -3,32 +3,33 @@
 > **Rewritten** every session. Describes **now**, never history — history lives in
 > `JOURNAL.md`. Hard cap: 60 lines. If it exceeds that, you are logging, not stating.
 
-**Updated:** 2026-09-11 · **Phase:** 2A — Domain / Contract Substrate · **Health:** green
+**Updated:** 2026-09-12 · **Phase:** 2B — Capability Registry Subsystem · **Health:** green
 
 ## Where we are
 
-Phase 1's 13 frozen ADRs remain the implementation contracts. Issue #35 establishes
-the first Phase 2 slice: immutable, typed ADR-0001 domain contracts without execution,
-discovery, persistence, or authorization policy `[P§23]`, `[P§34]`.
+Phase 2A established the immutable, typed domain substrate on `main`. Issue #37 operationalizes
+ADR-0001 by implementing the authoritative, immutable `CapabilityRegistry` subsystem
+over declarative definitions, bindings, and deterministic resolution without execution `[P§23]`, `[P§34]`.
 
 ## In flight
 
 | Item | Issue | State |
 |---|---|---|
-| Foundational domain contracts | #35 / PR #36 | Review finding resolved (deterministic candidate tie-breaker); awaiting CI matrix |
+| Capability Registry Subsystem | #37 | Implemented on work branch; quality gates pass; opening PR |
 
 ## Next 3 actions
 
-1. Verify complete CI matrix passes on PR #36.
-2. Obtain Official PM review and merge PR #36 only after approval.
-3. Schedule the next approved Phase 2 issue; do not begin Phase 2B without it.
+1. Open PR for Issue #37 from `feature/ajmunna/phase-2b-capability-registry`.
+2. Await full GitHub Actions CI matrix verification (Python 3.10–3.13).
+3. Obtain Official PM review and approval before merging to `main`.
 
 ## Blockers
 
-- None for Issue #35.
+- None for Issue #37.
 
 ## Scope guard
 
-Issue #35 implements only typed identity, binding, availability, deterministic
-resolution, and resolution-snapshot contracts. Persistence, tools/MCP, LLM, orchestration,
-reasoning, training, evaluation, deployment, and monitoring remain out of scope `[P§19]`–`[P§23]`, `[P§34]`.
+Issue #37 implements only typed capability catalog loading, bindings, immutable registry
+indexes, deterministic resolution, and resolution snapshot emission. Tool execution, MCP,
+LLM gateway, orchestration, persistence, reasoning, training, evaluation, deployment,
+and monitoring remain out of scope `[P§19]`–`[P§23]`, `[P§34]`.

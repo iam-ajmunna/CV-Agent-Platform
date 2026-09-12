@@ -670,3 +670,29 @@ skill_id, and skill_version.
 avoid Python comparison `TypeError` when optional candidate fields (e.g. `agent_id`, `target_reference`) contain `None`.
 
 **Left open:** Push correction to PR #36 and await full CI matrix run.
+
+---
+
+## 2026-09-12 — Phase 2B ADR-0001 Capability Registry Implementation (feature/ajmunna/phase-2b-capability-registry)
+
+**Did:** Implemented authoritative typed `CapabilityRegistry` subsystem over `CapabilityDefinition`,
+`SkillBinding`, `ToolBinding`, and `AgentBinding` domain models. Enforced load-time validation,
+explicit post-load immutability via `MappingProxyType` and frozen tuples, typed query APIs, and
+deterministic capability resolution emitting immutable `ResolutionSnapshot` records. Retained
+read-only legacy projections (`list`, `describe`, `check`, `select`, `list_items`, `describe_item`,
+`capability_count`, `version`) ensuring backward compatibility for CLI health check (`python -m cv_agent`)
+and existing tests without synthesizing execution readiness. Replaced deprecated `Traversable` imports
+with versioned `importlib.resources.abc` on Python 3.11+. Added comprehensive contract test suite in
+`tests/test_capability_registry_phase2b.py`.
+
+**Why:** Addresses Issue #37, completing the operational capability registry layer of ADR-0001
+on top of the Phase 2A typed domain substrate while preserving strict execution, discovery, and
+authorization boundaries `[P§23]`, `[P§34]`.
+
+**Broke:** Nothing. All 128 pytest tests pass with 0 warnings, Ruff lint/format passes, and Mypy
+passes cleanly on both default and Python 3.10 targets.
+
+**Learned:** Explicitly isolating legacy dictionary-based catalog models as read-only compatibility
+projections prevents them from competing with or degrading the authoritative ADR-0001 domain models.
+
+**Left open:** Open PR for Issue #37 and verify complete CI matrix.
