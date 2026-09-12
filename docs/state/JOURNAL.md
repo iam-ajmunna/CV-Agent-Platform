@@ -600,3 +600,73 @@ isolation) and Q3 (cross-process restart survival) cleanly without external netw
 
 **Left open:** Phase 1 architecture is 100% frozen, hardened, and verified. Ready for Phase 2 issue hierarchy and milestone scheduling under Official PM approval.
 
+---
+
+## 2026-09-11 — Issue #35 Phase 2A Domain Contracts
+
+**Did:** Implemented the scoped ADR-0001 domain substrate on
+`feature/ajmunna/phase-2a-domain-contracts`: validated semantic identifiers,
+immutable capability/skill/tool/agent bindings, availability and provenance value objects,
+deterministic execution-free resolution, and UTC immutable resolution-snapshot
+serialization. Added 11 focused contract tests, including deterministic ordering,
+known-but-unavailable NVIDIA resolution, and snapshot round-trips.
+
+**Why:** `[P§15]`, `[P§23]`, `[P§34]` — preserves the distinct capability, skill, tool,
+and agent identities; reports unavailable NVIDIA capability honestly; and keeps capability
+resolution separate from discovery, execution, approvals, and persistence.
+
+**Broke:** Nothing. Ruff, format, Mypy, and the full pytest suite pass (110 tests;
+one pre-existing `importlib.abc.Traversable` deprecation warning).
+
+**Learned:** Accepting compatibility, policy-eligibility, and authorization as external
+facts lets ADR-0001 record reproducible resolution outcomes without duplicating the
+ADR-0003 approval authority or ADR-0005/ADR-0007 execution and discovery boundaries.
+
+**Left open:** PR review for Issue #35; all Phase 2B and later subsystems remain out of scope.
+
+---
+
+## 2026-09-11 — PR #36 Python 3.10 Compatibility Correction
+
+**Did:** Replaced Python 3.11-only `StrEnum`, `typing.Self`, and `datetime.UTC` in
+the Issue #35 domain contracts with Python 3.10-compatible `str`/`Enum`,
+`typing_extensions.Self`, and `datetime.timezone.utc` equivalents.
+
+**Why:** The PR's Python 3.10 Mypy job correctly rejected the initial implementation;
+the package supports Python 3.10 and the domain substrate must preserve that compatibility.
+
+**Broke:** Initial PR #36 Python 3.10 CI failed in Mypy. The domain package now passes
+Mypy with `--python-version 3.10`, and local Ruff, default Mypy, and 110 pytest tests pass.
+
+**Left open:** Push the correction and await the CI matrix rerun before review.
+
+---
+
+## 2026-09-11 — Issue #35 Review Report
+
+**Did:** Added `docs/reports/ISSUE-35-PHASE-2A-REPORT.md`, recording the implementation,
+scope boundaries, modified files, tests, commits, and validation status for Issue #35 / PR #36.
+
+**Broke:** Nothing. PR #36's Python 3.10–3.13 CI matrix and GitGuardian checks pass.
+
+**Left open:** Official PM review and merge of PR #36.
+
+---
+
+## 2026-09-11 — PR #36 Deterministic Tie-Breaker Resolution Correction
+
+**Did:** Implemented canonical candidate fact extraction (`canonical_candidate_facts`), a deterministic
+canonical JSON tie-breaker (`candidate_tie_breaker`), and integrated it into `DeterministicCapabilityResolver.resolve()`
+as the final sorting key. Added regression tests verifying order-independent resolution and deterministic
+rejected-candidate ordering when priority, skill_id, and skill_version are identical.
+
+**Why:** Addresses PR #36 blocking review finding, ADR-0001 §3.6, and Determinism Invariant #7: Python's
+stable sort previously preserved registration/input order for candidates with identical priority,
+skill_id, and skill_version.
+
+**Broke:** Nothing. All 112 pytest tests, Ruff lint/format checks, and Mypy (including Python 3.10 target) pass.
+
+**Learned:** Candidate facts must be canonicalized into a total-ordered JSON string (`canonical_json`) to
+avoid Python comparison `TypeError` when optional candidate fields (e.g. `agent_id`, `target_reference`) contain `None`.
+
+**Left open:** Push correction to PR #36 and await full CI matrix run.
