@@ -715,3 +715,24 @@ Added 9 new regression tests covering all findings, expanding test suite to 137 
 
 **Left open:** Push review corrections to PR #38, verify CI matrix, and request Official PM re-review.
 
+---
+
+## 2026-09-13 — Phase 2C ADR-0002 LLM Gateway Implementation (feature/ajmunna/phase-2c-llm-gateway)
+
+**Did:** Implemented the authoritative ADR-0002 `LLMGateway` Subsystem under Issue #39 according to the frozen ADR-0002 contract and the Official PM's 10 review constraints:
+1. Canonical contracts in `cv_agent/llm/contracts.py`: `TextBlock`, `ImageBlock`, `ToolContentBlock`, `ToolResultBlock`, `ContentBlock`, `Message`, `LLMRequirements`, `ModelProfile`, `ModelSelector`, `RoutingPolicy`, `RetryPolicy`, `FallbackPolicy`, `StructuredOutputSpec`, `ToolCall`, `CostRecord`, `LLMRequest`, `LLMResponse`, `LLMStreamEvent`. Defensively wrapped mappings in `MappingProxyType` to enforce post-init immutability. Enforced Invariant 14 secret isolation rejecting sensitive metadata keys.
+2. Normalized error hierarchy in `cv_agent/llm/errors.py`: standardized `FailureCategory` and frozen error classes. Nuanced authentication fallback support.
+3. Provider protocol in `cv_agent/llm/provider.py`: `LLMProvider` protocol (`complete`, `stream`).
+4. Gateway in `cv_agent/llm/gateway.py`: pre-execution capability and governance filtering (configured vs eligible candidates; 0 provider calls on mismatch); single bounded execution loop with unique `attempt_id` and stable `request_id`; strict timeout idempotency safety (no retry/fallback on timeout for non-idempotent requests); fail-closed policy denial; two-layer structured output schema validation; streaming terminal lifecycle invariant (`UsageEvent` precedes `StreamDoneEvent` only if reported; `StreamErrorEvent` is terminal).
+5. Mock adapter in `cv_agent/llm/mock.py`: `MockProviderAdapter` with multimodal, structured output, tool calling, and scriptable failure/recovery sequences. Preserved legacy `FakeLLMProvider` compatibility.
+6. Triple-layer provider isolation audit: AST imports, repository-wide text audit, and public export type boundary audit. Zero external provider SDK dependencies.
+Added 21 contract tests covering all 15 acceptance criteria in `tests/test_llm_gateway.py`. Total test suite expanded to 158 tests.
+
+**Why:** Addresses Issue #39, implementing the foundational model-inference substrate of ADR-0002 without crossing into tool execution (ADR-0005) or workflow orchestration (ADR-0003) `[P§20]`, `[P§34]`.
+
+**Broke:** Nothing. All 158 pytest tests pass (0 warnings), Ruff lint/format pass, Mypy passes on both default and Python 3.10 targets, CLI health check passes.
+
+**Learned:** Distinguishing static candidate eligibility from configured routing candidates before provider invocation guarantees that invalid hardware, multimodal, or token requirements fail fast without incurring latency or provider retry overhead.
+
+**Left open:** Open PR for Issue #39, verify full CI matrix, and request Official PM review.
+
