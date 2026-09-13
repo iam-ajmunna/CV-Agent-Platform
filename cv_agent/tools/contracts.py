@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from enum import Enum
 from types import MappingProxyType
 from typing import Any, Literal, Protocol, runtime_checkable
@@ -70,6 +71,7 @@ class ToolExecutionStatus(str, Enum):
     EXECUTION_TIMEOUT = "execution_timeout"
     EXECUTION_CANCELLED = "execution_cancelled"
     EXECUTION_FAILED = "execution_failed"
+    SCHEMA_VIOLATION = "schema_violation"
     TRANSPORT_ERROR = "transport_error"
 
 
@@ -139,7 +141,35 @@ class ActiveJobHandoff:
     def __post_init__(self) -> None:
         if not self.job_id or not self.job_id.strip():
             raise ValueError("ActiveJobHandoff.job_id must not be empty")
+        if self.expires_at is not None:
+            try:
+                dt = datetime.fromisoformat(self.expires_at)
+                if dt.tzinfo is None:
+                    raise ValueError(
+                        f"ActiveJobHandoff.expires_at must be timezone-aware ISO-8601 string, got: {self.expires_at!r}"
+                    )
+            except (ValueError, TypeError) as exc:
+                raise ValueError(
+                    f"ActiveJobHandoff.expires_at must be valid ISO-8601 string: {exc}"
+                ) from None
         object.__setattr__(self, "metadata", deep_freeze(self.metadata))
+
+    def is_expired(self, now: datetime | None = None) -> bool:
+        """Evaluate whether this handoff tracking TTL has lapsed.
+
+        Note per ADR-0005 §3.8: Expiry indicates the handoff is invalid for tracking,
+        but does NOT indicate that the remote execution failed (expired != failed).
+        """
+        if self.expires_at is None:
+            return False
+        reference = now if now is not None else datetime.now(timezone.utc)
+        if reference.tzinfo is None:
+            reference = reference.replace(tzinfo=timezone.utc)
+        try:
+            expires_dt = datetime.fromisoformat(self.expires_at)
+            return reference >= expires_dt
+        except (ValueError, TypeError):
+            return False
 
 
 @dataclass(frozen=True)

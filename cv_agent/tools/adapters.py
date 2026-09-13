@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from cv_agent.domain.identifiers import ToolId
 from cv_agent.llm.schema import SchemaValidationError, validate_json_schema
 from cv_agent.tools.contracts import (
     ActiveJobHandoff,
@@ -39,8 +40,15 @@ class LocalProcessAdapter:
     Guarantees zero shell interpretation (shell=False strictly enforced).
     """
 
-    def __init__(self, workspace_root: Path | None = None) -> None:
+    def __init__(
+        self,
+        workspace_root: Path | None = None,
+        command_bindings: Mapping[ToolId, Sequence[str]] | None = None,
+    ) -> None:
         self.workspace_root = (workspace_root or Path.cwd()).resolve()
+        self.command_bindings: dict[ToolId, Sequence[str]] = dict(
+            command_bindings or {}
+        )
 
     async def execute(
         self,
@@ -68,11 +76,35 @@ class LocalProcessAdapter:
                     error_message="'argv' parameter must be a sequence of strings",
                 )
             argv = [str(a) for a in raw_argv]
+        elif tool.tool_id in self.command_bindings:
+            argv = list(self.command_bindings[tool.tool_id])
         else:
-            argv = [str(tool.tool_id)]
+            return ToolResult(
+                tool_id=invocation.tool_id,
+                execution_id=invocation.execution_id,
+                target_id=invocation.target_id,
+                status=ToolExecutionStatus.POLICY_VIOLATION,
+                error_message=(
+                    f"No executable command binding or argv_builder configured for local execution of tool {tool.tool_id!r}. "
+                    "Automatic conversion of logical ToolId to executable process name is strictly prohibited (ADR-0005 §3.3)."
+                ),
+            )
 
-        # Enforce structured argv safety (no shell concatenation)
-        validate_argv_safety(argv)
+        # Enforce structured argv safety (no shell concatenation or metacharacters)
+        try:
+            validate_argv_safety(argv)
+        except ToolSecurityError as exc:
+            return ToolResult(
+                tool_id=invocation.tool_id,
+                execution_id=invocation.execution_id,
+                target_id=invocation.target_id,
+                status=(
+                    ToolExecutionStatus.INVALID_PARAMETERS
+                    if exc.code == "INVALID_PARAMETERS"
+                    else ToolExecutionStatus.POLICY_VIOLATION
+                ),
+                error_message=str(exc),
+            )
 
         # Validate path containment for any file/path parameters
         for k, v in invocation.parameters.items():
@@ -227,23 +259,55 @@ class MockRemoteTargetAdapter:
 class MockMCPEndpointAdapter:
     """Dispatches execution over Model Context Protocol boundary (ADR-0005 §3.6).
 
-    MCP endpoints are untrusted:
-    1. External tools must resolve to authoritative ToolId.
-    2. Outputs must be validated against declared output_schema before acceptance.
+    MCP endpoints are untrusted transport boundaries:
+    1. Discovery produces runtime candidates; external tool names must resolve to an authoritative ToolId.
+    2. MCP servers cannot synthesize or invent ToolIds; unmapped candidates are rejected.
+    3. Outputs must be validated against declared output_schema before acceptance, failing with SCHEMA_VIOLATION.
     """
 
     def __init__(
         self,
         server_id: str = "mock-mcp-server",
         discovered_tool_candidates: Mapping[str, Mapping[str, Any]] | None = None,
+        tool_mapping: Mapping[str, ToolId] | None = None,
         simulated_response: Mapping[str, Any] | None = None,
         transport_error: bool = False,
     ) -> None:
         self.server_id = server_id
         self.discovered_tool_candidates = dict(discovered_tool_candidates or {})
+        self.tool_mapping: dict[str, ToolId] = dict(tool_mapping or {})
         self.simulated_response = simulated_response
         self.transport_error = transport_error
         self.dispatched_invocations: list[ToolInvocation] = []
+
+    def discover_candidates(self) -> tuple[str, ...]:
+        """Query MCP endpoint to discover external candidate tool names.
+
+        Produces runtime metadata and candidate descriptors without creating authoritative ToolIds.
+        """
+        return tuple(self.discovered_tool_candidates.keys())
+
+    def register_tool_mapping(
+        self, external_candidate_name: str, authoritative_tool_id: ToolId
+    ) -> None:
+        """Explicitly map an external MCP candidate name to an authoritative project ToolId."""
+        self.tool_mapping[external_candidate_name] = authoritative_tool_id
+
+    def resolve_candidate(self, external_candidate_name: str) -> ToolId:
+        """Resolve external candidate tool name to an authoritative ToolId.
+
+        Per ADR-0005 §3.6: An MCP-discovered tool becomes invocable through the agent only when
+        it resolves to an authoritative ToolId defined by ADR-0001. Unmapped candidates remain
+        discovered but unavailable, preventing external endpoints from silently extending or
+        mutating the project's capability/tool catalogue.
+        """
+        if external_candidate_name not in self.tool_mapping:
+            raise ToolSecurityError(
+                "UNMAPPED_MCP_TOOL",
+                f"MCP tool candidate {external_candidate_name!r} is not mapped to an authoritative ToolId (ADR-0005 §3.6). "
+                "MCP endpoints cannot synthesize new ToolIds.",
+            )
+        return self.tool_mapping[external_candidate_name]
 
     async def execute(
         self,
@@ -262,6 +326,19 @@ class MockMCPEndpointAdapter:
                 error_message=f"MCP transport to server {self.server_id!r} disconnected",
             )
 
+        # Authority boundary check: if tool_mapping is configured, verify the invoked tool is mapped
+        if self.tool_mapping and invocation.tool_id not in self.tool_mapping.values():
+            return ToolResult(
+                tool_id=invocation.tool_id,
+                execution_id=invocation.execution_id,
+                target_id=invocation.target_id,
+                status=ToolExecutionStatus.PERMISSION_DENIED,
+                error_message=(
+                    f"ToolId {str(invocation.tool_id)!r} is not mapped from an authorized candidate on MCP server {self.server_id!r}. "
+                    "Unmapped MCP tools cannot be executed."
+                ),
+            )
+
         raw_output = (
             self.simulated_response
             if self.simulated_response is not None
@@ -277,7 +354,7 @@ class MockMCPEndpointAdapter:
                     tool_id=invocation.tool_id,
                     execution_id=invocation.execution_id,
                     target_id=invocation.target_id,
-                    status=ToolExecutionStatus.EXECUTION_FAILED,
+                    status=ToolExecutionStatus.SCHEMA_VIOLATION,
                     error_message=f"MCP output validation failed against declared schema: {exc}",
                     diagnostics={"raw_mcp_output": raw_output},
                 )

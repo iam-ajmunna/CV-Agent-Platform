@@ -3,39 +3,50 @@
 **Issue:** [#41](https://github.com/iam-ajmunna/CV-Agent-Platform/issues/41)
 **PR:** [#42](https://github.com/iam-ajmunna/CV-Agent-Platform/pull/42)
 **Branch:** `feature/ajmunna/phase-2d-tools-mcp`
-**Status:** Implemented; all 200 tests pass (including 27 new Phase 2D contract tests); all quality gates pass.
+**Status:** Implemented; PR #42 review corrections applied; all 208 tests pass (including 35 Phase 2D contract tests); all quality gates pass.
 
 ## Overview
 
-This report documents the implementation of the Phase 2D Tool & MCP Protocol Subsystem under Issue #41 according to the frozen ADR-0005 specification and the approved boundary decisions established with the Official PM.
+This report documents the implementation of the Phase 2D Tool & MCP Protocol Subsystem under Issue #41 according to the frozen ADR-0005 specification, the approved boundary decisions established with the Official PM, and the subsequent resolution of the review findings raised during the Official PM Review of PR #42.
 
 The Tools/MCP subsystem provides the execution substrate for computer vision engineering tasks while maintaining clean separation from Capability Registry (ADR-0001) and Orchestration (ADR-0003). It enforces operational cataloging, schema validation, transport decoupling, execution safety (argv-only, workspace containment, secret isolation), pre-execution approval gating, asynchronous job handoff, and untrusted MCP transport boundary mediation.
 
-## Architectural Boundaries & Design Decisions
+## Official PM Review Findings & Resolution
 
-### 1. Authoritative Boundary Partitioning
-- **Capability Registry (ADR-0001):** Authoritative owner of `ToolId` tokens and capability-to-tool selection.
-- **Tools/MCP (ADR-0005):** Owns operational tool cataloging, execution target descriptors, schema validation, transport mediation, and execution dispatch. Never invents or validates semantic capabilities.
-- **Orchestration (ADR-0003):** Owns workflow execution loops, checkpointing, human approval request lifecycle, and reconciliation of asynchronous active jobs. ADR-0005 strictly executes; it does not orchestrate.
+During the Official PM Review of PR #42, six contract-level items were identified and resolved:
 
-### 2. Execution Safety Guarantees (ADR-0005 §3.7)
-- **Zero Shell Interpretation:** Local execution (`LocalProcessAdapter`) strictly uses structured `argv: list[str]` with `shell=False`. Raw shell command strings, shell meta-characters (`;`, `&`, `|`, `` ` ``, `$`, `\n`), and unparsed text are blocked fail-closed before execution.
-- **Workspace Containment:** All filesystem paths passed to tool invocations are resolved against `workspace_root` via `validate_workspace_containment()`. Attempts to traverse outside the workspace (`../`, symlinks, or absolute external paths) are rejected with `POLICY_VIOLATION`.
-- **Secret Isolation:** Parameters containing sensitive key patterns (`api_key`, `secret`, `password`, `token`, `credential`, `auth_key`, `private_key`) are blocked fail-closed with `POLICY_VIOLATION`.
-- **Pre-Execution Approval Gate:** Tools declaring `requires_approval=True` (such as hardware flashing, cloud instance spin-up, or destructive benchmark sweeps) demand `invocation.approval_authorized=True`. Invocations lacking authorization fail fast with `PERMISSION_DENIED` with zero process execution.
+### 1. Fail-Closed Shell Metacharacter Rejection (Finding 1 — Critical)
+- `validate_argv_safety()` now actively inspects every argument against `_SHELL_INJECTION_CHARS = frozenset({";", "&", "|", "`", "$", "(", ")", "\n", "\r"})`.
+- Any argument containing any forbidden character fails closed with `ToolSecurityError("POLICY_VIOLATION", ...)` before process invocation.
+- Added comprehensive regression tests proving that injection attempts (e.g. `status; rm -rf /`, `echo hello && rm -rf`, `cat `id``, `echo $USER`, etc.) are blocked fail-closed.
 
-### 3. Asynchronous Job Handoff Semantics (ADR-0005 §3.8)
-- For asynchronous tools (e.g. distributed multi-GPU training, long-running profiling), `ToolResult.status == SUCCESS` denotes **successful dispatch/acceptance**, not job completion.
-- Returns an immutable `ActiveJobHandoff` containing `job_id`, `job_type`, `target`, and `heartbeat_timeout_seconds`.
-- **Handoff Expiry:** An expired handoff invalidates further tracking but is explicitly **not** an execution failure (`is_expired()` helper distinguishes expiry from failure).
+### 2. MCP Discovered-Tool Authority Boundary (Finding 2 — Critical)
+- Implemented the full candidate discovery and authority resolution boundary on `MockMCPEndpointAdapter`:
+  - `discover_candidates()` returns discovered external candidate names as strings without creating authoritative `ToolId` instances.
+  - `register_tool_mapping(external_candidate_name, authoritative_tool_id)` explicitly binds external names to project-authoritative `ToolId`s.
+  - `resolve_candidate(external_candidate_name)` resolves mapped candidates, and raises `ToolSecurityError("UNMAPPED_MCP_TOOL", ...)` for unmapped candidates, preventing external MCP servers from synthesizing new `ToolId`s.
+  - `execute()` verifies that the invoked `tool_id` is mapped on the MCP server, returning `PERMISSION_DENIED` for unmapped tools.
 
-### 4. Untrusted MCP Boundary Mediation (ADR-0005 §3.6)
-- MCP endpoints are treated as untrusted external transports.
-- MCP servers cannot invent or synthesize `ToolId`s; external tool candidates must map to an authoritative `ToolId` registered in the catalog.
-- Outputs returned from MCP endpoints are strictly validated against the tool's declared `output_schema`. Malformed outputs produce `SCHEMA_VIOLATION`.
+### 3. Distinct `SCHEMA_VIOLATION` Outcome (Finding 3 — Important)
+- Added `SCHEMA_VIOLATION = "schema_violation"` to `ToolExecutionStatus` in `contracts.py`.
+- Updated `MockMCPEndpointAdapter.execute()` to return `status=ToolExecutionStatus.SCHEMA_VIOLATION` when an MCP response violates the declared `output_schema`.
+- Updated tests to assert `res.status == ToolExecutionStatus.SCHEMA_VIOLATION`.
 
-### 5. Hardware-Aware Tool Probing (D-014, D-022, ADR-0005 §3.4)
-- Tools requiring NVIDIA/CUDA runtimes (e.g. `trt-build`, `tao-train`) probed against host-local macOS workstations are reported honestly as **known-but-unavailable** (`is_available=False`, `status=TOOL_UNAVAILABLE`) with D-022 rationale, without raising exceptions or crashing.
+### 4. Safe Local Transport Command Resolution (Finding 4 — Important)
+- Eliminated unsafe fallback conversion `argv = [str(tool.tool_id)]`.
+- `LocalProcessAdapter` and `DefaultToolExecutor` support explicit `command_bindings: Mapping[ToolId, Sequence[str]]`.
+- If neither `argv_builder`, nor `"argv"` parameter, nor `command_bindings` is configured, execution fails closed with `POLICY_VIOLATION` ("Conversion of logical ToolId to executable process name is strictly prohibited").
+- Added regression tests verifying fail-closed rejection when unconfigured, and successful execution when bound via `command_bindings`.
+
+### 5. Deterministic ActiveJobHandoff Expiry Evaluation (Finding 5 — Important)
+- `ActiveJobHandoff.__post_init__` strictly validates `expires_at` as a timezone-aware ISO-8601 string, rejecting malformed or naive timestamps with `ValueError`.
+- Added `is_expired(self, now: datetime | None = None) -> bool` helper evaluating `now >= expires_at`.
+- Preserved the fundamental ADR-0005 §3.8 invariant: `expired != failed` (handoff status remains unchanged upon expiry).
+
+### 6. Recursive Secret Isolation Inspection Across Sequences (Finding 6 — Important)
+- Updated `validate_secret_isolation()` to recursively walk mappings, sequences (lists, tuples), and sets.
+- Secret keys nested within lists of dicts (e.g. `{"options": [{"api_token": "..."}]}`) or deep tuples are detected and rejected fail-closed with `POLICY_VIOLATION`.
+- Added regression tests for nested sequences containing credential patterns.
 
 ## Subsystem Architecture & Implementation
 
@@ -50,20 +61,20 @@ The implementation resides under `cv_agent/tools/`:
 
 ## Acceptance Criteria & Test Coverage (All 13 Areas)
 
-The test suite in `tests/test_tools_boundary.py` provides 27 comprehensive contract tests covering all 13 required areas:
+The test suite in `tests/test_tools_boundary.py` provides 35 comprehensive contract tests covering all 13 required areas and the 6 PM review findings:
 
 1. **ToolId Authoritative Integration:** Rejection of unknown ToolIds with `TOOL_NOT_FOUND`.
 2. **Operational Catalog & Target Descriptor:** Target registration, duplicate target rejection, and multi-target cataloging.
 3. **Execution Target Abstraction:** Target routing across LOCAL, REMOTE, and MCP_ENDPOINT, plus `TARGET_UNAVAILABLE` on type mismatch.
 4. **Hardware-Aware Probing (macOS / NVIDIA):** Known-but-unavailable reporting for NVIDIA tools on macOS workstation per D-022.
 5. **Tool Registry Immutability & Duplicate Rejection:** Deterministic rejection of duplicate tool IDs and deep-freeze immutability.
-6. **Execution Safety — Zero Shell:** Structured argv execution (`shell=False`) and rejection of shell meta-characters.
+6. **Execution Safety — Zero Shell:** Structured argv execution (`shell=False`), rejection of shell metacharacters, and command bindings.
 7. **Execution Safety — Workspace Containment:** Traversal attacks (`../`) and external absolute paths rejected with `POLICY_VIOLATION`.
-8. **Execution Safety — Secret Isolation:** Credential keys rejected before dispatch with `POLICY_VIOLATION`.
+8. **Execution Safety — Secret Isolation:** Credential keys rejected across nested mappings and sequences with `POLICY_VIOLATION`.
 9. **Parameter Schema Validation:** Missing required properties or invalid enums fail fast with `INVALID_PARAMETERS`.
 10. **Pre-Execution Approval Gating:** `requires_approval=True` tools fail fast with `PERMISSION_DENIED` when unapproved.
-11. **Asynchronous Execution & ActiveJobHandoff:** Dispatch returns `SUCCESS` + `ActiveJobHandoff`; expiry is not failure.
-12. **MCP Untrusted Boundary:** Output schema validation against MCP payloads, rejecting malformed responses with `SCHEMA_VIOLATION`.
+11. **Asynchronous Execution & ActiveJobHandoff:** Dispatch returns `SUCCESS` + `ActiveJobHandoff`; ISO-8601 validation; `is_expired()`; expiry is not failure.
+12. **MCP Untrusted Boundary:** Output schema validation producing `SCHEMA_VIOLATION`, candidate discovery without ToolIds, mapping resolution, and unmapped candidate rejection.
 13. **Subsystem Isolation:** Zero LangGraph nodes, zero workflow state machine, zero external provider SDK imports in `cv_agent/tools/`.
 
 ## Quality Gates & Verification Results
@@ -71,9 +82,9 @@ The test suite in `tests/test_tools_boundary.py` provides 27 comprehensive contr
 | Gate | Command | Result |
 |---|---|---|
 | Ruff Lint | `ruff check .` | Pass (All checks passed) |
-| Ruff Format | `ruff format --check . [excludes]` | Pass (88 files already formatted) |
+| Ruff Format | `ruff format --check . [excludes]` | Pass (89 files already formatted) |
 | Mypy (Default) | `mypy cv_agent` | Pass (Success: no issues found in 34 source files) |
 | Mypy (Python 3.10) | `mypy --python-version 3.10 cv_agent/tools` | Pass (Success: no issues found in 6 source files) |
-| Pytest Test Suite | `pytest -q` | Pass — 200 passed in 3.11s (0 warnings) |
+| Pytest Test Suite | `pytest -q` | Pass — 208 passed in 3.42s (0 warnings) |
 | CLI Health Check | `python -m cv_agent` | Pass — Runtime status OK, 20 capabilities registered |
 | Git Diff Check | `git diff --check` | Pass (Zero whitespace or conflict errors) |

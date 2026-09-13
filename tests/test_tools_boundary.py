@@ -18,6 +18,7 @@ Verifies all 13 ADR-0005 contract areas and PM review constraints:
 
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 from types import MappingProxyType
 
@@ -334,9 +335,7 @@ class TestShellInterpretationProhibition:
         )
         invocation = ToolInvocation(
             tool_id=sample_local_tool.tool_id,
-            parameters={
-                "argv": ["python3", "-c", "import sys; print('argv execution ok')"]
-            },
+            parameters={"argv": ["echo", "argv execution ok"]},
             target_id=target.target_id,
             execution_id=ExecutionId("exec-local-01"),
             timeout_seconds=10,
@@ -345,6 +344,72 @@ class TestShellInterpretationProhibition:
         res = await adapter.execute(sample_local_tool, target, invocation)
         assert res.status == ToolExecutionStatus.SUCCESS
         assert "argv execution ok" in res.diagnostics.get("stdout", "")
+
+    def test_argv_with_shell_metacharacters_rejected(self) -> None:
+        """Area 6 (PM Blocker 1): Structured argv containing shell metacharacters fails closed."""
+        metacharacters = [";", "&", "|", "`", "$", "(", ")", "\n", "\r"]
+        for char in metacharacters:
+            with pytest.raises(ToolSecurityError) as exc:
+                validate_argv_safety(["git", f"status{char} rm -rf /"])
+            assert exc.value.code == "POLICY_VIOLATION"
+            assert f"forbidden shell metacharacter {char!r}" in exc.value.message
+
+    @pytest.mark.asyncio
+    async def test_local_adapter_fails_closed_when_no_argv_or_binding_configured(
+        self, workspace_root: Path, sample_local_tool: ToolDescriptor
+    ) -> None:
+        """Area 6 (PM Blocker 4): Logical ToolId is never treated as a fallback command name."""
+        adapter = LocalProcessAdapter(workspace_root=workspace_root)
+        target = ExecutionTargetDescriptor(
+            target_id=TargetId("local-host"),
+            target_type=TargetType.LOCAL,
+            is_available=True,
+        )
+        invocation = ToolInvocation(
+            tool_id=sample_local_tool.tool_id,
+            parameters={},  # No 'argv' parameter provided
+            target_id=target.target_id,
+            execution_id=ExecutionId("exec-local-nobind"),
+            timeout_seconds=10,
+        )
+
+        res = await adapter.execute(sample_local_tool, target, invocation)
+        assert res.status == ToolExecutionStatus.POLICY_VIOLATION
+        assert "No executable command binding or argv_builder configured" in str(
+            res.error_message
+        )
+        assert "prohibited" in str(res.error_message).lower()
+
+    @pytest.mark.asyncio
+    async def test_local_adapter_executes_with_explicit_command_bindings(
+        self, workspace_root: Path, sample_local_tool: ToolDescriptor
+    ) -> None:
+        """Area 6 (PM Blocker 4): Explicit command bindings configured for local transport execute successfully."""
+        bindings = {
+            sample_local_tool.tool_id: [
+                "echo",
+                "bound command execution ok",
+            ]
+        }
+        adapter = LocalProcessAdapter(
+            workspace_root=workspace_root, command_bindings=bindings
+        )
+        target = ExecutionTargetDescriptor(
+            target_id=TargetId("local-host"),
+            target_type=TargetType.LOCAL,
+            is_available=True,
+        )
+        invocation = ToolInvocation(
+            tool_id=sample_local_tool.tool_id,
+            parameters={},
+            target_id=target.target_id,
+            execution_id=ExecutionId("exec-local-bound"),
+            timeout_seconds=10,
+        )
+
+        res = await adapter.execute(sample_local_tool, target, invocation)
+        assert res.status == ToolExecutionStatus.SUCCESS
+        assert "bound command execution ok" in res.diagnostics.get("stdout", "")
 
 
 class TestWorkspacePathContainment:
@@ -393,6 +458,28 @@ class TestSecretIsolation:
         validate_secret_isolation(
             {"batch_size": 32, "learning_rate": 0.001, "epochs": 10}
         )
+
+    def test_nested_sensitive_keys_in_sequences_are_rejected(self) -> None:
+        """Area 8 (PM Blocker 6): Sensitive keys nested inside lists, tuples, and sets fail closed."""
+        # Inside list of dicts
+        with pytest.raises(ToolSecurityError) as exc:
+            validate_secret_isolation({"options": [{"api_token": "secret_val"}]})
+        assert exc.value.code == "POLICY_VIOLATION"
+        assert "api_token" in exc.value.message
+
+        # Inside tuple
+        with pytest.raises(ToolSecurityError) as exc:
+            validate_secret_isolation({"configs": ({"secret_key": "abc"},)})
+        assert exc.value.code == "POLICY_VIOLATION"
+        assert "secret_key" in exc.value.message
+
+        # Deeply nested list inside dict inside list
+        with pytest.raises(ToolSecurityError) as exc:
+            validate_secret_isolation(
+                {"layers": [{"config": {"auth": [{"password": "pwd"}]}}]}
+            )
+        assert exc.value.code == "POLICY_VIOLATION"
+        assert "password" in exc.value.message
 
 
 class TestParameterSchemaValidation:
@@ -479,7 +566,7 @@ class TestAsynchronousActiveJobHandoff:
         assert res.active_job_ref.target == "remote_gpu"
 
     def test_handoff_expiry_invariant_does_not_equate_to_failure(self) -> None:
-        """Area 11: Expired heartbeat/instant indicates stale observation, NOT execution failure."""
+        """Area 11 (PM Blocker 5): is_expired() evaluates expiration while preserving status (expired != failed)."""
         expired_handoff = ActiveJobHandoff(
             job_id="job-999",
             job_type="training",
@@ -487,10 +574,44 @@ class TestAsynchronousActiveJobHandoff:
             submitted_at="2026-09-13T00:00:00Z",
             status="running",
             heartbeat_timeout_seconds=60,
-            expires_at="2026-09-13T00:01:00Z",  # Expired
+            expires_at="2026-09-13T00:01:00Z",
         )
-        # Handoff itself preserves observation status; ADR-0005 does not classify as failed.
+        # Evaluated against instant after expiry
+        now_after = datetime.fromisoformat("2026-09-13T00:02:00Z")
+        assert expired_handoff.is_expired(now_after) is True
+
+        # Evaluated against instant before expiry
+        now_before = datetime.fromisoformat("2026-09-13T00:00:30Z")
+        assert expired_handoff.is_expired(now_before) is False
+
+        # Crucial ADR-0005 §3.8 invariant: expired != failed
         assert expired_handoff.status == "running"
+
+    def test_handoff_expires_at_validation(self) -> None:
+        """Area 11 (PM Blocker 5): expires_at requires valid timezone-aware ISO-8601 string."""
+        # Non-ISO string raises ValueError
+        with pytest.raises(ValueError) as exc:
+            ActiveJobHandoff(
+                job_id="job-bad-time",
+                job_type="training",
+                target="remote_gpu",
+                submitted_at="2026-09-13T00:00:00Z",
+                status="submitted",
+                expires_at="not-a-timestamp",
+            )
+        assert "valid ISO-8601 string" in str(exc.value)
+
+        # Naive timestamp (no timezone) raises ValueError
+        with pytest.raises(ValueError) as exc_tz:
+            ActiveJobHandoff(
+                job_id="job-naive-time",
+                job_type="training",
+                target="remote_gpu",
+                submitted_at="2026-09-13T00:00:00Z",
+                status="submitted",
+                expires_at="2026-09-13T12:00:00",
+            )
+        assert "timezone-aware" in str(exc_tz.value)
 
 
 class TestMCPTransportBoundary:
@@ -524,7 +645,8 @@ class TestMCPTransportBoundary:
         )
 
         res = await executor.execute(inv)
-        assert res.status == ToolExecutionStatus.EXECUTION_FAILED
+        # Area 12 (PM Blocker 3): Output schema violation produces distinct SCHEMA_VIOLATION status
+        assert res.status == ToolExecutionStatus.SCHEMA_VIOLATION
         assert "MCP output validation failed" in str(res.error_message)
 
     @pytest.mark.asyncio
@@ -555,6 +677,86 @@ class TestMCPTransportBoundary:
         )
         res = await executor.execute(inv)
         assert res.status == ToolExecutionStatus.TRANSPORT_ERROR
+
+    def test_mcp_candidate_discovery_does_not_create_tool_ids(self) -> None:
+        """Area 12 (PM Blocker 2): MCP candidate discovery produces external descriptors without creating ToolIds."""
+        adapter = MockMCPEndpointAdapter(
+            server_id="vision-mcp",
+            discovered_tool_candidates={
+                "external_trt_engine_compile": {
+                    "version": "1.0",
+                    "description": "Remote TRT compiler",
+                },
+                "external_profiler": {
+                    "version": "2.0",
+                    "description": "Remote profiler",
+                },
+            },
+        )
+        candidates = adapter.discover_candidates()
+        assert candidates == ("external_trt_engine_compile", "external_profiler")
+        # Discovered candidate strings are NOT ToolId instances
+        for c in candidates:
+            assert not isinstance(c, ToolId)
+
+    def test_mcp_candidate_resolution_and_unmapped_rejection(
+        self, sample_nvidia_tool: ToolDescriptor
+    ) -> None:
+        """Area 12 (PM Blocker 2): Candidate resolution requires authoritative mapping; unmapped candidates fail closed."""
+        adapter = MockMCPEndpointAdapter(
+            server_id="vision-mcp",
+            discovered_tool_candidates={
+                "external_trt_engine_compile": {"version": "1.0"},
+                "malicious_external_tool": {"version": "0.1"},
+            },
+            tool_mapping={"external_trt_engine_compile": sample_nvidia_tool.tool_id},
+        )
+
+        # Mapped candidate resolves to authoritative ToolId
+        resolved = adapter.resolve_candidate("external_trt_engine_compile")
+        assert resolved == sample_nvidia_tool.tool_id
+        assert isinstance(resolved, ToolId)
+
+        # Unmapped candidate is rejected fail-closed; MCP endpoint cannot synthesize a ToolId
+        with pytest.raises(ToolSecurityError) as exc:
+            adapter.resolve_candidate("malicious_external_tool")
+        assert exc.value.code == "UNMAPPED_MCP_TOOL"
+        assert "cannot synthesize new ToolIds" in str(exc.value.message)
+
+    @pytest.mark.asyncio
+    async def test_mcp_invocation_of_unmapped_tool_returns_permission_denied(
+        self, sample_nvidia_tool: ToolDescriptor, workspace_root: Path
+    ) -> None:
+        """Area 12 (PM Blocker 2): Executing an unmapped tool on an MCP target returns PERMISSION_DENIED."""
+        reg = DefaultToolRegistry([sample_nvidia_tool])
+        reg.register_target(
+            ExecutionTargetDescriptor(
+                target_id=TargetId("mcp-target"),
+                target_type=TargetType.MCP_ENDPOINT,
+                is_available=True,
+            )
+        )
+        # MCP adapter configured with a mapping that does NOT include sample_nvidia_tool
+        other_tool_id = ToolId("other/tool")
+        mcp_adapter = MockMCPEndpointAdapter(
+            server_id="vision-mcp",
+            tool_mapping={"some_external_tool": other_tool_id},
+        )
+        executor = DefaultToolExecutor(
+            registry=reg, workspace_root=workspace_root, mcp_adapter=mcp_adapter
+        )
+
+        inv = ToolInvocation(
+            tool_id=sample_nvidia_tool.tool_id,
+            parameters={"onnx_path": "model.onnx"},
+            target_id=TargetId("mcp-target"),
+            execution_id=ExecutionId("exec-mcp-unmapped"),
+            timeout_seconds=60,
+            approval_authorized=True,
+        )
+        res = await executor.execute(inv)
+        assert res.status == ToolExecutionStatus.PERMISSION_DENIED
+        assert "not mapped from an authorized candidate" in str(res.error_message)
 
 
 class TestDefensiveDeepImmutability:

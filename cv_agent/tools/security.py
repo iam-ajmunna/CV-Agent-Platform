@@ -66,27 +66,32 @@ def validate_workspace_containment(
     return target
 
 
-def validate_secret_isolation(parameters: Mapping[str, Any]) -> None:
+def validate_secret_isolation(data: Any) -> None:
     """Validate that invocation parameters do not contain sensitive credential keys.
 
     Per ADR-0005 §3.7, credentials must resolve from a target-bound secrets vault
     and MUST NOT appear in invocation payloads, logs, or results.
+    Recursively inspects mappings, sequences (lists, tuples), and sets.
     """
-    for key, val in parameters.items():
-        lower = key.lower()
-        if any(pat in lower for pat in _SENSITIVE_KEY_PATTERNS):
-            raise ToolSecurityError(
-                "POLICY_VIOLATION",
-                f"Invocation parameter {key!r} contains sensitive credential pattern violating secret isolation",
-            )
-        if isinstance(val, Mapping):
+    if isinstance(data, Mapping):
+        for key, val in data.items():
+            lower = str(key).lower()
+            if any(pat in lower for pat in _SENSITIVE_KEY_PATTERNS):
+                raise ToolSecurityError(
+                    "POLICY_VIOLATION",
+                    f"Invocation parameter {key!r} contains sensitive credential pattern violating secret isolation",
+                )
             validate_secret_isolation(val)
+    elif isinstance(data, (list, tuple, set, frozenset)):
+        for item in data:
+            validate_secret_isolation(item)
 
 
 def validate_argv_safety(argv: Sequence[str]) -> None:
     """Verify that structured argv vectors do not contain shell injection sequences.
 
     Enforces ADR-0005 §3.7 prohibition of shell interpretation.
+    Blocks any argument containing shell metacharacters (; & | ` $ ( ) \n \r).
     """
     if not argv:
         raise ToolSecurityError(
@@ -99,6 +104,12 @@ def validate_argv_safety(argv: Sequence[str]) -> None:
                 "INVALID_PARAMETERS",
                 f"Command argument {arg!r} must be a string",
             )
+        for char in _SHELL_INJECTION_CHARS:
+            if char in arg:
+                raise ToolSecurityError(
+                    "POLICY_VIOLATION",
+                    f"Command argument {arg!r} contains forbidden shell metacharacter {char!r} violating shell prohibition",
+                )
 
 
 def check_approval_precondition(

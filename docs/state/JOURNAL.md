@@ -808,3 +808,24 @@ Added 6 new regression tests covering all three re-review findings, expanding th
 **Learned:** Separating tool execution (ADR-0005) from capability identity (ADR-0001) and workflow orchestration (ADR-0003) enables tool implementations and transport adapters to remain lightweight and easily testable without requiring complex graph state machines or external provider SDKs.
 
 **Left open:** Push branch `feature/ajmunna/phase-2d-tools-mcp`, open PR #42 linked to Issue #41, verify GitHub Actions CI matrix, and submit for Official PM review.
+
+---
+
+## 2026-09-13 — PR #42 Official PM Review Corrections (feature/ajmunna/phase-2d-tools-mcp)
+
+**Did:** Addressed all six blocking review findings on PR #42:
+1. Shell safety metacharacter enforcement: `validate_argv_safety()` now inspects all arguments against `_SHELL_INJECTION_CHARS = frozenset({";", "&", "|", "`", "$", "(", ")", "\n", "\r"})`, rejecting injection attempts with `ToolSecurityError("POLICY_VIOLATION", ...)`. Added regression tests.
+2. MCP candidate authority boundary: implemented explicit candidate discovery (`discover_candidates()`), mapping registration (`register_tool_mapping()`), and candidate resolution (`resolve_candidate()`) on `MockMCPEndpointAdapter`. Unmapped candidates fail closed with `ToolSecurityError("UNMAPPED_MCP_TOOL", ...)`, preventing MCP servers from synthesizing `ToolId`s. Added execution checks returning `PERMISSION_DENIED` for unmapped tools.
+3. Added `SCHEMA_VIOLATION = "schema_violation"` to `ToolExecutionStatus`. `MockMCPEndpointAdapter.execute()` returns `SCHEMA_VIOLATION` on output schema failure. Updated tests to assert this exact status.
+4. Safe local transport resolution: eliminated unsafe fallback `argv = [str(tool.tool_id)]`. Supported explicit `command_bindings` in `LocalProcessAdapter` and `DefaultToolExecutor`. Invocations without an explicit binding, `"argv"` parameter, or `argv_builder` fail closed with `POLICY_VIOLATION`.
+5. ActiveJobHandoff expiry & validation: added timezone-aware ISO-8601 validation for `expires_at` in `ActiveJobHandoff.__post_init__` and added `is_expired(now)` method. Preserved `expired != failed` invariant.
+6. Recursive sequence secret isolation: updated `validate_secret_isolation()` to recursively inspect sequences (lists, tuples) and sets. Sensitive keys nested inside lists or tuples fail closed with `POLICY_VIOLATION`.
+Added 8 new regression tests, expanding the Phase 2D contract test suite to 35 tests, and the total test suite to 208 passing tests (0 warnings).
+
+**Why:** Addresses PR #42 blocking review findings, ensuring full fidelity to frozen ADR-0005 contracts, robust argv injection protection, enforced MCP authority boundaries, semantic schema violation reporting, and deep secret isolation `[P§15]`, `[P§20]`, `[P§24]`, `[P§29.4]`, `[P§34]`.
+
+**Broke:** Nothing. All 208 pytest tests pass (0 warnings), Ruff lint/format pass, Mypy passes on default and Python 3.10 targets, CLI health check passes, `git diff --check` clean.
+
+**Learned:** Explicit candidate mapping tables at untrusted protocol boundaries guarantee that dynamic discovery cannot bypass authoritative capability contracts, preventing external endpoints from mutating or extending the tool catalog without project governance.
+
+**Left open:** Push review corrections to PR #42, verify GitHub Actions CI matrix, and request Official PM re-review.

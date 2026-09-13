@@ -13,8 +13,10 @@ Implements the ADR-0005 ToolExecutor protocol, coordinating:
 from __future__ import annotations
 
 import time
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
+from cv_agent.domain.identifiers import ToolId
 from cv_agent.llm.schema import SchemaValidationError, validate_json_schema
 from cv_agent.tools.adapters import (
     LocalProcessAdapter,
@@ -47,13 +49,16 @@ class DefaultToolExecutor(ToolExecutor):
         registry: ToolRegistry,
         *,
         workspace_root: Path | None = None,
+        command_bindings: Mapping[ToolId, Sequence[str]] | None = None,
         local_adapter: LocalProcessAdapter | None = None,
         remote_adapter: MockRemoteTargetAdapter | None = None,
         mcp_adapter: MockMCPEndpointAdapter | None = None,
     ) -> None:
         self._registry = registry
         self._workspace_root = (workspace_root or Path.cwd()).resolve()
-        self._local_adapter = local_adapter or LocalProcessAdapter(self._workspace_root)
+        self._local_adapter = local_adapter or LocalProcessAdapter(
+            self._workspace_root, command_bindings=command_bindings
+        )
         self._remote_adapter = remote_adapter or MockRemoteTargetAdapter()
         self._mcp_adapter = mcp_adapter or MockMCPEndpointAdapter()
 
