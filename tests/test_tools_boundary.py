@@ -18,7 +18,7 @@ Verifies all 13 ADR-0005 contract areas and PM review constraints:
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from types import MappingProxyType
 
@@ -577,11 +577,11 @@ class TestAsynchronousActiveJobHandoff:
             expires_at="2026-09-13T00:01:00Z",
         )
         # Evaluated against instant after expiry
-        now_after = datetime.fromisoformat("2026-09-13T00:02:00Z")
+        now_after = datetime(2026, 9, 13, 0, 2, tzinfo=timezone.utc)
         assert expired_handoff.is_expired(now_after) is True
 
         # Evaluated against instant before expiry
-        now_before = datetime.fromisoformat("2026-09-13T00:00:30Z")
+        now_before = datetime(2026, 9, 13, 0, 0, 30, tzinfo=timezone.utc)
         assert expired_handoff.is_expired(now_before) is False
 
         # Crucial ADR-0005 §3.8 invariant: expired != failed

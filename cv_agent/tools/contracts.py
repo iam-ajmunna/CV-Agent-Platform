@@ -119,6 +119,19 @@ class ToolDescriptor:
         )
 
 
+def _parse_iso_timestamp(ts: str) -> datetime:
+    """Parse ISO-8601 timestamp with Python 3.10 compatibility for 'Z' suffix."""
+    normalized = ts.strip()
+    if normalized.endswith(("Z", "z")):
+        normalized = normalized[:-1] + "+00:00"
+    dt = datetime.fromisoformat(normalized)
+    if dt.tzinfo is None:
+        raise ValueError(
+            f"ActiveJobHandoff.expires_at must be timezone-aware ISO-8601 string, got: {ts!r}"
+        )
+    return dt
+
+
 @dataclass(frozen=True)
 class ActiveJobHandoff:
     """Transport-neutral handoff contract mirroring ADR-0003's ActiveJobRef (ADR-0005 §3.8).
@@ -143,11 +156,7 @@ class ActiveJobHandoff:
             raise ValueError("ActiveJobHandoff.job_id must not be empty")
         if self.expires_at is not None:
             try:
-                dt = datetime.fromisoformat(self.expires_at)
-                if dt.tzinfo is None:
-                    raise ValueError(
-                        f"ActiveJobHandoff.expires_at must be timezone-aware ISO-8601 string, got: {self.expires_at!r}"
-                    )
+                _parse_iso_timestamp(self.expires_at)
             except (ValueError, TypeError) as exc:
                 raise ValueError(
                     f"ActiveJobHandoff.expires_at must be valid ISO-8601 string: {exc}"
@@ -166,7 +175,7 @@ class ActiveJobHandoff:
         if reference.tzinfo is None:
             reference = reference.replace(tzinfo=timezone.utc)
         try:
-            expires_dt = datetime.fromisoformat(self.expires_at)
+            expires_dt = _parse_iso_timestamp(self.expires_at)
             return reference >= expires_dt
         except (ValueError, TypeError):
             return False
