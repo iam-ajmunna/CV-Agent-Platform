@@ -789,4 +789,22 @@ Added 6 new regression tests covering all three re-review findings, expanding th
 
 **Left open:** Phase 2D (ADR-0005 Tool & MCP Protocol Subsystem).
 
+---
 
+## 2026-09-13 — Phase 2D ADR-0005 Tool & MCP Protocol Subsystem Implementation (feature/ajmunna/phase-2d-tools-mcp)
+
+**Did:** Implemented the Phase 2D Tool & MCP Protocol Subsystem under Issue #41 according to frozen ADR-0005 and the approved PM boundary decisions:
+1. Typed contracts (`cv_agent/tools/contracts.py`): Defined immutable, frozen data structures (`TargetId`, `ExecutionId`, `MCPServerId`, `TargetType`, `ToolRiskLevel`, `ToolExecutionStatus`, `ExecutionTargetDescriptor`, `ToolDescriptor`, `ActiveJobHandoff`, `ToolInvocation`, `ToolResult`, `ToolAvailabilityInfo`, `ToolExecutor`, `ToolRegistry`, `deep_freeze`).
+2. Execution safety & security policy (`cv_agent/tools/security.py`): Structured argv safety with zero shell interpretation (`shell=False` strictly enforced; shell meta-characters rejected fail-closed); workspace path containment resolving all paths against `workspace_root` and blocking traversal (`../`) or external absolute paths with `POLICY_VIOLATION`; secret isolation blocking sensitive parameter keys (`api_key`, `secret`, `password`, `token`, etc.) with `POLICY_VIOLATION`; pre-execution approval gating blocking unauthorized invocations of `requires_approval=True` tools with `PERMISSION_DENIED`.
+3. Operational tool & target registry (`cv_agent/tools/registry.py`): Implemented `DefaultToolRegistry` with duplicate ID rejection, target registration, compatibility filtering, and hardware-aware probing (reporting NVIDIA/CUDA tools as known-but-unavailable on local macOS workstations per D-022 without crashing).
+4. Transport decoupling adapters (`cv_agent/tools/adapters.py`): Implemented `LocalProcessAdapter` (structured argv subprocess execution), `MockRemoteTargetAdapter` (asynchronous job dispatch returning `ActiveJobHandoff`), and `MockMCPEndpointAdapter` (untrusted protocol boundary with output schema validation).
+5. Execution coordination (`cv_agent/tools/executor.py`): Implemented `DefaultToolExecutor` coordinating availability checks, approval preconditions, secret isolation, input schema validation, and transport adapter dispatch.
+6. Acceptance tests (`tests/test_tools_boundary.py`): Implemented 27 contract tests covering all 13 required acceptance areas of ADR-0005. Expanded total test suite to 200 passing tests (0 warnings).
+
+**Why:** `[P§15]`, `[P§20]`, `[P§24]`, `[P§29.4]`, `[P§34]` — establishes the operational tool and execution target abstraction layer for computer vision tasks with robust security, hardware awareness, approval preconditions, and clean separation from reasoning, capability identity, and orchestration.
+
+**Broke:** Nothing. All 200 pytest tests pass (0 warnings), Ruff lint and format checks pass, Mypy passes on both default and Python 3.10 targets, CLI health check passes, `git diff --check` clean.
+
+**Learned:** Separating tool execution (ADR-0005) from capability identity (ADR-0001) and workflow orchestration (ADR-0003) enables tool implementations and transport adapters to remain lightweight and easily testable without requiring complex graph state machines or external provider SDKs.
+
+**Left open:** Push branch `feature/ajmunna/phase-2d-tools-mcp`, open PR #42 linked to Issue #41, verify GitHub Actions CI matrix, and submit for Official PM review.
