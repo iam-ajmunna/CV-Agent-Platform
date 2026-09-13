@@ -775,3 +775,18 @@ Added 6 new regression tests covering all three re-review findings, expanding th
 
 **Left open:** Verify GitHub Actions CI matrix on PR #40 and merge upon Official PM authorization.
 
+---
+
+## 2026-09-13 — Phase 2C ADR-0002 Integration & Merge to main (main)
+
+**Did:** Official PM approved and squash-merged PR #40 into `main` at commit `9c3a6e6c5ea9077ca57dbd635bff2be1d68432b0`. Fast-forwarded local `main` to `origin/main` and deleted the short-lived feature branch `feature/ajmunna/phase-2c-llm-gateway` both locally and on remote. Verified full quality gates on `main`: 173 pytest tests pass (0 warnings), Ruff lint/format pass, Mypy passes on default and Python 3.10 targets, CLI health check passes, and `git diff --check` is clean.
+
+**Why:** Completes Phase 2C milestone under Issue #39 and PR #40, integrating the authoritative ADR-0002 LLM Gateway Subsystem into the trunk `[P§20]`, `[P§34]`.
+
+**Broke:** Nothing. Trunk `main` is completely green.
+
+**Learned:** Following the strict dependency order (Phase 2A Domain Contracts → Phase 2B Capability Registry → Phase 2C LLM Gateway) provides a clean, typed foundation for subsequent Phase 2D (ADR-0005 Tools & MCP Protocol) without premature coupling to orchestration.
+
+**Left open:** Phase 2D (ADR-0005 Tool & MCP Protocol Subsystem).
+
+
