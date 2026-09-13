@@ -829,3 +829,24 @@ Added 8 new regression tests, expanding the Phase 2D contract test suite to 35 t
 **Learned:** Explicit candidate mapping tables at untrusted protocol boundaries guarantee that dynamic discovery cannot bypass authoritative capability contracts, preventing external endpoints from mutating or extending the tool catalog without project governance.
 
 **Left open:** Push review corrections to PR #42, verify GitHub Actions CI matrix, and request Official PM re-review.
+
+---
+
+## 2026-09-13 — PR #42 Re-Review Hardening: Fail-Closed MCP Authorization & Undiscovered Candidate Rejection (feature/ajmunna/phase-2d-tools-mcp)
+
+**Did:** Addressed Official PM re-review blockers on PR #42:
+1. Enforced unconditional fail-closed MCP authorization in `MockMCPEndpointAdapter.execute()`: replaced conditional `if self.tool_mapping and ...` with `if invocation.tool_id not in self.tool_mapping.values(): return ToolResult(..., status=ToolExecutionStatus.PERMISSION_DENIED, ...)`. An empty mapping (`tool_mapping={}`) or unmapped tool now fails closed immediately.
+2. Enforced rejection of undiscovered candidates in `MockMCPEndpointAdapter.register_tool_mapping()`: if `external_candidate_name not in self.discovered_tool_candidates`, raises `ToolSecurityError("UNDISCOVERED_MCP_TOOL", ...)`. Updated `MockMCPEndpointAdapter.__init__` to validate all configured mappings through `register_tool_mapping()`.
+3. Added 2 new contract regression tests in `tests/test_tools_boundary.py`:
+   - `test_mcp_empty_mapping_fails_closed`: verifies that executing an invocation with empty `tool_mapping={}` returns `PERMISSION_DENIED`.
+   - `test_register_tool_mapping_rejects_undiscovered_candidate`: verifies that registering an undiscovered candidate (via method or `__init__`) raises `ToolSecurityError("UNDISCOVERED_MCP_TOOL")`.
+4. Updated existing MCP test fixtures in `tests/test_tools_boundary.py` to declare discovered candidates and mappings where appropriate.
+5. Updated `docs/reports/ISSUE-41-PHASE-2D-REPORT.md` and `docs/state/STATUS.md` with accurate test counts: 37 Phase 2D contract tests, 210 total tests.
+
+**Why:** Satisfies ADR-0005 §3.6 authority boundary invariant. Dynamic MCP endpoints must never be able to execute tools without an explicit discovery and mapping step. Empty mappings must fail closed rather than allow arbitrary bypass, and mappings cannot be synthesized for unseen candidate names `[P§20]`, `[P§29.4]`, `[P§34]`.
+
+**Broke:** Nothing. All 210 pytest tests pass (0 warnings), Ruff lint and format checks pass, Mypy passes on default and Python 3.10 targets, CLI health check passes, `git diff --check` clean.
+
+**Learned:** Security boundaries must never treat empty collections as "check skipped" — default state must always be fail-closed.
+
+**Left open:** Push commit to PR #42, update PR #42 description on GitHub, verify CI matrix across Python 3.10–3.13, and await Official PM review.

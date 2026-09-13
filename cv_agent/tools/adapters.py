@@ -275,7 +275,10 @@ class MockMCPEndpointAdapter:
     ) -> None:
         self.server_id = server_id
         self.discovered_tool_candidates = dict(discovered_tool_candidates or {})
-        self.tool_mapping: dict[str, ToolId] = dict(tool_mapping or {})
+        self.tool_mapping: dict[str, ToolId] = {}
+        if tool_mapping:
+            for external_candidate_name, auth_tool_id in tool_mapping.items():
+                self.register_tool_mapping(external_candidate_name, auth_tool_id)
         self.simulated_response = simulated_response
         self.transport_error = transport_error
         self.dispatched_invocations: list[ToolInvocation] = []
@@ -290,7 +293,15 @@ class MockMCPEndpointAdapter:
     def register_tool_mapping(
         self, external_candidate_name: str, authoritative_tool_id: ToolId
     ) -> None:
-        """Explicitly map an external MCP candidate name to an authoritative project ToolId."""
+        """Explicitly map an external MCP candidate name to an authoritative project ToolId.
+
+        Per ADR-0005 §3.6: Rejects candidates that were never discovered.
+        """
+        if external_candidate_name not in self.discovered_tool_candidates:
+            raise ToolSecurityError(
+                "UNDISCOVERED_MCP_TOOL",
+                f"Cannot map external candidate {external_candidate_name!r}: tool was never discovered on MCP server {self.server_id!r} (ADR-0005 §3.6).",
+            )
         self.tool_mapping[external_candidate_name] = authoritative_tool_id
 
     def resolve_candidate(self, external_candidate_name: str) -> ToolId:
@@ -317,17 +328,10 @@ class MockMCPEndpointAdapter:
     ) -> ToolResult:
         self.dispatched_invocations.append(invocation)
 
-        if self.transport_error or not target.is_available:
-            return ToolResult(
-                tool_id=invocation.tool_id,
-                execution_id=invocation.execution_id,
-                target_id=invocation.target_id,
-                status=ToolExecutionStatus.TRANSPORT_ERROR,
-                error_message=f"MCP transport to server {self.server_id!r} disconnected",
-            )
-
-        # Authority boundary check: if tool_mapping is configured, verify the invoked tool is mapped
-        if self.tool_mapping and invocation.tool_id not in self.tool_mapping.values():
+        # Authority boundary check: verify the invoked tool is mapped from an authorized candidate.
+        # Per ADR-0005 §3.6, execution authorization must fail closed: unmapped tools or empty
+        # mappings cannot be executed.
+        if invocation.tool_id not in self.tool_mapping.values():
             return ToolResult(
                 tool_id=invocation.tool_id,
                 execution_id=invocation.execution_id,
@@ -335,8 +339,17 @@ class MockMCPEndpointAdapter:
                 status=ToolExecutionStatus.PERMISSION_DENIED,
                 error_message=(
                     f"ToolId {str(invocation.tool_id)!r} is not mapped from an authorized candidate on MCP server {self.server_id!r}. "
-                    "Unmapped MCP tools cannot be executed."
+                    "Unmapped MCP tools cannot be executed (ADR-0005 §3.6)."
                 ),
+            )
+
+        if self.transport_error or not target.is_available:
+            return ToolResult(
+                tool_id=invocation.tool_id,
+                execution_id=invocation.execution_id,
+                target_id=invocation.target_id,
+                status=ToolExecutionStatus.TRANSPORT_ERROR,
+                error_message=f"MCP transport to server {self.server_id!r} disconnected",
             )
 
         raw_output = (

@@ -630,7 +630,11 @@ class TestMCPTransportBoundary:
         )
 
         # MCP server returns output violating output_schema (engine_path should be string, got int)
-        mcp_adapter = MockMCPEndpointAdapter(simulated_response={"engine_path": 12345})
+        mcp_adapter = MockMCPEndpointAdapter(
+            discovered_tool_candidates={"remote_trt": {}},
+            tool_mapping={"remote_trt": sample_nvidia_tool.tool_id},
+            simulated_response={"engine_path": 12345},
+        )
         executor = DefaultToolExecutor(
             registry=reg, workspace_root=workspace_root, mcp_adapter=mcp_adapter
         )
@@ -662,7 +666,11 @@ class TestMCPTransportBoundary:
                 is_available=True,
             )
         )
-        mcp_adapter = MockMCPEndpointAdapter(transport_error=True)
+        mcp_adapter = MockMCPEndpointAdapter(
+            discovered_tool_candidates={"remote_trt": {}},
+            tool_mapping={"remote_trt": sample_nvidia_tool.tool_id},
+            transport_error=True,
+        )
         executor = DefaultToolExecutor(
             registry=reg, workspace_root=workspace_root, mcp_adapter=mcp_adapter
         )
@@ -723,6 +731,32 @@ class TestMCPTransportBoundary:
         assert exc.value.code == "UNMAPPED_MCP_TOOL"
         assert "cannot synthesize new ToolIds" in str(exc.value.message)
 
+    def test_register_tool_mapping_rejects_undiscovered_candidate(
+        self, sample_nvidia_tool: ToolDescriptor
+    ) -> None:
+        """Area 12 (PM Blocker): register_tool_mapping rejects candidates not previously discovered."""
+        adapter = MockMCPEndpointAdapter(
+            server_id="vision-mcp",
+            discovered_tool_candidates={"discovered_tool": {}},
+        )
+
+        # Mapping an undiscovered candidate must fail closed with ToolSecurityError
+        with pytest.raises(ToolSecurityError) as exc:
+            adapter.register_tool_mapping(
+                "phantom_undiscovered_tool", sample_nvidia_tool.tool_id
+            )
+        assert exc.value.code == "UNDISCOVERED_MCP_TOOL"
+        assert "tool was never discovered" in str(exc.value.message)
+
+        # Initializing with undiscovered candidates in tool_mapping must also fail closed
+        with pytest.raises(ToolSecurityError) as exc_init:
+            MockMCPEndpointAdapter(
+                server_id="vision-mcp",
+                discovered_tool_candidates={"discovered_tool": {}},
+                tool_mapping={"unseen_tool": sample_nvidia_tool.tool_id},
+            )
+        assert exc_init.value.code == "UNDISCOVERED_MCP_TOOL"
+
     @pytest.mark.asyncio
     async def test_mcp_invocation_of_unmapped_tool_returns_permission_denied(
         self, sample_nvidia_tool: ToolDescriptor, workspace_root: Path
@@ -740,6 +774,7 @@ class TestMCPTransportBoundary:
         other_tool_id = ToolId("other/tool")
         mcp_adapter = MockMCPEndpointAdapter(
             server_id="vision-mcp",
+            discovered_tool_candidates={"some_external_tool": {}},
             tool_mapping={"some_external_tool": other_tool_id},
         )
         executor = DefaultToolExecutor(
@@ -751,6 +786,36 @@ class TestMCPTransportBoundary:
             parameters={"onnx_path": "model.onnx"},
             target_id=TargetId("mcp-target"),
             execution_id=ExecutionId("exec-mcp-unmapped"),
+            timeout_seconds=60,
+            approval_authorized=True,
+        )
+        res = await executor.execute(inv)
+        assert res.status == ToolExecutionStatus.PERMISSION_DENIED
+        assert "not mapped from an authorized candidate" in str(res.error_message)
+
+    @pytest.mark.asyncio
+    async def test_mcp_empty_mapping_fails_closed(
+        self, sample_nvidia_tool: ToolDescriptor, workspace_root: Path
+    ) -> None:
+        """Area 12 (PM Blocker): Empty tool_mapping fails closed with PERMISSION_DENIED."""
+        reg = DefaultToolRegistry([sample_nvidia_tool])
+        reg.register_target(
+            ExecutionTargetDescriptor(
+                target_id=TargetId("mcp-target"),
+                target_type=TargetType.MCP_ENDPOINT,
+                is_available=True,
+            )
+        )
+        adapter = MockMCPEndpointAdapter(tool_mapping={})
+        executor = DefaultToolExecutor(
+            registry=reg, workspace_root=workspace_root, mcp_adapter=adapter
+        )
+
+        inv = ToolInvocation(
+            tool_id=sample_nvidia_tool.tool_id,
+            parameters={"onnx_path": "model.onnx"},
+            target_id=TargetId("mcp-target"),
+            execution_id=ExecutionId("exec-mcp-empty-map"),
             timeout_seconds=60,
             approval_authorized=True,
         )
