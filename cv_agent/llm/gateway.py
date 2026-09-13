@@ -61,9 +61,16 @@ class LLMGateway:
     ) -> None:
         self._providers = MappingProxyType(dict(providers))
         # Canonicalize model profiles strictly by f"{provider_id}:{model_id}"
-        canonical_profiles = {}
+        canonical_profiles: dict[str, ModelProfile] = {}
         for p in model_profiles.values():
-            canonical_profiles[f"{p.provider_id}:{p.model_id}"] = p
+            canonical_key = f"{p.provider_id}:{p.model_id}"
+            if canonical_key in canonical_profiles:
+                raise ValueError(
+                    f"Duplicate model profile canonical identity {canonical_key!r}: "
+                    f"profile for provider {p.provider_id!r} and model {p.model_id!r} "
+                    "is already registered."
+                )
+            canonical_profiles[canonical_key] = p
         self._model_profiles = MappingProxyType(canonical_profiles)
         self._routing_policy = default_routing_policy
         self._retry_policy = default_retry_policy
@@ -79,17 +86,20 @@ class LLMGateway:
     def is_operation_repeatable(self, request: LLMRequest) -> bool:
         """Determine whether the request operation is safe to repeat.
 
-        Per ADR-0002 §8, idempotency_key identifies the logical operation, but
-        repeatability requires both operation identity and safety. By default,
-        an operation is repeatable if it specifies a non-empty idempotency_key
-        and does not define state-mutating tool invocations, or if an explicit
-        repeatability evaluator evaluates it as safe.
+        Per ADR-0002 §8, idempotency_key identifies the logical operation,
+        but timeout represents an unknown remote execution state. Merely
+        having an idempotency_key does not establish that repeating the
+        operation is safe.
+
+        At the Phase 2C boundary, unless an explicit repeatability evaluator
+        determines the operation is safely repeatable, the safe fail-closed
+        default is non-repeatable (False).
         """
         if not request.idempotency_key or not request.idempotency_key.strip():
             return False
         if self._repeatability_evaluator is not None:
-            return self._repeatability_evaluator(request)
-        return not bool(request.tools)
+            return bool(self._repeatability_evaluator(request))
+        return False
 
     def _resolve_model_profile(self, selector: ModelSelector) -> ModelProfile:
         key = f"{selector.provider_id}:{selector.model_id}"
@@ -463,10 +473,34 @@ class LLMGateway:
         selector, profile = eligible[0]
         adapter = self._providers[selector.provider_id]
 
-        done_emitted = False
+        buffered_done: StreamDoneEvent | None = None
         error_emitted = False
 
         for event in adapter.stream(request, profile):
+            if error_emitted:
+                # Terminal error was already emitted: suppress any subsequent events
+                # (including StreamDoneEvent) to enforce error termination invariant.
+                continue
+
+            if buffered_done is not None:
+                # Provider emitted StreamDoneEvent, but yielded subsequent events.
+                # Under ADR-0002 §10, UsageEvent MUST be emitted before StreamDoneEvent,
+                # and StreamDoneEvent is strictly the terminal completion event.
+                raise LLMError(
+                    category="invalid_request",
+                    provider=selector.provider_id,
+                    model=selector.model_id,
+                    request_id=request.request_id,
+                    attempt_id=None,
+                    retryable=False,
+                    fallback_eligible=False,
+                    message=(
+                        f"Stream protocol violation: provider yielded event of type {event.type!r} "
+                        f"after StreamDoneEvent was already produced. Under ADR-0002 §10, "
+                        "UsageEvent MUST be emitted before StreamDoneEvent."
+                    ),
+                )
+
             if isinstance(event, UsageEvent):
                 yield event
             elif isinstance(event, StreamErrorEvent):
@@ -474,11 +508,14 @@ class LLMGateway:
                 yield event
                 break  # Terminal error: do NOT emit StreamDoneEvent afterward
             elif isinstance(event, StreamDoneEvent):
-                done_emitted = True
-                yield event
-                break
+                buffered_done = event
             else:
                 yield event
 
-        if not done_emitted and not error_emitted:
+        if error_emitted:
+            return
+
+        if buffered_done is not None:
+            yield buffered_done
+        else:
             yield StreamDoneEvent(type="done")

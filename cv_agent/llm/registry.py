@@ -7,12 +7,13 @@ Preserves legacy get_provider() for backward compatibility.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 
 from cv_agent.llm.base import LLMProvider as LegacyLLMProvider
 from cv_agent.llm.contracts import (
     CostRecord,
     FallbackPolicy,
+    LLMRequest,
     ModelProfile,
     ModelSelector,
     RetryPolicy,
@@ -83,8 +84,12 @@ def register_adapter(provider_id: str, adapter: LLMProvider) -> None:
 
 
 def register_model_profile(profile: ModelProfile) -> None:
-    """Register a ModelProfile."""
+    """Register a ModelProfile in the authoritative default catalog."""
     key = f"{profile.provider_id}:{profile.model_id}"
+    if key in _DEFAULT_MODEL_PROFILES:
+        raise ValueError(
+            f"Duplicate model profile canonical identity {key!r} is already registered."
+        )
     _DEFAULT_MODEL_PROFILES[key] = profile
 
 
@@ -99,6 +104,7 @@ def create_gateway(
     custom_fallback_policy: FallbackPolicy | None = None,
     denied_providers: frozenset[str] = frozenset(),
     pricing_records: Mapping[str, CostRecord] | None = None,
+    repeatability_evaluator: Callable[[LLMRequest], bool] | None = None,
 ) -> LLMGateway:
     """Instantiate and configure an authoritative LLMGateway."""
     adapters = dict(_ADAPTER_REGISTRY)
@@ -107,7 +113,14 @@ def create_gateway(
 
     profiles = dict(_DEFAULT_MODEL_PROFILES)
     if custom_profiles:
-        profiles.update(custom_profiles)
+        for p in custom_profiles.values():
+            canonical_key = f"{p.provider_id}:{p.model_id}"
+            if canonical_key in profiles:
+                raise ValueError(
+                    f"Duplicate model profile canonical identity {canonical_key!r}: "
+                    "cannot overwrite existing profile."
+                )
+            profiles[canonical_key] = p
 
     # Ensure selected model has a configured profile; do NOT manufacture synthetic capabilities
     key = f"{provider_id}:{model_id}"
@@ -156,6 +169,7 @@ def create_gateway(
         default_fallback_policy=fallback_policy,
         data_governance_denied_providers=denied_providers,
         pricing_records=pricing_records,
+        repeatability_evaluator=repeatability_evaluator,
     )
 
 

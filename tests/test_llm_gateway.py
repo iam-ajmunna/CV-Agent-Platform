@@ -21,6 +21,7 @@ Verifies all 15 ADR-0002 acceptance criteria and PM review constraints:
 from __future__ import annotations
 
 import ast
+from collections.abc import Callable, Iterator
 from decimal import Decimal
 from pathlib import Path
 from types import MappingProxyType
@@ -33,13 +34,17 @@ from cv_agent.llm.contracts import (
     ImageBlock,
     LLMRequest,
     LLMRequirements,
+    LLMStreamEvent,
     Message,
     ModelProfile,
     ModelSelector,
     RetryPolicy,
     RoutingPolicy,
+    StreamDoneEvent,
+    StreamErrorEvent,
     StructuredOutputSpec,
     TextBlock,
+    TextDeltaEvent,
     ToolCall,
     ToolResultBlock,
     UsageEvent,
@@ -68,6 +73,7 @@ def _build_test_gateway(
     max_retries: int = 2,
     max_switches: int = 2,
     denied_providers: frozenset[str] = frozenset(),
+    repeatability_evaluator: Callable[[LLMRequest], bool] | None = None,
 ) -> tuple[LLMGateway, dict[str, MockProviderAdapter]]:
     ad = adapters or {
         "mock-a": MockProviderAdapter(provider_id="mock-a"),
@@ -142,6 +148,7 @@ def _build_test_gateway(
                 pricing_version="2026-v1",
             ),
         },
+        repeatability_evaluator=repeatability_evaluator,
     )
     return gw, ad
 
@@ -421,6 +428,38 @@ class TestBoundedFallbackAcrossProviders:
 
 
 class TestTimeoutAndIdempotencySafety:
+    def test_default_operation_is_fail_closed_non_repeatable_even_with_key(
+        self,
+    ) -> None:
+        """Finding 1: Default repeatability without explicit evaluator is safely False (fail-closed)."""
+        ad_a = MockProviderAdapter(
+            provider_id="mock-a",
+            supports_idempotency_keys=True,
+            simulated_error=ProviderTimeoutError(
+                category="timeout",
+                provider="mock-a",
+                model="model-text",
+                request_id="req-def-1",
+                attempt_id=None,
+                retryable=True,
+                fallback_eligible=False,
+                message="Request timed out",
+            ),
+        )
+        gw, _ = _build_test_gateway(adapters={"mock-a": ad_a}, max_retries=2)
+        req = LLMRequest(
+            request_id="req-def-1",
+            idempotency_key="has-idempotency-key",
+            trace_id="trace-def",
+            messages=(Message.text("user", "query"),),
+        )
+        # ADR-0002 §8: idempotency_key identifies operation, but does not prove safe repeatability
+        assert gw.is_operation_repeatable(req) is False
+        with pytest.raises(ProviderTimeoutError) as exc:
+            gw.complete(req)
+        assert "automatic retry and fallback are prohibited" in str(exc.value)
+        assert ad_a.call_count == 1  # 0 retries attempted
+
     def test_non_repeatable_operation_receives_zero_retry_and_zero_fallback_on_timeout(
         self,
     ) -> None:
@@ -477,7 +516,11 @@ class TestTimeoutAndIdempotencySafety:
                 message="Request timed out",
             ),
         )
-        gw, _ = _build_test_gateway(adapters={"mock-a": ad_a}, max_retries=2)
+        gw, _ = _build_test_gateway(
+            adapters={"mock-a": ad_a},
+            max_retries=2,
+            repeatability_evaluator=lambda r: bool(r.idempotency_key),
+        )
 
         req = LLMRequest(
             request_id="req-to-2",
@@ -485,6 +528,7 @@ class TestTimeoutAndIdempotencySafety:
             trace_id="trace-to-2",
             messages=(Message.text("user", "repeatable query"),),
         )
+        assert gw.is_operation_repeatable(req) is True
 
         with pytest.raises(ProviderTimeoutError) as exc:
             gw.complete(req)
@@ -517,7 +561,11 @@ class TestTimeoutAndIdempotencySafety:
             failure_sequence=[timeout_err],  # First attempt times out, second succeeds
             fixed_response="Successful retry after timeout",
         )
-        gw, _ = _build_test_gateway(adapters={"mock-a": ad_a}, max_retries=2)
+        gw, _ = _build_test_gateway(
+            adapters={"mock-a": ad_a},
+            max_retries=2,
+            repeatability_evaluator=lambda r: bool(r.idempotency_key),
+        )
 
         req = LLMRequest(
             request_id="req-to-3",
@@ -525,6 +573,7 @@ class TestTimeoutAndIdempotencySafety:
             trace_id="trace-to-3",
             messages=(Message.text("user", "repeatable query with guarantee"),),
         )
+        assert gw.is_operation_repeatable(req) is True
 
         resp = gw.complete(req)
         assert resp.content == "Successful retry after timeout"
@@ -556,6 +605,7 @@ class TestTimeoutAndIdempotencySafety:
             adapters={"mock-a": ad_a, "mock-b": ad_b},
             max_retries=0,
             max_switches=2,
+            repeatability_evaluator=lambda r: True,
         )
 
         req = LLMRequest(
@@ -871,6 +921,74 @@ class TestStreamingLifecycleInvariants:
         assert any(e.type == "error" for e in events)
         assert not any(e.type == "done" for e in events)
 
+    def test_streaming_rejects_done_followed_by_usage(self) -> None:
+        """Finding 3: Provider emitting UsageEvent after StreamDoneEvent is rejected as protocol violation."""
+
+        class MalformedProvider(MockProviderAdapter):
+            def stream(
+                self, request: LLMRequest, profile: ModelProfile
+            ) -> Iterator[LLMStreamEvent]:
+                yield TextDeltaEvent(type="text_delta", delta="hello ")
+                yield StreamDoneEvent(type="done")
+                yield UsageEvent(type="usage", input_tokens=10, output_tokens=5)
+
+        ad = MalformedProvider(provider_id="mock-a")
+        gw, _ = _build_test_gateway(adapters={"mock-a": ad})
+        req = LLMRequest(
+            request_id="req-malformed-stream",
+            idempotency_key="idem-malformed",
+            trace_id="tr-malformed",
+            messages=(Message.text("user", "test malformed stream"),),
+            requirements=LLMRequirements(streaming=True),
+        )
+
+        with pytest.raises(LLMError) as exc_info:
+            list(gw.stream(req))
+
+        assert exc_info.value.category == "invalid_request"
+        assert "Stream protocol violation" in exc_info.value.message
+        assert (
+            "UsageEvent MUST be emitted before StreamDoneEvent"
+            in exc_info.value.message
+        )
+
+    def test_streaming_suppresses_done_after_error(self) -> None:
+        """Finding 3: Provider emitting StreamDoneEvent after StreamErrorEvent has Done suppressed."""
+
+        class ErrorThenDoneProvider(MockProviderAdapter):
+            def stream(
+                self, request: LLMRequest, profile: ModelProfile
+            ) -> Iterator[LLMStreamEvent]:
+                yield StreamErrorEvent(
+                    type="error",
+                    error=LLMError(
+                        category="transient_server",
+                        provider="mock-a",
+                        model="model-text",
+                        request_id="req-err-then-done",
+                        attempt_id=None,
+                        retryable=False,
+                        fallback_eligible=False,
+                        message="Connection broken",
+                    ),
+                )
+                yield StreamDoneEvent(type="done")
+
+        ad = ErrorThenDoneProvider(provider_id="mock-a")
+        gw, _ = _build_test_gateway(adapters={"mock-a": ad})
+        req = LLMRequest(
+            request_id="req-err-then-done",
+            idempotency_key="idem-err-done",
+            trace_id="tr-err-done",
+            messages=(Message.text("user", "test error then done"),),
+            requirements=LLMRequirements(streaming=True),
+        )
+
+        events = list(gw.stream(req))
+        assert len(events) == 1
+        assert events[0].type == "error"
+        assert not any(e.type == "done" for e in events)
+
 
 class TestCostAndOperationalMetadata:
     def test_successful_response_carries_operational_telemetry_and_cost(self) -> None:
@@ -1099,3 +1217,85 @@ class TestModelProfileIdentityAndConfiguration:
             gw.complete(req)
         assert "not configured for provider" in str(exc.value)
         assert adapters["mock-a"].call_count == 0
+
+    def test_gateway_construction_rejects_duplicate_canonical_model_profiles(
+        self,
+    ) -> None:
+        """Finding 2: Gateway construction fails deterministically on duplicate canonical identity."""
+        prof1 = ModelProfile(
+            provider_id="mock-a",
+            model_id="shared-model",
+            profile_version="1.0",
+            context_window_tokens=4096,
+            input_modalities=frozenset({"text"}),
+            output_modalities=frozenset({"text"}),
+            supports_structured_output=True,
+            supports_tool_calls=True,
+            supports_streaming=True,
+            supports_reasoning=False,
+        )
+        prof2 = ModelProfile(
+            provider_id="mock-a",
+            model_id="shared-model",
+            profile_version="2.0",
+            context_window_tokens=8192,
+            input_modalities=frozenset({"text"}),
+            output_modalities=frozenset({"text"}),
+            supports_structured_output=True,
+            supports_tool_calls=True,
+            supports_streaming=True,
+            supports_reasoning=False,
+        )
+        # Distinct dict keys mapping to profiles with identical canonical identity (mock-a:shared-model)
+        profiles = {
+            "key-1": prof1,
+            "key-2": prof2,
+        }
+        with pytest.raises(ValueError) as exc_info:
+            _build_test_gateway(profiles=profiles)
+        assert (
+            "Duplicate model profile canonical identity 'mock-a:shared-model'"
+            in str(exc_info.value)
+        )
+
+    def test_register_model_profile_rejects_duplicate_canonical_identity(self) -> None:
+        """Finding 2: register_model_profile() fails deterministically on duplicate canonical identity."""
+        from cv_agent.llm.registry import register_model_profile
+
+        prof = ModelProfile(
+            provider_id="mock",
+            model_id="fake-1",  # already exists in _DEFAULT_MODEL_PROFILES
+            profile_version="1.0",
+            context_window_tokens=4096,
+            input_modalities=frozenset({"text"}),
+            output_modalities=frozenset({"text"}),
+            supports_structured_output=True,
+            supports_tool_calls=True,
+            supports_streaming=True,
+            supports_reasoning=False,
+        )
+        with pytest.raises(ValueError) as exc_info:
+            register_model_profile(prof)
+        assert "Duplicate model profile canonical identity 'mock:fake-1'" in str(
+            exc_info.value
+        )
+
+    def test_create_gateway_rejects_duplicate_custom_profiles(self) -> None:
+        """Finding 2: create_gateway() rejects custom profiles duplicating existing canonical profiles."""
+        dup_prof = ModelProfile(
+            provider_id="mock",
+            model_id="fake-1",  # duplicates mock:fake-1
+            profile_version="1.0",
+            context_window_tokens=4096,
+            input_modalities=frozenset({"text"}),
+            output_modalities=frozenset({"text"}),
+            supports_structured_output=True,
+            supports_tool_calls=True,
+            supports_streaming=True,
+            supports_reasoning=False,
+        )
+        with pytest.raises(ValueError) as exc_info:
+            create_gateway(custom_profiles={"dup": dup_prof})
+        assert "Duplicate model profile canonical identity 'mock:fake-1'" in str(
+            exc_info.value
+        )

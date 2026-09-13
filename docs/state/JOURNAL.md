@@ -757,3 +757,21 @@ Added 9 new regression tests covering all findings, expanding test suite to 167 
 
 **Left open:** Push review corrections to PR #40, verify GitHub Actions CI matrix, and request Official PM re-review.
 
+---
+
+## 2026-09-13 — PR #40 PM Re-Review Corrections (feature/ajmunna/phase-2c-llm-gateway)
+
+**Did:** Resolved all three blocking findings from the PM re-review on PR #40:
+1. Removed `tools` field from `LLMRequest` to adhere strictly to frozen ADR-0002 §8 verbatim. Reworked `LLMGateway.is_operation_repeatable()` to operate only on legitimate Phase 2C contracts, establishing a fail-closed safe default of non-repeatable (`False`) unless an explicit gateway `repeatability_evaluator` callback determines repeatability.
+2. Canonical model profile duplicate rejection: updated `LLMGateway.__init__`, `register_model_profile()`, and `create_gateway()` to deterministically reject duplicate canonical identities (`provider_id:model_id`) with `ValueError` instead of silently overwriting existing profiles.
+3. Enforced streaming lifecycle invariants: `LLMGateway.stream()` validates event ordering, buffering `StreamDoneEvent` to ensure `UsageEvent` always precedes `StreamDoneEvent` when reported, rejecting out-of-order `Done → Usage` with `LLMError(category="invalid_request")`, and suppressing any `StreamDoneEvent` following a terminal `StreamErrorEvent`.
+Added 6 new regression tests covering all three re-review findings, expanding the test suite to 173 passing tests (0 warnings). Updated PR #40 description to reflect default fail-fast authentication and frozen contracts.
+
+**Why:** Addresses PM re-review requirements, ensuring strict fidelity to frozen ADR-0002 contracts, deterministic configuration registration, and robust stream event sequence validation `[P§20]`, `[P§34]`.
+
+**Broke:** Nothing. All 173 pytest tests pass, Ruff lint/format pass, Mypy passes on default and Python 3.10 targets, CLI health check passes.
+
+**Learned:** Buffering terminal completion events in streaming generators provides deterministic boundary validation for malformed provider event sequences without discarding or reordering legitimate streaming chunks.
+
+**Left open:** Verify GitHub Actions CI matrix on PR #40 and merge upon Official PM authorization.
+

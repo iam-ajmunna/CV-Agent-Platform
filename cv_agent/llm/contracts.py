@@ -208,7 +208,7 @@ _SENSITIVE_KEY_PATTERNS = ("key", "token", "secret", "password", "credential", "
 
 @dataclass(frozen=True)
 class LLMRequest:
-    """Canonical request contract sent to the LLM Gateway."""
+    """Canonical request contract sent to the LLM Gateway (frozen ADR-0002 §8)."""
 
     request_id: str
     idempotency_key: str
@@ -216,7 +216,6 @@ class LLMRequest:
     messages: tuple[Message, ...]
     requirements: LLMRequirements = field(default_factory=LLMRequirements)
     response_schema: StructuredOutputSpec | None = None
-    tools: tuple[Mapping[str, object], ...] = ()
     metadata: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -228,7 +227,6 @@ class LLMRequest:
                     f"LLMRequest metadata contains sensitive key {k!r} violating Invariant 14 secret isolation"
                 )
         object.__setattr__(self, "metadata", deep_freeze(self.metadata))
-        object.__setattr__(self, "tools", deep_freeze(self.tools))
 
 
 @dataclass(frozen=True)
