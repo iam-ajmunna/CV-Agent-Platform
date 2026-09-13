@@ -921,4 +921,26 @@ Added 8 new regression tests, expanding the Phase 2D contract test suite to 35 t
 
 **Left open:** Push hardened commits to `origin feature/ajmunna/phase-2e-orchestration`, monitor GitHub Actions CI on PR #44, and request PM review.
 
+---
+
+## 2026-09-13 — Phase 2E (ADR-0003 Orchestration Subsystem) Merged to main
+
+**Did:**
+1. Updated PR #44 description on GitHub to reflect the authoritative 261-test / 51-orchestration-test metrics.
+2. Squash-merged PR #44 (`feat(orchestration): implement Phase 2E ADR-0003 Orchestration Subsystem (#43)`) into `main` (commit `3af26ed`).
+3. Closed Issue #43 with reference to merge commit `3af26ed`.
+4. Deleted short-lived branch `feature/ajmunna/phase-2e-orchestration` locally and pruned remote tracking.
+5. Synchronized local workspace to `main` at commit `3af26ed`.
+6. Recorded decision `D-050` in `docs/state/DECISIONS.md`.
+7. Updated `STATUS.md` and `JOURNAL.md` to reflect Phase 2E merged state and readiness for Phase 2F.
+
+**Why:** Completes the workflow orchestration, durable state management, and persistent approval substrate (Phase 2E) per frozen ADR-0003 and roadmap `[P§19]`–`[P§22]`, `[P§24]`, `[P§34]`. Establishes the authoritative state machine, lease fencing, and recovery mechanism required for downstream project memory, skills, and autonomous engineering stages.
+
+**Broke:** Nothing. All 261 tests pass (0 warnings), Ruff lint/format clean, Mypy clean on default and 3.10 targets, CLI health check passes, `git diff --check` clean.
+
+**Learned:** Grouping all state mutations (fencing epoch check, lifecycle status progression, event sequence allocation, diagnostic event emission) into a single SQLite transaction guarantees zero observable divergence between agent state and event logs even across process terminations or worker crashes.
+
+**Left open:** Scoping and planning for Phase 2F under Official PM direction.
+
+
 
