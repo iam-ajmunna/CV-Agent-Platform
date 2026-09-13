@@ -24,6 +24,7 @@ from cv_agent.llm.contracts import (
     ToolContentBlock,
     ToolResultBlock,
     UsageEvent,
+    deep_freeze,
 )
 from cv_agent.llm.errors import (
     AuthenticationError,
@@ -50,6 +51,7 @@ from cv_agent.llm.registry import (
     register_model_profile,
     register_provider,
 )
+from cv_agent.llm.schema import SchemaValidationError, validate_json_schema
 
 __all__ = [
     "AuthenticationError",
@@ -85,6 +87,7 @@ __all__ = [
     "RateLimitError",
     "RetryPolicy",
     "RoutingPolicy",
+    "SchemaValidationError",
     "StreamDoneEvent",
     "StreamErrorEvent",
     # Structured Output & Tools
@@ -101,9 +104,11 @@ __all__ = [
     "UsageEvent",
     # Registry functions
     "create_gateway",
+    "deep_freeze",
     "get_provider",
     "list_providers",
     "register_adapter",
     "register_model_profile",
     "register_provider",
+    "validate_json_schema",
 ]

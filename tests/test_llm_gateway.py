@@ -54,9 +54,11 @@ from cv_agent.llm.errors import (
     ProviderUnavailableError,
     RateLimitError,
     TransientServerError,
+    UnsupportedModelError,
 )
 from cv_agent.llm.gateway import LLMGateway
 from cv_agent.llm.mock import MockProviderAdapter
+from cv_agent.llm.registry import create_gateway
 
 
 def _build_test_gateway(
@@ -419,10 +421,10 @@ class TestBoundedFallbackAcrossProviders:
 
 
 class TestTimeoutAndIdempotencySafety:
-    def test_timeout_on_non_idempotent_request_prohibits_retry_and_fallback(
+    def test_non_repeatable_operation_receives_zero_retry_and_zero_fallback_on_timeout(
         self,
     ) -> None:
-        """Criterion 7 & PM Constraint 6: Timeout does not automatically duplicate non-idempotent operation."""
+        """Finding 1: Non-repeatable operations (e.g. empty key) receive zero automatic retry and zero fallback."""
         ad_a = MockProviderAdapter(
             provider_id="mock-a",
             simulated_error=ProviderTimeoutError(
@@ -443,21 +445,131 @@ class TestTimeoutAndIdempotencySafety:
             max_switches=2,
         )
 
-        # Mark non-idempotent
         req = LLMRequest(
             request_id="req-to-1",
             idempotency_key="",
             trace_id="trace-to",
-            messages=(Message.text("user", "trigger payment/action"),),
-            metadata={"idempotent": "false"},
+            messages=(Message.text("user", "non repeatable action"),),
         )
 
         with pytest.raises(ProviderTimeoutError) as exc:
             gw.complete(req)
 
-        assert "automatic retry/fallback is prohibited" in str(exc.value)
+        assert "automatic retry and fallback are prohibited" in str(exc.value)
         assert ad_a.call_count == 1  # Only 1 attempt, NO retry
         assert ad_b.call_count == 0  # NO fallback switch
+
+    def test_repeatable_operation_without_provider_guarantee_cannot_retry_on_timeout(
+        self,
+    ) -> None:
+        """Finding 1: Repeatable request without provider-side idempotency guarantee cannot retry on timeout."""
+        ad_a = MockProviderAdapter(
+            provider_id="mock-a",
+            supports_idempotency_keys=False,
+            simulated_error=ProviderTimeoutError(
+                category="timeout",
+                provider="mock-a",
+                model="model-text",
+                request_id="req-to-2",
+                attempt_id=None,
+                retryable=False,
+                fallback_eligible=False,
+                message="Request timed out",
+            ),
+        )
+        gw, _ = _build_test_gateway(adapters={"mock-a": ad_a}, max_retries=2)
+
+        req = LLMRequest(
+            request_id="req-to-2",
+            idempotency_key="idem-key-safe",
+            trace_id="trace-to-2",
+            messages=(Message.text("user", "repeatable query"),),
+        )
+
+        with pytest.raises(ProviderTimeoutError) as exc:
+            gw.complete(req)
+
+        assert (
+            "retry is prohibited without an explicit provider-side idempotency guarantee"
+            in str(exc.value)
+        )
+        assert (
+            ad_a.call_count == 1
+        )  # Provider does not guarantee idempotency -> 0 retries
+
+    def test_repeatable_operation_with_provider_guarantee_retries_safely_on_timeout(
+        self,
+    ) -> None:
+        """Finding 1: Repeatable request with provider-side guarantee safely retries on timeout."""
+        timeout_err = ProviderTimeoutError(
+            category="timeout",
+            provider="mock-a",
+            model="model-text",
+            request_id="req-to-3",
+            attempt_id=None,
+            retryable=True,
+            fallback_eligible=False,
+            message="Request timed out",
+        )
+        ad_a = MockProviderAdapter(
+            provider_id="mock-a",
+            supports_idempotency_keys=True,
+            failure_sequence=[timeout_err],  # First attempt times out, second succeeds
+            fixed_response="Successful retry after timeout",
+        )
+        gw, _ = _build_test_gateway(adapters={"mock-a": ad_a}, max_retries=2)
+
+        req = LLMRequest(
+            request_id="req-to-3",
+            idempotency_key="idem-key-safe-3",
+            trace_id="trace-to-3",
+            messages=(Message.text("user", "repeatable query with guarantee"),),
+        )
+
+        resp = gw.complete(req)
+        assert resp.content == "Successful retry after timeout"
+        assert ad_a.call_count == 2
+        # Verify logical request identity preserved across attempts
+        assert ad_a.recorded_requests[0].request_id == "req-to-3"
+        assert ad_a.recorded_requests[1].request_id == "req-to-3"
+        assert ad_a.recorded_requests[0].idempotency_key == "idem-key-safe-3"
+        assert ad_a.recorded_requests[1].idempotency_key == "idem-key-safe-3"
+
+    def test_timeout_fallback_across_providers_is_prohibited(self) -> None:
+        """Finding 1: Timeout fallback across distinct providers is prohibited (cross-provider state unknown)."""
+        ad_a = MockProviderAdapter(
+            provider_id="mock-a",
+            supports_idempotency_keys=True,
+            simulated_error=ProviderTimeoutError(
+                category="timeout",
+                provider="mock-a",
+                model="model-text",
+                request_id="req-to-4",
+                attempt_id=None,
+                retryable=False,
+                fallback_eligible=True,
+                message="Request timed out",
+            ),
+        )
+        ad_b = MockProviderAdapter(provider_id="mock-b")
+        gw, _ = _build_test_gateway(
+            adapters={"mock-a": ad_a, "mock-b": ad_b},
+            max_retries=0,
+            max_switches=2,
+        )
+
+        req = LLMRequest(
+            request_id="req-to-4",
+            idempotency_key="idem-key-safe-4",
+            trace_id="trace-to-4",
+            messages=(Message.text("user", "repeatable query"),),
+        )
+
+        with pytest.raises(ProviderTimeoutError):
+            gw.complete(req)
+
+        assert ad_a.call_count == 1
+        assert ad_b.call_count == 0  # Prohibited from falling back to provider B
 
 
 class TestFailClosedSecurityAndErrors:
@@ -564,6 +676,93 @@ class TestStructuredOutputEnforcement:
         with pytest.raises(InvalidRequestError) as exc:
             gw.complete(req)
         assert "missing required property 'mandatory_field'" in str(exc.value)
+
+    def test_structured_output_type_mismatch_raises_invalid_request(self) -> None:
+        """Finding 5: Schema property types are enforced; type mismatches raise InvalidRequestError."""
+        spec = StructuredOutputSpec(
+            schema_id="cv.detection.spec",
+            schema_version="1.0",
+            schema={
+                "type": "object",
+                "properties": {
+                    "bbox": {"type": "array", "items": {"type": "number"}},
+                    "label": {"type": "string"},
+                },
+                "required": ["bbox", "label"],
+            },
+        )
+        # Provider returns malformed property types matching the PM review finding
+        ad_a = MockProviderAdapter(
+            provider_id="mock-a",
+            fixed_response='{"bbox": "not-an-array", "label": 123}',
+        )
+        gw, _ = _build_test_gateway(adapters={"mock-a": ad_a})
+        req = LLMRequest(
+            request_id="req-type-mismatch",
+            idempotency_key="idem-type-mismatch",
+            trace_id="tr-type-mismatch",
+            messages=(Message.text("user", "detect"),),
+            response_schema=spec,
+        )
+        with pytest.raises(InvalidRequestError) as exc:
+            gw.complete(req)
+
+        assert "expected type 'array'" in str(exc.value)
+
+    def test_structured_output_additional_properties_and_constraints_enforced(
+        self,
+    ) -> None:
+        """Finding 5: additionalProperties, minItems, enums, and nested schemas are enforced."""
+        spec = StructuredOutputSpec(
+            schema_id="cv.strict.spec",
+            schema_version="1.0",
+            schema={
+                "type": "object",
+                "properties": {
+                    "category": {"type": "string", "enum": ["car", "pedestrian"]},
+                    "scores": {
+                        "type": "array",
+                        "items": {"type": "number"},
+                        "minItems": 1,
+                    },
+                },
+                "required": ["category", "scores"],
+                "additionalProperties": False,
+            },
+        )
+        # 1. Test enum mismatch
+        ad_bad_enum = MockProviderAdapter(
+            provider_id="mock-a",
+            fixed_response='{"category": "airplane", "scores": [0.9]}',
+        )
+        gw, _ = _build_test_gateway(adapters={"mock-a": ad_bad_enum})
+        req = LLMRequest(
+            request_id="req-enum",
+            idempotency_key="idem-enum",
+            trace_id="tr-enum",
+            messages=(Message.text("user", "test"),),
+            response_schema=spec,
+        )
+        with pytest.raises(InvalidRequestError) as exc:
+            gw.complete(req)
+        assert "not in allowed enum" in str(exc.value)
+
+        # 2. Test unexpected additional property
+        ad_extra = MockProviderAdapter(
+            provider_id="mock-a",
+            fixed_response='{"category": "car", "scores": [0.9], "unexpected_flag": true}',
+        )
+        gw, _ = _build_test_gateway(adapters={"mock-a": ad_extra})
+        req = LLMRequest(
+            request_id="req-extra",
+            idempotency_key="idem-extra",
+            trace_id="tr-extra",
+            messages=(Message.text("user", "test"),),
+            response_schema=spec,
+        )
+        with pytest.raises(InvalidRequestError) as exc:
+            gw.complete(req)
+        assert "unexpected additional properties" in str(exc.value)
 
 
 class TestToolCallRepresentation:
@@ -752,3 +951,151 @@ class TestImmutabilityAndDefensiveCopying:
         assert isinstance(err.details, MappingProxyType)
         caller_details["detail_1"] = "MUTATED"
         assert err.details["detail_1"] == "original"
+
+    def test_deep_immutability_on_nested_schema_and_request(self) -> None:
+        """Finding 6: Nested dictionary structures are recursively frozen into immutable MappingProxyTypes."""
+        nested_schema = {
+            "type": "object",
+            "properties": {
+                "bbox": {
+                    "type": "array",
+                    "items": {"type": "number"},
+                },
+            },
+        }
+        spec = StructuredOutputSpec(
+            schema_id="cv.deep.imm",
+            schema_version="1.0",
+            schema=nested_schema,
+        )
+
+        # 1. Mutating caller's retained nested dictionary has NO effect on contract
+        nested_schema["properties"]["bbox"]["type"] = "MUTATED_BY_CALLER"
+        assert spec.schema["properties"]["bbox"]["type"] == "array"
+
+        # 2. Mutating nested mapping on contract directly raises TypeError
+        with pytest.raises(TypeError):
+            spec.schema["properties"]["bbox"]["type"] = "ILLEGAL_MUTATION"  # type: ignore[index]
+
+        # 3. ToolCall nested arguments are recursively frozen
+        args = {"options": {"flag": True, "threshold": 0.5}}
+        tool_call = ToolCall(call_id="c1", tool_name="detector", arguments=args)
+        args["options"]["flag"] = False
+        assert tool_call.arguments["options"]["flag"] is True
+        with pytest.raises(TypeError):
+            tool_call.arguments["options"]["threshold"] = 0.99  # type: ignore[index]
+
+
+class TestModelProfileIdentityAndConfiguration:
+    def test_same_model_id_under_different_providers_resolves_distinct_profiles(
+        self,
+    ) -> None:
+        """Finding 3: Model identity is strictly (provider_id, model_id); no cross-contamination."""
+        profile_a = ModelProfile(
+            provider_id="provider-a",
+            model_id="model-x",
+            profile_version="1.0",
+            context_window_tokens=4096,
+            input_modalities=frozenset({"text", "image"}),
+            output_modalities=frozenset({"text"}),
+            supports_structured_output=True,
+            supports_tool_calls=False,
+            supports_streaming=True,
+            supports_reasoning=False,
+            pricing_version="v1",
+        )
+        profile_b = ModelProfile(
+            provider_id="provider-b",
+            model_id="model-x",
+            profile_version="1.0",
+            context_window_tokens=4096,
+            input_modalities=frozenset({"text"}),  # No image support!
+            output_modalities=frozenset({"text"}),
+            supports_structured_output=True,
+            supports_tool_calls=False,
+            supports_streaming=True,
+            supports_reasoning=False,
+            pricing_version="v1",
+        )
+        ad_a = MockProviderAdapter(provider_id="provider-a", fixed_response="A resp")
+        ad_b = MockProviderAdapter(provider_id="provider-b", fixed_response="B resp")
+
+        gw = LLMGateway(
+            providers={"provider-a": ad_a, "provider-b": ad_b},
+            model_profiles={
+                "provider-a:model-x": profile_a,
+                "provider-b:model-x": profile_b,
+            },
+            default_routing_policy=RoutingPolicy(
+                policy_id="p",
+                policy_version="1.0",
+                candidates=(ModelSelector("provider-a", "model-x"),),
+                max_attempts=1,
+            ),
+            default_retry_policy=RetryPolicy(0, 0, 0, False),
+            default_fallback_policy=FallbackPolicy(False, frozenset(), 0),
+        )
+
+        # Vision request to provider-a:model-x succeeds
+        req_vision = LLMRequest(
+            request_id="req-v",
+            idempotency_key="idem-v",
+            trace_id="tr-v",
+            messages=(
+                Message(
+                    role="user",
+                    content=(
+                        ImageBlock(
+                            type="image",
+                            media_type="image/png",
+                            uri="https://example.com/img.png",
+                        ),
+                    ),
+                ),
+            ),
+            requirements=LLMRequirements(input_modalities=frozenset({"text", "image"})),
+        )
+        resp_a = gw.complete(
+            req_vision,
+            routing_policy=RoutingPolicy(
+                "p", "1.0", (ModelSelector("provider-a", "model-x"),), 1
+            ),
+        )
+        assert resp_a.content == "A resp"
+
+        # Same vision request to provider-b:model-x fails static capability check (0 provider calls)
+        with pytest.raises(CapabilityMismatchError) as exc:
+            gw.complete(
+                req_vision,
+                routing_policy=RoutingPolicy(
+                    "p", "1.0", (ModelSelector("provider-b", "model-x"),), 1
+                ),
+            )
+        assert "does not support required input modalities" in str(exc.value)
+        assert ad_b.call_count == 0
+
+    def test_create_gateway_rejects_unknown_model_without_manufacturing_profile(
+        self,
+    ) -> None:
+        """Finding 4: create_gateway() rejects unconfigured models; does not manufacture synthetic profiles."""
+        with pytest.raises(UnsupportedModelError) as exc:
+            create_gateway(provider_id="mock", model_id="nonexistent-model-12345")
+        assert "not configured in registered model profiles" in str(exc.value)
+
+    def test_gateway_rejects_unknown_model_in_routing_with_zero_provider_calls(
+        self,
+    ) -> None:
+        """Finding 4: Routing candidate with unknown model is rejected with 0 provider calls."""
+        gw, adapters = _build_test_gateway(
+            routing_candidates=(ModelSelector("mock-a", "unknown-model"),)
+        )
+        req = LLMRequest(
+            request_id="req-unk",
+            idempotency_key="idem-unk",
+            trace_id="tr-unk",
+            messages=(Message.text("user", "hi"),),
+        )
+        with pytest.raises(CapabilityMismatchError) as exc:
+            gw.complete(req)
+        assert "not configured for provider" in str(exc.value)
+        assert adapters["mock-a"].call_count == 0

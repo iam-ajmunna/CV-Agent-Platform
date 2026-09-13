@@ -736,3 +736,24 @@ Added 21 contract tests covering all 15 acceptance criteria in `tests/test_llm_g
 
 **Left open:** Open PR for Issue #39, verify full CI matrix, and request Official PM review.
 
+---
+
+## 2026-09-13 — PR #40 Official PM Review Corrections (feature/ajmunna/phase-2c-llm-gateway)
+
+**Did:** Addressed all six blocking review findings on PR #40:
+1. Faithful timeout/idempotency semantics: eliminated uncontracted `metadata["idempotent"]` logic; introduced `is_operation_repeatable(request)` gateway decision mechanism; codified that timeout means execution state is potentially unknown; non-repeatable operations receive zero automatic retry and zero automatic fallback on timeout; repeatable operations retry only when provider has explicit `supports_idempotency_keys = True`; timeout fallback across distinct providers is prohibited.
+2. Default fail-fast authentication: clarified and narrowed implementation and report to default fail-fast authentication (`AuthenticationError.retryable = False`, `fallback_eligible = False`), failing fast without automatic retry or fallback.
+3. Canonical model profile resolution: model profiles are indexed strictly by `f"{provider_id}:{model_id}"`; eliminated ambiguous fallback lookup by bare `model_id`. Added regression test verifying distinct profiles for shared model identifiers across providers (`provider-a:model-x` vs `provider-b:model-x`).
+4. Zero model profile manufacturing: removed synthetic capability synthesis in `create_gateway()`; unconfigured models raise `UnsupportedModelError`. Statically rejected unconfigured routing candidates with zero provider calls.
+5. Deterministic JSON Schema validator: implemented pure-Python standard library validator in `cv_agent/llm/schema.py` enforcing types, properties, required keys, additionalProperties, items, enums, and constraints. Added negative test rejecting malformed types (`{"bbox": "not-an-array", "label": 123}`).
+6. Deep defensive immutability: implemented recursive `deep_freeze()` converting nested mappings to `MappingProxyType`, lists to tuples, and sets to frozensets. Added regression test verifying nested schema immutability and `TypeError` on attempted mutation.
+Added 9 new regression tests covering all findings, expanding test suite to 167 tests (0 warnings).
+
+**Why:** Addresses PR #40 blocking review findings, ensuring full fidelity to frozen ADR-0002 contracts, robust idempotency and timeout safety, complete schema enforcement, and deep immutability `[P§20]`, `[P§34]`.
+
+**Broke:** Nothing. All 167 pytest tests pass (0 warnings), Ruff lint/format pass, Mypy passes on both default and Python 3.10 targets, CLI health check passes.
+
+**Learned:** Pure-Python recursive data freezing and deterministic JSON schema validation satisfy strict contract guarantees without bloating core dependencies with heavy third-party packages.
+
+**Left open:** Push review corrections to PR #40, verify GitHub Actions CI matrix, and request Official PM re-review.
+

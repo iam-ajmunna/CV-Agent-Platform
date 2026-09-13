@@ -45,8 +45,10 @@ class MockProviderAdapter(LLMProvider):
         stream_chunks: tuple[str, ...] = ("Mock", " response", " stream"),
         emit_usage_in_stream: bool = True,
         stream_error: LLMError | None = None,
+        supports_idempotency_keys: bool = False,
     ) -> None:
         self.provider_id = provider_id
+        self.supports_idempotency_keys = supports_idempotency_keys
         self._fixed_response = fixed_response
         self._fixed_structured_output = fixed_structured_output
         self._fixed_tool_calls = fixed_tool_calls

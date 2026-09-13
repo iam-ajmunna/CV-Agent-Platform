@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import random
 import time
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import replace
 from types import MappingProxyType
 from typing import Any
@@ -37,13 +37,15 @@ from cv_agent.llm.errors import (
     UnsupportedModelError,
 )
 from cv_agent.llm.provider import LLMProvider
+from cv_agent.llm.schema import SchemaValidationError, validate_json_schema
 
 
 class LLMGateway:
     """Authoritative ADR-0002 typed LLM Gateway.
 
     Handles model resolution, static capability checks, routing, bounded retries,
-    safe fallbacks, structured output validation, and streaming lifecycle events.
+    fallback policies, idempotency and timeout safety, structured output validation,
+    and normalized responses.
     """
 
     def __init__(
@@ -55,9 +57,14 @@ class LLMGateway:
         default_fallback_policy: Any,
         data_governance_denied_providers: frozenset[str] = frozenset(),
         pricing_records: Mapping[str, CostRecord] | None = None,
+        repeatability_evaluator: Callable[[LLMRequest], bool] | None = None,
     ) -> None:
         self._providers = MappingProxyType(dict(providers))
-        self._model_profiles = MappingProxyType(dict(model_profiles))
+        # Canonicalize model profiles strictly by f"{provider_id}:{model_id}"
+        canonical_profiles = {}
+        for p in model_profiles.values():
+            canonical_profiles[f"{p.provider_id}:{p.model_id}"] = p
+        self._model_profiles = MappingProxyType(canonical_profiles)
         self._routing_policy = default_routing_policy
         self._retry_policy = default_retry_policy
         self._fallback_policy = default_fallback_policy
@@ -67,13 +74,27 @@ class LLMGateway:
             if pricing_records is not None
             else MappingProxyType({})
         )
+        self._repeatability_evaluator = repeatability_evaluator
+
+    def is_operation_repeatable(self, request: LLMRequest) -> bool:
+        """Determine whether the request operation is safe to repeat.
+
+        Per ADR-0002 §8, idempotency_key identifies the logical operation, but
+        repeatability requires both operation identity and safety. By default,
+        an operation is repeatable if it specifies a non-empty idempotency_key
+        and does not define state-mutating tool invocations, or if an explicit
+        repeatability evaluator evaluates it as safe.
+        """
+        if not request.idempotency_key or not request.idempotency_key.strip():
+            return False
+        if self._repeatability_evaluator is not None:
+            return self._repeatability_evaluator(request)
+        return not bool(request.tools)
 
     def _resolve_model_profile(self, selector: ModelSelector) -> ModelProfile:
         key = f"{selector.provider_id}:{selector.model_id}"
         if key in self._model_profiles:
             return self._model_profiles[key]
-        if selector.model_id in self._model_profiles:
-            return self._model_profiles[selector.model_id]
         raise UnsupportedModelError(
             category="unsupported_model",
             provider=selector.provider_id,
@@ -81,7 +102,7 @@ class LLMGateway:
             request_id="",
             attempt_id=None,
             retryable=False,
-            fallback_eligible=True,
+            fallback_eligible=False,
             message=f"Model {selector.model_id!r} not configured for provider {selector.provider_id!r}",
         )
 
@@ -228,7 +249,9 @@ class LLMGateway:
         else:
             data = raw_output
 
-        if not isinstance(data, dict):
+        try:
+            validate_json_schema(data, spec.schema)
+        except SchemaValidationError as exc:
             raise InvalidRequestError(
                 category="invalid_request",
                 provider=provider,
@@ -237,24 +260,8 @@ class LLMGateway:
                 attempt_id=attempt_id,
                 retryable=False,
                 fallback_eligible=False,
-                message=f"Structured output must decode to an object/mapping for schema {spec.schema_id!r}",
-            )
-
-        # Validate required schema fields if specified
-        required_props = spec.schema.get("required")
-        if isinstance(required_props, (list, tuple)):
-            for prop in required_props:
-                if prop not in data:
-                    raise InvalidRequestError(
-                        category="invalid_request",
-                        provider=provider,
-                        model=model,
-                        request_id=request_id,
-                        attempt_id=attempt_id,
-                        retryable=False,
-                        fallback_eligible=False,
-                        message=f"Structured output missing required property {prop!r} for schema {spec.schema_id!r}",
-                    )
+                message=f"Structured output schema validation failed for schema {spec.schema_id!r}: {exc}",
+            ) from exc
 
         return data
 
@@ -351,34 +358,50 @@ class LLMGateway:
                     if err.category == "policy_denied":
                         raise
 
-                    # Authentication error fails fast unless policy explicitly allows fallback
-                    if err.category == "authentication" and not err.fallback_eligible:
+                    # Phase 2C enforces default fail-fast authentication behavior:
+                    if err.category == "authentication":
                         raise
 
                     # Invalid request fails fast
                     if err.category == "invalid_request":
                         raise
 
-                    # Timeout safety: timeout does not prove non-execution
-                    is_idempotent = request.metadata.get(
-                        "idempotent", ""
-                    ).lower() == "true" or bool(request.idempotency_key)
-                    if err.category == "timeout" and not is_idempotent:
-                        # Non-idempotent operation with unknown execution state: NO automatic retry/fallback
-                        raise ProviderTimeoutError(
-                            category="timeout",
-                            provider=selector.provider_id,
-                            model=profile.model_id,
-                            request_id=request.request_id,
-                            attempt_id=attempt_id,
-                            retryable=False,
-                            fallback_eligible=False,
-                            message=(
-                                f"Request timed out on provider {selector.provider_id!r}. Execution state is unknown; "
-                                "automatic retry/fallback is prohibited for non-idempotent requests."
-                            ),
-                            details=err.details,
+                    # Timeout safety: timeout does not prove non-execution (ADR-0002 §4.3)
+                    if err.category == "timeout":
+                        if not self.is_operation_repeatable(request):
+                            raise ProviderTimeoutError(
+                                category="timeout",
+                                provider=selector.provider_id,
+                                model=profile.model_id,
+                                request_id=request.request_id,
+                                attempt_id=attempt_id,
+                                retryable=False,
+                                fallback_eligible=False,
+                                message=(
+                                    f"Request timed out on provider {selector.provider_id!r}. Execution state is unknown; "
+                                    "automatic retry and fallback are prohibited for non-repeatable operations."
+                                ),
+                                details=err.details,
+                            )
+
+                        has_provider_guarantee = (
+                            getattr(adapter, "supports_idempotency_keys", False) is True
                         )
+                        if not has_provider_guarantee:
+                            raise ProviderTimeoutError(
+                                category="timeout",
+                                provider=selector.provider_id,
+                                model=profile.model_id,
+                                request_id=request.request_id,
+                                attempt_id=attempt_id,
+                                retryable=False,
+                                fallback_eligible=False,
+                                message=(
+                                    f"Request timed out on provider {selector.provider_id!r}. Execution state is unknown; "
+                                    "retry is prohibited without an explicit provider-side idempotency guarantee."
+                                ),
+                                details=err.details,
+                            )
 
                     # Check bounded retry against same candidate
                     if err.retryable and retries_for_candidate < retries.max_retries:
@@ -393,12 +416,15 @@ class LLMGateway:
                         time.sleep(backoff_ms / 1000.0)
                         continue
 
-                    # Retry exhausted for this candidate: check if fallback to next candidate is permitted
+                    # Fallback to next candidate:
+                    # Timeout fallback across providers is prohibited because distinct providers
+                    # cannot guarantee deduplication of the timed-out attempt.
                     can_fallback = (
                         fallback.enabled
                         and provider_switches < fallback.max_provider_switches
                         and err.category in fallback.allowed_failure_categories
                         and err.fallback_eligible
+                        and err.category != "timeout"
                         and (candidate_idx + 1 < len(eligible))
                     )
 

@@ -18,6 +18,7 @@ from cv_agent.llm.contracts import (
     RetryPolicy,
     RoutingPolicy,
 )
+from cv_agent.llm.errors import UnsupportedModelError
 from cv_agent.llm.gateway import LLMGateway
 from cv_agent.llm.mock import FakeLLMProvider, MockProviderAdapter
 from cv_agent.llm.provider import LLMProvider
@@ -108,22 +109,21 @@ def create_gateway(
     if custom_profiles:
         profiles.update(custom_profiles)
 
-    # Ensure selected model has a profile
+    # Ensure selected model has a configured profile; do NOT manufacture synthetic capabilities
     key = f"{provider_id}:{model_id}"
-    if key not in profiles and model_id in profiles:
-        key = model_id
-    elif key not in profiles:
-        profiles[key] = ModelProfile(
-            provider_id=provider_id,
-            model_id=model_id,
-            profile_version="1.0",
-            context_window_tokens=4096,
-            input_modalities=frozenset({"text", "image"}),
-            output_modalities=frozenset({"text"}),
-            supports_structured_output=True,
-            supports_tool_calls=True,
-            supports_streaming=True,
-            supports_reasoning=True,
+    if key not in profiles:
+        raise UnsupportedModelError(
+            category="unsupported_model",
+            provider=provider_id,
+            model=model_id,
+            request_id="",
+            attempt_id=None,
+            retryable=False,
+            fallback_eligible=False,
+            message=(
+                f"Model '{provider_id}:{model_id}' is not configured in registered model profiles. "
+                "The LLM Gateway does not manufacture synthetic model profiles (ADR-0002 §5)."
+            ),
         )
 
     routing_policy = custom_routing_policy or RoutingPolicy(

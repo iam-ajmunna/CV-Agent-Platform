@@ -10,9 +10,21 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from decimal import Decimal
 from types import MappingProxyType
-from typing import Literal
+from typing import Any, Literal
 
 from cv_agent.llm.errors import FailureCategory, LLMError
+
+
+def deep_freeze(val: Any) -> Any:
+    """Recursively freeze mappings, lists, tuples, and sets for defensive immutability."""
+    if isinstance(val, Mapping):
+        return MappingProxyType({k: deep_freeze(v) for k, v in val.items()})
+    if isinstance(val, (list, tuple)):
+        return tuple(deep_freeze(v) for v in val)
+    if isinstance(val, (set, frozenset)):
+        return frozenset(deep_freeze(v) for v in val)
+    return val
+
 
 # --- Multimodal Content Blocks (ADR-0002 §6) ---
 
@@ -161,8 +173,7 @@ class StructuredOutputSpec:
     strict: bool = True
 
     def __post_init__(self) -> None:
-        if not isinstance(self.schema, MappingProxyType):
-            object.__setattr__(self, "schema", MappingProxyType(dict(self.schema)))
+        object.__setattr__(self, "schema", deep_freeze(self.schema))
 
 
 @dataclass(frozen=True)
@@ -174,10 +185,7 @@ class ToolCall:
     arguments: Mapping[str, object]
 
     def __post_init__(self) -> None:
-        if not isinstance(self.arguments, MappingProxyType):
-            object.__setattr__(
-                self, "arguments", MappingProxyType(dict(self.arguments))
-            )
+        object.__setattr__(self, "arguments", deep_freeze(self.arguments))
 
 
 # --- Cost & Operational Metadata (ADR-0002 §12) ---
@@ -208,6 +216,7 @@ class LLMRequest:
     messages: tuple[Message, ...]
     requirements: LLMRequirements = field(default_factory=LLMRequirements)
     response_schema: StructuredOutputSpec | None = None
+    tools: tuple[Mapping[str, object], ...] = ()
     metadata: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -218,8 +227,8 @@ class LLMRequest:
                 raise ValueError(
                     f"LLMRequest metadata contains sensitive key {k!r} violating Invariant 14 secret isolation"
                 )
-        if not isinstance(self.metadata, MappingProxyType):
-            object.__setattr__(self, "metadata", MappingProxyType(dict(self.metadata)))
+        object.__setattr__(self, "metadata", deep_freeze(self.metadata))
+        object.__setattr__(self, "tools", deep_freeze(self.tools))
 
 
 @dataclass(frozen=True)

@@ -8,7 +8,19 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Literal
+from typing import Any, Literal
+
+
+def _deep_freeze(val: Any) -> Any:
+    """Recursively freeze mappings, lists, tuples, and sets for defensive immutability."""
+    if isinstance(val, Mapping):
+        return MappingProxyType({k: _deep_freeze(v) for k, v in val.items()})
+    if isinstance(val, (list, tuple)):
+        return tuple(_deep_freeze(v) for v in val)
+    if isinstance(val, (set, frozenset)):
+        return frozenset(_deep_freeze(v) for v in val)
+    return val
+
 
 FailureCategory = Literal[
     "rate_limited",
@@ -41,8 +53,7 @@ class LLMError(Exception):
 
     def __post_init__(self) -> None:
         # Defensively freeze details mapping to preserve immutability
-        if not isinstance(self.details, MappingProxyType):
-            object.__setattr__(self, "details", MappingProxyType(dict(self.details)))
+        object.__setattr__(self, "details", _deep_freeze(self.details))
         super().__init__(self.message)
 
     def __str__(self) -> str:
