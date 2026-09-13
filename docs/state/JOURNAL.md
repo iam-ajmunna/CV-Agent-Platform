@@ -1014,3 +1014,26 @@ Added 8 new regression tests, expanding the Phase 2D contract test suite to 35 t
 **Learned:** Workload-aware validation requires decoupling the declaration of applicable evidence from execution verification: by capturing `accuracy_metric_requirements` on the immutable `ExperimentSpec` and persisting it in SQLite, the ledger can strictly validate completion evidence without guessing task applicability or relying on arbitrary OR heuristics.
 
 **Left open:** Push hardened commit to `origin feature/ajmunna/phase-2f-memory-ledger`, update PR #46 description, monitor GitHub Actions CI on PR #46 across Python 3.10–3.13, and request Official PM final approval.
+
+---
+
+## 2026-09-14 — Phase 2F ADR-0004 Project Memory & Experiment Ledger Formal Merge & Closure (main)
+
+**Did:**
+1. Received formal Official PM final review approval on Phase 2F / PR #46 (`27f7d35`) confirming all ADR-0004 persistence, immutability, and metric applicability gates are satisfied with passing CI run `34775638814`.
+2. Executed instructed merge sequence:
+   - Squash-merged PR #46 into `main` as commit `7354644bfe0e3c76ceb62631a1ebab24a5683f19`.
+   - Formally closed Issue #45 with state reason `completed`.
+   - Pruned and deleted short-lived branch `feature/ajmunna/phase-2f-memory-ledger` locally and on origin.
+   - Synchronized `main` locally.
+   - Recorded architectural decision `D-051` in `docs/state/DECISIONS.md` documenting dual-layer architecture, SQLite WAL and FK enforcement, database-level triggers for terminal immutability and baseline integrity, explicit `accuracy_metric_requirements` contract, decoupled approvals, and reproducibility metadata.
+   - Synchronized rolling state in `docs/state/STATUS.md` (<= 60 lines, present tense) and appended entry to `docs/state/JOURNAL.md`.
+3. Verified all 285 tests passing with 0 warnings, Ruff check/format clean, Mypy clean on default and Python 3.10 targets.
+
+**Why:** `[P§10]`, `[P§12]`, `[P§24]`, `[P§25]`, `[P§26]`, `[P§29.2]`, `[P§29.4]`, `[P§29.5]`, `[P§33]`, `[P§34]`. Formally incorporates the Phase 2F runtime substrate into the authoritative `main` trunk and closes Issue #45 per the single-trunk operating model.
+
+**Broke:** Nothing broken. 285 tests pass, all quality gates green.
+
+**Learned:** Combining database-level triggers in SQLite (`BEFORE INSERT/UPDATE/DELETE`) with application-level frozen dataclasses and explicit boundary contracts (`accuracy_metric_requirements`) provides defense-in-depth against data corruption, guaranteeing that even direct SQL queries cannot violate experiment ledger immutability or baseline relational integrity.
+
+**Left open:** Phase 2F formally closed. Phase 2G (ADR-0006 Knowledge & RAG Subsystem) or next dependency unblocked and awaiting Official PM instruction.
