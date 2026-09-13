@@ -789,4 +789,64 @@ Added 6 new regression tests covering all three re-review findings, expanding th
 
 **Left open:** Phase 2D (ADR-0005 Tool & MCP Protocol Subsystem).
 
+---
 
+## 2026-09-13 — Phase 2D ADR-0005 Tool & MCP Protocol Subsystem Implementation (feature/ajmunna/phase-2d-tools-mcp)
+
+**Did:** Implemented the Phase 2D Tool & MCP Protocol Subsystem under Issue #41 according to frozen ADR-0005 and the approved PM boundary decisions:
+1. Typed contracts (`cv_agent/tools/contracts.py`): Defined immutable, frozen data structures (`TargetId`, `ExecutionId`, `MCPServerId`, `TargetType`, `ToolRiskLevel`, `ToolExecutionStatus`, `ExecutionTargetDescriptor`, `ToolDescriptor`, `ActiveJobHandoff`, `ToolInvocation`, `ToolResult`, `ToolAvailabilityInfo`, `ToolExecutor`, `ToolRegistry`, `deep_freeze`).
+2. Execution safety & security policy (`cv_agent/tools/security.py`): Structured argv safety with zero shell interpretation (`shell=False` strictly enforced; shell meta-characters rejected fail-closed); workspace path containment resolving all paths against `workspace_root` and blocking traversal (`../`) or external absolute paths with `POLICY_VIOLATION`; secret isolation blocking sensitive parameter keys (`api_key`, `secret`, `password`, `token`, etc.) with `POLICY_VIOLATION`; pre-execution approval gating blocking unauthorized invocations of `requires_approval=True` tools with `PERMISSION_DENIED`.
+3. Operational tool & target registry (`cv_agent/tools/registry.py`): Implemented `DefaultToolRegistry` with duplicate ID rejection, target registration, compatibility filtering, and hardware-aware probing (reporting NVIDIA/CUDA tools as known-but-unavailable on local macOS workstations per D-022 without crashing).
+4. Transport decoupling adapters (`cv_agent/tools/adapters.py`): Implemented `LocalProcessAdapter` (structured argv subprocess execution), `MockRemoteTargetAdapter` (asynchronous job dispatch returning `ActiveJobHandoff`), and `MockMCPEndpointAdapter` (untrusted protocol boundary with output schema validation).
+5. Execution coordination (`cv_agent/tools/executor.py`): Implemented `DefaultToolExecutor` coordinating availability checks, approval preconditions, secret isolation, input schema validation, and transport adapter dispatch.
+6. Acceptance tests (`tests/test_tools_boundary.py`): Implemented 27 contract tests covering all 13 required acceptance areas of ADR-0005. Expanded total test suite to 200 passing tests (0 warnings).
+
+**Why:** `[P§15]`, `[P§20]`, `[P§24]`, `[P§29.4]`, `[P§34]` — establishes the operational tool and execution target abstraction layer for computer vision tasks with robust security, hardware awareness, approval preconditions, and clean separation from reasoning, capability identity, and orchestration.
+
+**Broke:** Nothing. All 200 pytest tests pass (0 warnings), Ruff lint and format checks pass, Mypy passes on both default and Python 3.10 targets, CLI health check passes, `git diff --check` clean.
+
+**Learned:** Separating tool execution (ADR-0005) from capability identity (ADR-0001) and workflow orchestration (ADR-0003) enables tool implementations and transport adapters to remain lightweight and easily testable without requiring complex graph state machines or external provider SDKs.
+
+**Left open:** Push branch `feature/ajmunna/phase-2d-tools-mcp`, open PR #42 linked to Issue #41, verify GitHub Actions CI matrix, and submit for Official PM review.
+
+---
+
+## 2026-09-13 — PR #42 Official PM Review Corrections (feature/ajmunna/phase-2d-tools-mcp)
+
+**Did:** Addressed all six blocking review findings on PR #42:
+1. Shell safety metacharacter enforcement: `validate_argv_safety()` now inspects all arguments against `_SHELL_INJECTION_CHARS = frozenset({";", "&", "|", "`", "$", "(", ")", "\n", "\r"})`, rejecting injection attempts with `ToolSecurityError("POLICY_VIOLATION", ...)`. Added regression tests.
+2. MCP candidate authority boundary: implemented explicit candidate discovery (`discover_candidates()`), mapping registration (`register_tool_mapping()`), and candidate resolution (`resolve_candidate()`) on `MockMCPEndpointAdapter`. Unmapped candidates fail closed with `ToolSecurityError("UNMAPPED_MCP_TOOL", ...)`, preventing MCP servers from synthesizing `ToolId`s. Added execution checks returning `PERMISSION_DENIED` for unmapped tools.
+3. Added `SCHEMA_VIOLATION = "schema_violation"` to `ToolExecutionStatus`. `MockMCPEndpointAdapter.execute()` returns `SCHEMA_VIOLATION` on output schema failure. Updated tests to assert this exact status.
+4. Safe local transport resolution: eliminated unsafe fallback `argv = [str(tool.tool_id)]`. Supported explicit `command_bindings` in `LocalProcessAdapter` and `DefaultToolExecutor`. Invocations without an explicit binding, `"argv"` parameter, or `argv_builder` fail closed with `POLICY_VIOLATION`.
+5. ActiveJobHandoff expiry & validation: added timezone-aware ISO-8601 validation for `expires_at` in `ActiveJobHandoff.__post_init__` and added `is_expired(now)` method. Preserved `expired != failed` invariant.
+6. Recursive sequence secret isolation: updated `validate_secret_isolation()` to recursively inspect sequences (lists, tuples) and sets. Sensitive keys nested inside lists or tuples fail closed with `POLICY_VIOLATION`.
+Added 8 new regression tests, expanding the Phase 2D contract test suite to 35 tests, and the total test suite to 208 passing tests (0 warnings).
+
+**Why:** Addresses PR #42 blocking review findings, ensuring full fidelity to frozen ADR-0005 contracts, robust argv injection protection, enforced MCP authority boundaries, semantic schema violation reporting, and deep secret isolation `[P§15]`, `[P§20]`, `[P§24]`, `[P§29.4]`, `[P§34]`.
+
+**Broke:** Nothing. All 208 pytest tests pass (0 warnings), Ruff lint/format pass, Mypy passes on default and Python 3.10 targets, CLI health check passes, `git diff --check` clean.
+
+**Learned:** Explicit candidate mapping tables at untrusted protocol boundaries guarantee that dynamic discovery cannot bypass authoritative capability contracts, preventing external endpoints from mutating or extending the tool catalog without project governance.
+
+**Left open:** Push review corrections to PR #42, verify GitHub Actions CI matrix, and request Official PM re-review.
+
+---
+
+## 2026-09-13 — PR #42 Re-Review Hardening: Fail-Closed MCP Authorization & Undiscovered Candidate Rejection (feature/ajmunna/phase-2d-tools-mcp)
+
+**Did:** Addressed Official PM re-review blockers on PR #42:
+1. Enforced unconditional fail-closed MCP authorization in `MockMCPEndpointAdapter.execute()`: replaced conditional `if self.tool_mapping and ...` with `if invocation.tool_id not in self.tool_mapping.values(): return ToolResult(..., status=ToolExecutionStatus.PERMISSION_DENIED, ...)`. An empty mapping (`tool_mapping={}`) or unmapped tool now fails closed immediately.
+2. Enforced rejection of undiscovered candidates in `MockMCPEndpointAdapter.register_tool_mapping()`: if `external_candidate_name not in self.discovered_tool_candidates`, raises `ToolSecurityError("UNDISCOVERED_MCP_TOOL", ...)`. Updated `MockMCPEndpointAdapter.__init__` to validate all configured mappings through `register_tool_mapping()`.
+3. Added 2 new contract regression tests in `tests/test_tools_boundary.py`:
+   - `test_mcp_empty_mapping_fails_closed`: verifies that executing an invocation with empty `tool_mapping={}` returns `PERMISSION_DENIED`.
+   - `test_register_tool_mapping_rejects_undiscovered_candidate`: verifies that registering an undiscovered candidate (via method or `__init__`) raises `ToolSecurityError("UNDISCOVERED_MCP_TOOL")`.
+4. Updated existing MCP test fixtures in `tests/test_tools_boundary.py` to declare discovered candidates and mappings where appropriate.
+5. Updated `docs/reports/ISSUE-41-PHASE-2D-REPORT.md` and `docs/state/STATUS.md` with accurate test counts: 37 Phase 2D contract tests, 210 total tests.
+
+**Why:** Satisfies ADR-0005 §3.6 authority boundary invariant. Dynamic MCP endpoints must never be able to execute tools without an explicit discovery and mapping step. Empty mappings must fail closed rather than allow arbitrary bypass, and mappings cannot be synthesized for unseen candidate names `[P§20]`, `[P§29.4]`, `[P§34]`.
+
+**Broke:** Nothing. All 210 pytest tests pass (0 warnings), Ruff lint and format checks pass, Mypy passes on default and Python 3.10 targets, CLI health check passes, `git diff --check` clean.
+
+**Learned:** Security boundaries must never treat empty collections as "check skipped" — default state must always be fail-closed.
+
+**Left open:** Push commit to PR #42, update PR #42 description on GitHub, verify CI matrix across Python 3.10–3.13, and await Official PM review.
