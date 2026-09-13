@@ -33,7 +33,7 @@ def validate_metric_completeness(
     system: SystemMetrics,
     is_deployability_eval: bool = True,
 ) -> None:
-    """Validates metric completeness for terminal experiment completion.
+    """Validates metric completeness for terminal experiment completion per ADR-0004 §2.4.C.
 
     Raises:
         IncompleteMetricsError: If mandatory metrics for the workload are missing.
@@ -41,7 +41,7 @@ def validate_metric_completeness(
     missing: list[str] = []
 
     if workload_type == WorkloadType.TRAINING:
-        # Validation accuracy metrics
+        # Validation accuracy metrics: (map_50, map_50_95, precision, recall)
         if accuracy.map_50 is None:
             missing.append("accuracy.map_50")
         if accuracy.map_50_95 is None:
@@ -51,75 +51,87 @@ def validate_metric_completeness(
         if accuracy.recall is None:
             missing.append("accuracy.recall")
 
-        # Training resource metrics
-        if system.training_time_seconds is None and system.gpu_hours is None:
-            missing.append("system.training_time_seconds or system.gpu_hours")
+        # Training resource metrics: (gpu_hours, training_time_seconds, peak_vram_mb)
+        if system.gpu_hours is None or system.gpu_hours < 0:
+            missing.append("system.gpu_hours")
+        if system.training_time_seconds is None or system.training_time_seconds < 0:
+            missing.append("system.training_time_seconds")
         if system.peak_vram_mb is None or system.peak_vram_mb <= 0:
             missing.append("system.peak_vram_mb")
 
     elif workload_type == WorkloadType.EVALUATION:
-        # Task-specific accuracy metrics
-        if (
-            accuracy.map_50 is None
-            and accuracy.precision is None
-            and accuracy.recall is None
-            and accuracy.f1_score is None
-            and not accuracy.additional_metrics
-        ):
+        # Task-specific accuracy metrics (precision, recall, mAP, per-class metrics)
+        has_task_accuracy = (
+            accuracy.map_50 is not None
+            or accuracy.map_50_95 is not None
+            or accuracy.precision is not None
+            or accuracy.recall is not None
+            or accuracy.f1_score is not None
+            or bool(accuracy.additional_metrics)
+        )
+        if not has_task_accuracy:
             missing.append(
-                "at least one task-specific accuracy metric (map_50, precision, recall, f1_score)"
+                "at least one task-specific accuracy metric (map_50, map_50_95, precision, recall, f1_score)"
             )
 
-        # System metrics when evaluating deployability [P§12]
-        if (
-            is_deployability_eval
-            and system.throughput_fps is None
-            and system.latency_inference_ms is None
-        ):
-            missing.append(
-                "system.throughput_fps or system.latency_inference_ms (deployability evaluation)"
-            )
+        # On-target system metrics when evaluating deployability [P§12]
+        if is_deployability_eval:
+            if system.throughput_fps is None or system.throughput_fps <= 0:
+                missing.append("system.throughput_fps")
+            if system.latency_inference_ms is None or system.latency_inference_ms <= 0:
+                missing.append("system.latency_inference_ms")
+            if system.peak_vram_mb is None or system.peak_vram_mb <= 0:
+                missing.append("system.peak_vram_mb")
 
     elif workload_type == WorkloadType.OPTIMIZATION:
         # Post-optimization accuracy/tolerance metrics
-        if (
-            accuracy.map_50 is None
-            and accuracy.precision is None
-            and not accuracy.additional_metrics
-        ):
+        has_opt_accuracy = (
+            accuracy.map_50 is not None
+            or accuracy.map_50_95 is not None
+            or accuracy.precision is not None
+            or bool(accuracy.additional_metrics)
+        )
+        if not has_opt_accuracy:
             missing.append(
-                "post-optimization accuracy metric (accuracy.map_50 or accuracy.precision)"
+                "post-optimization accuracy metric (map_50, map_50_95, precision, or additional_metrics)"
             )
 
-        # On-target system metrics
-        if system.latency_inference_ms is None and system.latency_e2e_ms is None:
-            missing.append("system.latency_inference_ms or system.latency_e2e_ms")
-        if system.throughput_fps is None:
+        # On-target system metrics: latency_inference_ms, latency_e2e_ms, throughput_fps, peak_vram_mb, power_draw_watts
+        if system.latency_inference_ms is None or system.latency_inference_ms <= 0:
+            missing.append("system.latency_inference_ms")
+        if system.latency_e2e_ms is None or system.latency_e2e_ms <= 0:
+            missing.append("system.latency_e2e_ms")
+        if system.throughput_fps is None or system.throughput_fps <= 0:
             missing.append("system.throughput_fps")
         if system.peak_vram_mb is None or system.peak_vram_mb <= 0:
             missing.append("system.peak_vram_mb")
-        if system.power_draw_watts is None:
+        if system.power_draw_watts is None or system.power_draw_watts <= 0:
             missing.append("system.power_draw_watts")
 
     elif workload_type == WorkloadType.BENCHMARK:
-        # On-target system metrics under production stream conditions
-        if system.throughput_fps is None:
+        # On-target benchmark/system metrics under production stream conditions:
+        # (throughput_fps, latency_inference_ms, latency_e2e_ms, peak_vram_mb, power_draw_watts)
+        if system.throughput_fps is None or system.throughput_fps <= 0:
             missing.append("system.throughput_fps")
-        if system.latency_inference_ms is None and system.latency_e2e_ms is None:
-            missing.append("system.latency_inference_ms or system.latency_e2e_ms")
+        if system.latency_inference_ms is None or system.latency_inference_ms <= 0:
+            missing.append("system.latency_inference_ms")
+        if system.latency_e2e_ms is None or system.latency_e2e_ms <= 0:
+            missing.append("system.latency_e2e_ms")
         if system.peak_vram_mb is None or system.peak_vram_mb <= 0:
             missing.append("system.peak_vram_mb")
-        if system.power_draw_watts is None:
+        if system.power_draw_watts is None or system.power_draw_watts <= 0:
             missing.append("system.power_draw_watts")
 
         # Relevant accuracy verification
-        if (
-            accuracy.map_50 is None
-            and accuracy.precision is None
-            and not accuracy.additional_metrics
-        ):
+        has_bench_accuracy = (
+            accuracy.map_50 is not None
+            or accuracy.map_50_95 is not None
+            or accuracy.precision is not None
+            or bool(accuracy.additional_metrics)
+        )
+        if not has_bench_accuracy:
             missing.append(
-                "accuracy verification metric (accuracy.map_50 or accuracy.precision)"
+                "accuracy verification metric (map_50, map_50_95, precision, or additional_metrics)"
             )
 
     if missing:

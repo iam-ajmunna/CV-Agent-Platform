@@ -62,8 +62,8 @@ class AccuracyMetrics:
 class SystemMetrics:
     """Hardware and execution system performance metrics [P§12], [P§29.4]."""
 
-    peak_vram_mb: float
-    peak_ram_mb: float
+    peak_vram_mb: float | None = None
+    peak_ram_mb: float | None = None
     gpu_hours: float | None = None
     training_time_seconds: float | None = None
     latency_e2e_ms: float | None = None
@@ -102,12 +102,12 @@ class ExperimentSpec:
     batch_size: int
     input_resolution: tuple[int, int]
     precision: str
-    config_uri: str | None = None
-    config_hash: str | None = None
+    config_uri: str
+    config_hash: str
+    hyperparameters: Mapping[str, Any]
     parent_exp_id: str | None = None
     baseline_id: str | None = None
     approval_ref: str | None = None
-    hyperparameters: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True)

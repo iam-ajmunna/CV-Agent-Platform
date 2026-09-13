@@ -87,34 +87,129 @@ class GitProjectMemory(ProjectMemoryReader, ProjectMemoryWriter):
         if not p.exists():
             raise ProjectMemoryFormatError(f"Hardware constraints file missing: {p}")
         try:
-            data = yaml.safe_load(p.read_text(encoding="utf-8"))
-            if not isinstance(data, dict):
-                raise ProjectMemoryFormatError(
-                    f"Expected mapping in {p}, got {type(data)}"
-                )
-            precisions = tuple(str(x) for x in data.get("supported_precisions", ()))
-            return HardwareConstraints(
-                target_device=str(data["target_device"]),
-                max_vram_mb=int(data["max_vram_mb"]),
-                max_ram_mb=int(data["max_ram_mb"]),
-                power_budget_watts=(
-                    float(data["power_budget_watts"])
-                    if data.get("power_budget_watts") is not None
-                    else None
-                ),
-                latency_ceiling_ms=(
-                    float(data["latency_ceiling_ms"])
-                    if data.get("latency_ceiling_ms") is not None
-                    else None
-                ),
-                supported_precisions=precisions,
-            )
-        except (yaml.YAMLError, KeyError, TypeError, ValueError) as err:
+            raw_content = p.read_text(encoding="utf-8")
+            data = yaml.safe_load(raw_content)
+        except yaml.YAMLError as err:
+            raise ProjectMemoryFormatError(f"YAML syntax error in {p}: {err}") from err
+
+        if not isinstance(data, dict):
             raise ProjectMemoryFormatError(
-                f"Invalid hardware constraints schema: {err}"
-            ) from err
+                f"Expected YAML mapping in {p}, got {type(data).__name__}"
+            )
+
+        allowed_keys = {
+            "target_device",
+            "max_vram_mb",
+            "max_ram_mb",
+            "power_budget_watts",
+            "latency_ceiling_ms",
+            "supported_precisions",
+        }
+        extra_keys = set(data.keys()) - allowed_keys
+        if extra_keys:
+            raise ProjectMemoryFormatError(
+                f"Unexpected keys in hardware constraints {p}: {sorted(extra_keys)}"
+            )
+
+        required_keys = allowed_keys
+        missing_keys = required_keys - set(data.keys())
+        if missing_keys:
+            raise ProjectMemoryFormatError(
+                f"Missing required keys in hardware constraints {p}: {sorted(missing_keys)}"
+            )
+
+        target_device = data["target_device"]
+        if (
+            not isinstance(target_device, str)
+            or isinstance(target_device, bool)
+            or not target_device.strip()
+        ):
+            raise ProjectMemoryFormatError(
+                f"target_device must be a non-empty string, got {target_device!r}"
+            )
+
+        max_vram_mb = data["max_vram_mb"]
+        if type(max_vram_mb) is not int or max_vram_mb <= 0:
+            raise ProjectMemoryFormatError(
+                f"max_vram_mb must be a positive integer, got {max_vram_mb!r}"
+            )
+
+        max_ram_mb = data["max_ram_mb"]
+        if type(max_ram_mb) is not int or max_ram_mb <= 0:
+            raise ProjectMemoryFormatError(
+                f"max_ram_mb must be a positive integer, got {max_ram_mb!r}"
+            )
+
+        power_budget_watts = data["power_budget_watts"]
+        if power_budget_watts is not None:
+            if (
+                type(power_budget_watts) not in (int, float)
+                or isinstance(power_budget_watts, bool)
+                or power_budget_watts <= 0
+            ):
+                raise ProjectMemoryFormatError(
+                    f"power_budget_watts must be a positive number or None, got {power_budget_watts!r}"
+                )
+            power_budget_watts = float(power_budget_watts)
+
+        latency_ceiling_ms = data["latency_ceiling_ms"]
+        if latency_ceiling_ms is not None:
+            if (
+                type(latency_ceiling_ms) not in (int, float)
+                or isinstance(latency_ceiling_ms, bool)
+                or latency_ceiling_ms <= 0
+            ):
+                raise ProjectMemoryFormatError(
+                    f"latency_ceiling_ms must be a positive number or None, got {latency_ceiling_ms!r}"
+                )
+            latency_ceiling_ms = float(latency_ceiling_ms)
+
+        precisions_raw = data["supported_precisions"]
+        if not isinstance(precisions_raw, (list, tuple)) or len(precisions_raw) == 0:
+            raise ProjectMemoryFormatError(
+                f"supported_precisions must be a non-empty sequence, got {precisions_raw!r}"
+            )
+        for prec in precisions_raw:
+            if not isinstance(prec, str) or isinstance(prec, bool) or not prec.strip():
+                raise ProjectMemoryFormatError(
+                    f"supported_precisions elements must be non-empty strings, got {prec!r}"
+                )
+
+        return HardwareConstraints(
+            target_device=target_device.strip(),
+            max_vram_mb=max_vram_mb,
+            max_ram_mb=max_ram_mb,
+            power_budget_watts=power_budget_watts,
+            latency_ceiling_ms=latency_ceiling_ms,
+            supported_precisions=tuple(p.strip() for p in precisions_raw),
+        )
 
     def update_hardware_constraints(self, constraints: HardwareConstraints) -> None:
+        if (
+            not isinstance(constraints.target_device, str)
+            or not constraints.target_device.strip()
+        ):
+            raise ProjectMemoryFormatError("target_device cannot be empty.")
+        if constraints.max_vram_mb <= 0:
+            raise ProjectMemoryFormatError("max_vram_mb must be positive.")
+        if constraints.max_ram_mb <= 0:
+            raise ProjectMemoryFormatError("max_ram_mb must be positive.")
+        if (
+            constraints.power_budget_watts is not None
+            and constraints.power_budget_watts <= 0
+        ):
+            raise ProjectMemoryFormatError("power_budget_watts must be positive.")
+        if (
+            constraints.latency_ceiling_ms is not None
+            and constraints.latency_ceiling_ms <= 0
+        ):
+            raise ProjectMemoryFormatError("latency_ceiling_ms must be positive.")
+        if (
+            not constraints.supported_precisions
+            or len(constraints.supported_precisions) == 0
+        ):
+            raise ProjectMemoryFormatError("supported_precisions cannot be empty.")
+
         p = self.hardware_constraints_path
         payload: dict[str, Any] = {
             "target_device": constraints.target_device,
@@ -133,12 +228,18 @@ class GitProjectMemory(ProjectMemoryReader, ProjectMemoryWriter):
             return ()
         raw = p.read_text(encoding="utf-8")
         decisions: list[ArchitecturalDecision] = []
+        seen_ids: set[str] = set()
         blocks = raw.split("\n## ")
         for block in blocks[1:]:  # Skip intro before first ##
             lines = block.splitlines()
             if not lines:
                 continue
-            title = lines[0].strip()
+            header = lines[0].strip()
+            if " — " in header:
+                title = header.split(" — ", 1)[1].strip()
+            else:
+                title = header
+
             props: dict[str, str] = {}
             body_lines: list[str] = []
             is_body = False
@@ -153,15 +254,39 @@ class GitProjectMemory(ProjectMemoryReader, ProjectMemoryWriter):
                     is_body = True
                     body_lines.append(line)
 
-            decision_id = props.get("decision_id", title.split()[0])
-            timestamp = props.get("timestamp", "")
+            decision_id = props.get("decision_id")
+            timestamp = props.get("timestamp")
+            rationale = "\n".join(body_lines).strip()
+
+            if not decision_id:
+                raise ProjectMemoryFormatError(
+                    f"Malformed architectural decision in {p}: missing required 'decision_id'."
+                )
+            if not timestamp:
+                raise ProjectMemoryFormatError(
+                    f"Malformed architectural decision in {p}: missing required 'timestamp'."
+                )
+            if not title:
+                raise ProjectMemoryFormatError(
+                    f"Malformed architectural decision in {p}: missing required 'title'."
+                )
+            if not rationale:
+                raise ProjectMemoryFormatError(
+                    f"Malformed architectural decision in {p}: missing required 'rationale'."
+                )
+
+            if decision_id in seen_ids:
+                raise ProjectMemoryFormatError(
+                    f"Duplicate architectural decision ID detected: {decision_id!r}"
+                )
+            seen_ids.add(decision_id)
+
             linked_str = props.get("linked_experiment_ids", "")
             linked_ids = (
                 tuple(x.strip() for x in linked_str.split(",") if x.strip())
                 if linked_str
                 else ()
             )
-            rationale = "\n".join(body_lines).strip()
             decisions.append(
                 ArchitecturalDecision(
                     decision_id=decision_id,
@@ -174,6 +299,24 @@ class GitProjectMemory(ProjectMemoryReader, ProjectMemoryWriter):
         return tuple(decisions)
 
     def record_architectural_decision(self, decision: ArchitecturalDecision) -> None:
+        if (
+            not isinstance(decision.decision_id, str)
+            or not decision.decision_id.strip()
+        ):
+            raise ProjectMemoryFormatError("decision_id cannot be empty.")
+        if not isinstance(decision.timestamp, str) or not decision.timestamp.strip():
+            raise ProjectMemoryFormatError("timestamp cannot be empty.")
+        if not isinstance(decision.title, str) or not decision.title.strip():
+            raise ProjectMemoryFormatError("title cannot be empty.")
+        if not isinstance(decision.rationale, str) or not decision.rationale.strip():
+            raise ProjectMemoryFormatError("rationale cannot be empty.")
+
+        existing_decisions = self.get_architectural_decisions()
+        if any(d.decision_id == decision.decision_id for d in existing_decisions):
+            raise ProjectMemoryFormatError(
+                f"Architectural decision {decision.decision_id!r} already exists."
+            )
+
         p = self.architectural_choices_path
         existing = (
             p.read_text(encoding="utf-8")
@@ -196,22 +339,46 @@ class GitProjectMemory(ProjectMemoryReader, ProjectMemoryWriter):
             return ()
         raw = p.read_text(encoding="utf-8")
         heuristics: list[LearnedHeuristic] = []
+        seen_ids: set[str] = set()
         blocks = raw.split("\n## ")
         for block in blocks[1:]:
             lines = block.splitlines()
             if not lines:
                 continue
-            header = lines[0].strip()
             props: dict[str, str] = {}
             for line in lines[1:]:
                 if line.startswith("- **") and ":** " in line:
                     parts = line[4:].split(":** ", 1)
                     props[parts[0].strip().lower()] = parts[1].strip()
 
-            heuristic_id = props.get("heuristic_id", header.split()[0])
-            context = props.get("context", "")
-            observation = props.get("observation", "")
-            recommendation = props.get("recommendation", "")
+            heuristic_id = props.get("heuristic_id")
+            context = props.get("context")
+            observation = props.get("observation")
+            recommendation = props.get("recommendation")
+
+            if not heuristic_id:
+                raise ProjectMemoryFormatError(
+                    f"Malformed learned heuristic in {p}: missing required 'heuristic_id'."
+                )
+            if not context:
+                raise ProjectMemoryFormatError(
+                    f"Malformed learned heuristic in {p}: missing required 'context'."
+                )
+            if not observation:
+                raise ProjectMemoryFormatError(
+                    f"Malformed learned heuristic in {p}: missing required 'observation'."
+                )
+            if not recommendation:
+                raise ProjectMemoryFormatError(
+                    f"Malformed learned heuristic in {p}: missing required 'recommendation'."
+                )
+
+            if heuristic_id in seen_ids:
+                raise ProjectMemoryFormatError(
+                    f"Duplicate learned heuristic ID detected: {heuristic_id!r}"
+                )
+            seen_ids.add(heuristic_id)
+
             evidence_str = props.get("evidence_experiment_ids", "")
             evidence_ids = (
                 tuple(x.strip() for x in evidence_str.split(",") if x.strip())
@@ -230,6 +397,30 @@ class GitProjectMemory(ProjectMemoryReader, ProjectMemoryWriter):
         return tuple(heuristics)
 
     def append_learned_heuristic(self, heuristic: LearnedHeuristic) -> None:
+        if (
+            not isinstance(heuristic.heuristic_id, str)
+            or not heuristic.heuristic_id.strip()
+        ):
+            raise ProjectMemoryFormatError("heuristic_id cannot be empty.")
+        if not isinstance(heuristic.context, str) or not heuristic.context.strip():
+            raise ProjectMemoryFormatError("context cannot be empty.")
+        if (
+            not isinstance(heuristic.observation, str)
+            or not heuristic.observation.strip()
+        ):
+            raise ProjectMemoryFormatError("observation cannot be empty.")
+        if (
+            not isinstance(heuristic.recommendation, str)
+            or not heuristic.recommendation.strip()
+        ):
+            raise ProjectMemoryFormatError("recommendation cannot be empty.")
+
+        existing_heuristics = self.get_learned_heuristics()
+        if any(h.heuristic_id == heuristic.heuristic_id for h in existing_heuristics):
+            raise ProjectMemoryFormatError(
+                f"Learned heuristic {heuristic.heuristic_id!r} already exists."
+            )
+
         p = self.learned_heuristics_path
         existing = (
             p.read_text(encoding="utf-8") if p.exists() else "# Learned Heuristics\n\n"

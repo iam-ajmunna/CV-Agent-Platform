@@ -18,6 +18,7 @@ from cv_agent.experiments.ledger import (
     LedgerError,
     LedgerWorkspaceContainmentError,
     RelationalIntegrityError,
+    ReproducibilityMetadataError,
     SQLiteExperimentLedger,
 )
 from cv_agent.experiments.metrics_validator import (
@@ -47,6 +48,7 @@ __all__ = [
     "LedgerError",
     "LedgerWorkspaceContainmentError",
     "RelationalIntegrityError",
+    "ReproducibilityMetadataError",
     "SQLiteExperimentLedger",
     "SystemMetrics",
     "WorkloadType",

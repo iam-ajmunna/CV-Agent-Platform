@@ -968,6 +968,26 @@ Added 8 new regression tests, expanding the Phase 2D contract test suite to 35 t
 
 **Left open:** Commit, push branch, open PR linked to Issue #45, verify CI matrix across Python 3.10–3.13, and await Official PM review.
 
+---
 
+## 2026-09-13 — Phase 2F PR #46 Official PM Review Hardening (feature/ajmunna/phase-2f-memory-ledger)
 
+**Did:**
+1. Reconciled metric completeness validation against authoritative ADR-0004 §2.4.C: eliminated all loosened `OR` rules (`latency_inference_ms OR latency_e2e_ms` and `gpu_hours OR training_time_seconds`). Training now strictly requires all 4 validation accuracy metrics AND all 3 training resource metrics (`gpu_hours`, `training_time_seconds`, `peak_vram_mb`). Optimization and benchmark workloads strictly require all 5 on-target system metrics (`latency_inference_ms`, `latency_e2e_ms`, `throughput_fps`, `peak_vram_mb`, `power_draw_watts`). Added negative unit tests for every omitted required metric independently.
+2. Implemented database-level triggers enforcing comprehensive terminal child-record immutability at the SQLite persistence boundary: added `trg_immutable_experiments_update`, `trg_immutable_experiments_delete`, and before INSERT/UPDATE/DELETE triggers on `accuracy_metrics`, `system_metrics`, `hyperparameters`, and `artifacts` child tables that abort any raw SQL statement modifying or deleting records of terminal experiments (`completed`, `failed`, `cancelled`).
+3. Enforced strict reproducibility validation in `create_experiment()`: non-empty 40-hex `commit_sha`, non-empty `dataset_version`, valid integer `seed >= 0`, non-empty `config_uri` and `config_hash`, non-empty `hyperparameters` mapping, positive `input_resolution` tuple `(width, height)`, positive integer `batch_size`, and valid enum instances for `target` and `workload_type`. Added independent test cases asserting failure for each invalid field.
+4. Represented optional persisted metrics as `float | None` in `SystemMetrics` (`peak_vram_mb: float | None = None`, `peak_ram_mb: float | None = None`). Updated loader to preserve `None` rather than fabricating synthetic `0.0`.
+5. Added database-level triggers `trg_validate_active_baseline_insert` and `trg_validate_active_baseline_update` to `active_baselines` enforcing that the referenced `exp_id` must be in `completed` status and have a matching `workload_type`. Added tests proving raw SQL statements violating baseline invariants are rejected.
+6. Implemented strong concurrency regression test simulating 20 simultaneous competing worker threads creating experiments under `BEGIN IMMEDIATE ... COMMIT`, asserting exactly 20 records created, 0 IntegrityErrors, 20 unique IDs, sequential contiguous numbers without duplicates or gaps, and all records intact.
+7. Hardened structured Markdown parser: enforced strict schema validation in `get_architectural_decisions()` and `get_learned_heuristics()`, raising `ProjectMemoryFormatError` on missing required properties (`decision_id`, `timestamp`, `title`, `rationale` for decisions; `heuristic_id`, `context`, `observation`, `recommendation` for heuristics) and on duplicate IDs.
+8. Hardened YAML schema validation in `get_hardware_constraints()`: strictly validates dictionary structure without type coercion, rejecting unexpected keys, missing keys, non-positive constraints, empty device string, and empty precision lists with `ProjectMemoryFormatError`.
+9. Updated PR #46 report, `STATUS.md`, and test suite. Total test suite expanded to 284 passed (23 Phase 2F contract and regression tests), 0 warnings.
+10. Ran all local quality gates: Ruff check, Ruff format, Mypy default, Mypy Python 3.10, CLI health check, `git diff --check`.
 
+**Why:** `[P§10]`, `[P§12]`, `[P§24]`, `[P§25]`, `[P§26]`, `[P§29.2]`, `[P§29.4]`, `[P§29.5]`, `[P§33]`, `[P§34]`, and ADR-0004 §2.4.B–§2.4.C. Resolves all 9 findings in the Official PM Review on PR #46, guaranteeing fail-closed persistence contracts, database-level immutability, and zero uncontracted loosening.
+
+**Broke:** Nothing. All 284 pytest tests pass (0 warnings), Ruff check and format pass, Mypy passes on default and Python 3.10 targets, CLI health check passes, `git diff --check` clean.
+
+**Learned:** In SQLite, relying solely on Python-level state machine checks leaves child records vulnerable to raw SQL mutations (`DELETE FROM ... WHERE exp_id = ...`); database triggers `BEFORE INSERT/UPDATE/DELETE` referencing parent state establish immutable persistence guarantees that cannot be bypassed even by direct SQL access.
+
+**Left open:** Push hardened commit to `origin feature/ajmunna/phase-2f-memory-ledger`, monitor GitHub Actions CI on PR #46, and request Official PM re-review.

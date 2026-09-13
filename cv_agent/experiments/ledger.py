@@ -15,7 +15,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -34,6 +34,7 @@ from cv_agent.experiments.interfaces import (
 )
 from cv_agent.experiments.metrics_validator import validate_metric_completeness
 from cv_agent.experiments.state_machine import (
+    ExperimentImmutabilityError,
     validate_experiment_transition,
 )
 
@@ -54,7 +55,12 @@ class ApprovalReferenceFormatError(LedgerError):
     """Raised when approval_ref does not match {operation_id}:{request_id}."""
 
 
+class ReproducibilityMetadataError(LedgerError):
+    """Raised when experiment initialization specification lacks mandatory reproducibility metadata."""
+
+
 APPROVAL_REF_REGEX = re.compile(r"^[a-zA-Z0-9_.-]+:[a-zA-Z0-9_.-]+$")
+COMMIT_SHA_REGEX = re.compile(r"^[0-9a-fA-F]{40}$")
 
 
 class SQLiteExperimentLedger(ExperimentLedger):
@@ -123,8 +129,8 @@ class SQLiteExperimentLedger(ExperimentLedger):
                     input_resolution_w INTEGER NOT NULL,
                     input_resolution_h INTEGER NOT NULL,
                     precision TEXT NOT NULL,
-                    config_uri TEXT,
-                    config_hash TEXT,
+                    config_uri TEXT NOT NULL,
+                    config_hash TEXT NOT NULL,
                     parent_exp_id TEXT,
                     baseline_id TEXT,
                     approval_ref TEXT,
@@ -178,6 +184,150 @@ class SQLiteExperimentLedger(ExperimentLedger):
                     updated_at TEXT NOT NULL,
                     FOREIGN KEY (exp_id) REFERENCES experiments(exp_id) ON DELETE RESTRICT
                 );
+
+                -- Terminal immutability triggers for experiments table
+                CREATE TRIGGER IF NOT EXISTS trg_prevent_terminal_experiment_update
+                BEFORE UPDATE ON experiments
+                FOR EACH ROW
+                WHEN OLD.status IN ('completed', 'failed', 'cancelled')
+                BEGIN
+                    SELECT RAISE(ABORT, 'Cannot update terminal experiment');
+                END;
+
+                CREATE TRIGGER IF NOT EXISTS trg_prevent_terminal_experiment_delete
+                BEFORE DELETE ON experiments
+                FOR EACH ROW
+                WHEN OLD.status IN ('completed', 'failed', 'cancelled')
+                BEGIN
+                    SELECT RAISE(ABORT, 'Cannot delete terminal experiment');
+                END;
+
+                -- Terminal immutability triggers for accuracy_metrics table
+                CREATE TRIGGER IF NOT EXISTS trg_prevent_accuracy_metrics_update
+                BEFORE UPDATE ON accuracy_metrics
+                FOR EACH ROW
+                WHEN (SELECT status FROM experiments WHERE exp_id = OLD.exp_id) IN ('completed', 'failed', 'cancelled')
+                BEGIN
+                    SELECT RAISE(ABORT, 'Cannot mutate accuracy_metrics for terminal experiment');
+                END;
+
+                CREATE TRIGGER IF NOT EXISTS trg_prevent_accuracy_metrics_delete
+                BEFORE DELETE ON accuracy_metrics
+                FOR EACH ROW
+                WHEN (SELECT status FROM experiments WHERE exp_id = OLD.exp_id) IN ('completed', 'failed', 'cancelled')
+                BEGIN
+                    SELECT RAISE(ABORT, 'Cannot mutate accuracy_metrics for terminal experiment');
+                END;
+
+                CREATE TRIGGER IF NOT EXISTS trg_prevent_accuracy_metrics_insert
+                BEFORE INSERT ON accuracy_metrics
+                FOR EACH ROW
+                WHEN (SELECT status FROM experiments WHERE exp_id = NEW.exp_id) IN ('completed', 'failed', 'cancelled')
+                BEGIN
+                    SELECT RAISE(ABORT, 'Cannot insert accuracy_metrics for terminal experiment');
+                END;
+
+                -- Terminal immutability triggers for system_metrics table
+                CREATE TRIGGER IF NOT EXISTS trg_prevent_system_metrics_update
+                BEFORE UPDATE ON system_metrics
+                FOR EACH ROW
+                WHEN (SELECT status FROM experiments WHERE exp_id = OLD.exp_id) IN ('completed', 'failed', 'cancelled')
+                BEGIN
+                    SELECT RAISE(ABORT, 'Cannot mutate system_metrics for terminal experiment');
+                END;
+
+                CREATE TRIGGER IF NOT EXISTS trg_prevent_system_metrics_delete
+                BEFORE DELETE ON system_metrics
+                FOR EACH ROW
+                WHEN (SELECT status FROM experiments WHERE exp_id = OLD.exp_id) IN ('completed', 'failed', 'cancelled')
+                BEGIN
+                    SELECT RAISE(ABORT, 'Cannot mutate system_metrics for terminal experiment');
+                END;
+
+                CREATE TRIGGER IF NOT EXISTS trg_prevent_system_metrics_insert
+                BEFORE INSERT ON system_metrics
+                FOR EACH ROW
+                WHEN (SELECT status FROM experiments WHERE exp_id = NEW.exp_id) IN ('completed', 'failed', 'cancelled')
+                BEGIN
+                    SELECT RAISE(ABORT, 'Cannot insert system_metrics for terminal experiment');
+                END;
+
+                -- Terminal immutability triggers for hyperparameters table
+                CREATE TRIGGER IF NOT EXISTS trg_prevent_hyperparameters_update
+                BEFORE UPDATE ON hyperparameters
+                FOR EACH ROW
+                WHEN (SELECT status FROM experiments WHERE exp_id = OLD.exp_id) IN ('completed', 'failed', 'cancelled')
+                BEGIN
+                    SELECT RAISE(ABORT, 'Cannot mutate hyperparameters for terminal experiment');
+                END;
+
+                CREATE TRIGGER IF NOT EXISTS trg_prevent_hyperparameters_delete
+                BEFORE DELETE ON hyperparameters
+                FOR EACH ROW
+                WHEN (SELECT status FROM experiments WHERE exp_id = OLD.exp_id) IN ('completed', 'failed', 'cancelled')
+                BEGIN
+                    SELECT RAISE(ABORT, 'Cannot mutate hyperparameters for terminal experiment');
+                END;
+
+                CREATE TRIGGER IF NOT EXISTS trg_prevent_hyperparameters_insert
+                BEFORE INSERT ON hyperparameters
+                FOR EACH ROW
+                WHEN (SELECT status FROM experiments WHERE exp_id = NEW.exp_id) IN ('completed', 'failed', 'cancelled')
+                BEGIN
+                    SELECT RAISE(ABORT, 'Cannot insert hyperparameters for terminal experiment');
+                END;
+
+                -- Terminal immutability triggers for artifacts table
+                CREATE TRIGGER IF NOT EXISTS trg_prevent_artifacts_update
+                BEFORE UPDATE ON artifacts
+                FOR EACH ROW
+                WHEN (SELECT status FROM experiments WHERE exp_id = OLD.exp_id) IN ('completed', 'failed', 'cancelled')
+                BEGIN
+                    SELECT RAISE(ABORT, 'Cannot mutate artifacts for terminal experiment');
+                END;
+
+                CREATE TRIGGER IF NOT EXISTS trg_prevent_artifacts_delete
+                BEFORE DELETE ON artifacts
+                FOR EACH ROW
+                WHEN (SELECT status FROM experiments WHERE exp_id = OLD.exp_id) IN ('completed', 'failed', 'cancelled')
+                BEGIN
+                    SELECT RAISE(ABORT, 'Cannot mutate artifacts for terminal experiment');
+                END;
+
+                CREATE TRIGGER IF NOT EXISTS trg_prevent_artifacts_insert
+                BEFORE INSERT ON artifacts
+                FOR EACH ROW
+                WHEN (SELECT status FROM experiments WHERE exp_id = NEW.exp_id) IN ('completed', 'failed', 'cancelled')
+                BEGIN
+                    SELECT RAISE(ABORT, 'Cannot insert artifacts for terminal experiment');
+                END;
+
+                -- Database-level active baseline validation triggers
+                CREATE TRIGGER IF NOT EXISTS trg_validate_active_baseline_insert
+                BEFORE INSERT ON active_baselines
+                FOR EACH ROW
+                BEGIN
+                    SELECT
+                        CASE
+                            WHEN (SELECT status FROM experiments WHERE exp_id = NEW.exp_id) != 'completed'
+                            THEN RAISE(ABORT, 'Active baseline experiment must have status completed')
+                            WHEN (SELECT workload_type FROM experiments WHERE exp_id = NEW.exp_id) != NEW.workload_type
+                            THEN RAISE(ABORT, 'Active baseline experiment workload_type mismatch')
+                        END;
+                END;
+
+                CREATE TRIGGER IF NOT EXISTS trg_validate_active_baseline_update
+                BEFORE UPDATE ON active_baselines
+                FOR EACH ROW
+                BEGIN
+                    SELECT
+                        CASE
+                            WHEN (SELECT status FROM experiments WHERE exp_id = NEW.exp_id) != 'completed'
+                            THEN RAISE(ABORT, 'Active baseline experiment must have status completed')
+                            WHEN (SELECT workload_type FROM experiments WHERE exp_id = NEW.exp_id) != NEW.workload_type
+                            THEN RAISE(ABORT, 'Active baseline experiment workload_type mismatch')
+                        END;
+                END;
                 """
             )
 
@@ -201,8 +351,82 @@ class SQLiteExperimentLedger(ExperimentLedger):
             seq = 1
         return f"{prefix}{seq:04d}"
 
+    def _validate_spec_reproducibility(self, spec: ExperimentSpec) -> None:
+        """Enforces mandatory reproducibility metadata invariants per ADR-0004 §2.4.E/F [P§25], [P§29.5]."""
+        if not isinstance(spec.commit_sha, str) or not COMMIT_SHA_REGEX.match(
+            spec.commit_sha
+        ):
+            raise ReproducibilityMetadataError(
+                f"Invalid commit_sha {spec.commit_sha!r}: must be a 40-character hexadecimal Git commit hash."
+            )
+        if (
+            not isinstance(spec.dataset_version, str)
+            or not spec.dataset_version.strip()
+        ):
+            raise ReproducibilityMetadataError("dataset_version cannot be empty.")
+        if (
+            not isinstance(spec.seed, int)
+            or isinstance(spec.seed, bool)
+            or spec.seed < 0
+        ):
+            raise ReproducibilityMetadataError(
+                f"Invalid seed {spec.seed!r}: must be a non-negative integer."
+            )
+        if not isinstance(spec.config_uri, str) or not spec.config_uri.strip():
+            raise ReproducibilityMetadataError("config_uri cannot be empty.")
+        if not isinstance(spec.config_hash, str) or not spec.config_hash.strip():
+            raise ReproducibilityMetadataError("config_hash cannot be empty.")
+        if (
+            not isinstance(spec.hyperparameters, Mapping)
+            or len(spec.hyperparameters) == 0
+        ):
+            raise ReproducibilityMetadataError(
+                "hyperparameters mapping cannot be empty."
+            )
+        if (
+            not isinstance(spec.input_resolution, (tuple, list))
+            or len(spec.input_resolution) != 2
+            or not isinstance(spec.input_resolution[0], int)
+            or isinstance(spec.input_resolution[0], bool)
+            or not isinstance(spec.input_resolution[1], int)
+            or isinstance(spec.input_resolution[1], bool)
+            or spec.input_resolution[0] <= 0
+            or spec.input_resolution[1] <= 0
+        ):
+            raise ReproducibilityMetadataError(
+                f"Invalid input_resolution {spec.input_resolution!r}: must be a pair of positive integers (width, height)."
+            )
+        if (
+            not isinstance(spec.batch_size, int)
+            or isinstance(spec.batch_size, bool)
+            or spec.batch_size <= 0
+        ):
+            raise ReproducibilityMetadataError(
+                f"Invalid batch_size {spec.batch_size!r}: must be a positive integer."
+            )
+        if not isinstance(spec.target, ExecutionTarget):
+            raise ReproducibilityMetadataError(
+                f"Invalid execution target {spec.target!r}: must be an ExecutionTarget enum instance."
+            )
+        if not isinstance(spec.workload_type, WorkloadType):
+            raise ReproducibilityMetadataError(
+                f"Invalid workload_type {spec.workload_type!r}: must be a WorkloadType enum instance."
+            )
+        if not isinstance(spec.name, str) or not spec.name.strip():
+            raise ReproducibilityMetadataError("name cannot be empty.")
+        if not isinstance(spec.hypothesis, str) or not spec.hypothesis.strip():
+            raise ReproducibilityMetadataError("hypothesis cannot be empty.")
+        if not isinstance(spec.model_name, str) or not spec.model_name.strip():
+            raise ReproducibilityMetadataError("model_name cannot be empty.")
+        if not isinstance(spec.model_variant, str) or not spec.model_variant.strip():
+            raise ReproducibilityMetadataError("model_variant cannot be empty.")
+        if not isinstance(spec.precision, str) or not spec.precision.strip():
+            raise ReproducibilityMetadataError("precision cannot be empty.")
+
     def create_experiment(self, spec: ExperimentSpec) -> ExperimentRecord:
         """Create a new experiment run in PROPOSED status [P§25]."""
+        self._validate_spec_reproducibility(spec)
+
         # Validate approval_ref format if present
         if spec.approval_ref and not APPROVAL_REF_REGEX.match(spec.approval_ref):
             raise ApprovalReferenceFormatError(
@@ -349,6 +573,11 @@ class SQLiteExperimentLedger(ExperimentLedger):
                     (new_status.value, started_at, final_job_id, error_message, exp_id),
                 )
                 conn.execute("COMMIT;")
+            except sqlite3.DatabaseError as err:
+                conn.execute("ROLLBACK;")
+                if "terminal" in str(err).lower():
+                    raise ExperimentImmutabilityError(str(err)) from err
+                raise
             except Exception:
                 conn.execute("ROLLBACK;")
                 raise
@@ -410,11 +639,12 @@ class SQLiteExperimentLedger(ExperimentLedger):
                         (exp_id, mk, float(mv)),
                     )
 
-                # Persist system metrics
-                sys_dict: dict[str, float] = {
-                    "peak_vram_mb": system.peak_vram_mb,
-                    "peak_ram_mb": system.peak_ram_mb,
-                }
+                # Persist system metrics (distinguishing missing from zero per PM Finding 4)
+                sys_dict: dict[str, float] = {}
+                if system.peak_vram_mb is not None:
+                    sys_dict["peak_vram_mb"] = system.peak_vram_mb
+                if system.peak_ram_mb is not None:
+                    sys_dict["peak_ram_mb"] = system.peak_ram_mb
                 if system.gpu_hours is not None:
                     sys_dict["gpu_hours"] = system.gpu_hours
                 if system.training_time_seconds is not None:
@@ -465,6 +695,11 @@ class SQLiteExperimentLedger(ExperimentLedger):
                     (ExperimentStatus.COMPLETED.value, now_str, notes, exp_id),
                 )
                 conn.execute("COMMIT;")
+            except sqlite3.DatabaseError as err:
+                conn.execute("ROLLBACK;")
+                if "terminal" in str(err).lower():
+                    raise ExperimentImmutabilityError(str(err)) from err
+                raise
             except Exception:
                 conn.execute("ROLLBACK;")
                 raise
@@ -499,6 +734,11 @@ class SQLiteExperimentLedger(ExperimentLedger):
                     (ExperimentStatus.FAILED.value, now_str, error_message, exp_id),
                 )
                 conn.execute("COMMIT;")
+            except sqlite3.DatabaseError as err:
+                conn.execute("ROLLBACK;")
+                if "terminal" in str(err).lower():
+                    raise ExperimentImmutabilityError(str(err)) from err
+                raise
             except Exception:
                 conn.execute("ROLLBACK;")
                 raise
@@ -535,6 +775,11 @@ class SQLiteExperimentLedger(ExperimentLedger):
                     (ExperimentStatus.CANCELLED.value, now_str, reason, exp_id),
                 )
                 conn.execute("COMMIT;")
+            except sqlite3.DatabaseError as err:
+                conn.execute("ROLLBACK;")
+                if "terminal" in str(err).lower():
+                    raise ExperimentImmutabilityError(str(err)) from err
+                raise
             except Exception:
                 conn.execute("ROLLBACK;")
                 raise
@@ -585,6 +830,11 @@ class SQLiteExperimentLedger(ExperimentLedger):
                     (workload_type.value, exp_id, now_str),
                 )
                 conn.execute("COMMIT;")
+            except sqlite3.DatabaseError as err:
+                conn.execute("ROLLBACK;")
+                if "active baseline" in str(err).lower():
+                    raise RelationalIntegrityError(str(err)) from err
+                raise
             except Exception:
                 conn.execute("ROLLBACK;")
                 raise
@@ -650,7 +900,7 @@ class SQLiteExperimentLedger(ExperimentLedger):
                     additional_metrics=add_metrics if add_metrics else None,
                 )
 
-            # Load system metrics
+            # Load system metrics (preserving missing evidence as None per PM Finding 4)
             s_cur = conn.execute(
                 "SELECT metric_key, metric_value FROM system_metrics WHERE exp_id = ?",
                 (exp_id,),
@@ -661,8 +911,8 @@ class SQLiteExperimentLedger(ExperimentLedger):
             system: SystemMetrics | None = None
             if s_rows:
                 system = SystemMetrics(
-                    peak_vram_mb=s_rows.get("peak_vram_mb", 0.0),
-                    peak_ram_mb=s_rows.get("peak_ram_mb", 0.0),
+                    peak_vram_mb=s_rows.get("peak_vram_mb"),
+                    peak_ram_mb=s_rows.get("peak_ram_mb"),
                     gpu_hours=s_rows.get("gpu_hours"),
                     training_time_seconds=s_rows.get("training_time_seconds"),
                     latency_e2e_ms=s_rows.get("latency_e2e_ms"),
@@ -712,12 +962,12 @@ class SQLiteExperimentLedger(ExperimentLedger):
                     int(row["input_resolution_h"]),
                 ),
                 precision=str(row["precision"]),
-                config_uri=row["config_uri"],
-                config_hash=row["config_hash"],
+                config_uri=str(row["config_uri"]),
+                config_hash=str(row["config_hash"]),
                 parent_exp_id=row["parent_exp_id"],
                 baseline_id=row["baseline_id"],
                 approval_ref=row["approval_ref"],
-                hyperparameters=h_dict if h_dict else None,
+                hyperparameters=h_dict,
             )
 
             return ExperimentRecord(
