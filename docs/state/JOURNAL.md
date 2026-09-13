@@ -942,5 +942,75 @@ Added 8 new regression tests, expanding the Phase 2D contract test suite to 35 t
 
 **Left open:** Scoping and planning for Phase 2F under Official PM direction.
 
+---
 
+## 2026-09-13 — Phase 2F (ADR-0004 Project Memory & Experiment Ledger) Implementation (feature/ajmunna/phase-2f-memory-ledger)
 
+**Did:**
+1. Created short-lived branch `feature/ajmunna/phase-2f-memory-ledger` from latest `main` to implement Issue #45.
+2. Implemented `cv_agent/memory/`:
+   - `interfaces.py`: Frozen typed dataclasses (`HardwareConstraints`, `ArchitecturalDecision`, `LearnedHeuristic`) and protocols (`ProjectMemoryReader`, `ProjectMemoryWriter`).
+   - `service.py`: `GitProjectMemory` implementing symlink-aware containment validation (`Path.resolve().is_relative_to(workspace_root)`), canonical YAML parsing/serialization for `hardware_constraints.yaml`, and structured markdown serialization for `architectural_choices.md` and `learned_heuristics.md`.
+3. Implemented `cv_agent/experiments/`:
+   - `interfaces.py`: `ExperimentStatus`, `WorkloadType`, `ExecutionTarget`, `AccuracyMetrics`, `SystemMetrics`, `ArtifactManifest`, `ExperimentSpec`, `ExperimentRecord`, and `ExperimentLedger` protocol.
+   - `state_machine.py`: Enforces formal §2.4.B lifecycle transition matrix; forbids mutation of terminal states (`completed`, `failed`, `cancelled`) with `ExperimentImmutabilityError`.
+   - `metrics_validator.py`: Implements exact ADR-0004 §2.4.C metric completeness validation across all four workloads (`training`, `evaluation`, `optimization`, `benchmark`), strictly upholding `[P§29.4]`.
+   - `ledger.py`: `SQLiteExperimentLedger` managing `.cv_agent/state/experiments.sqlite` with `PRAGMA foreign_keys = ON;`, `PRAGMA journal_mode = WAL;`, atomic transaction blocks (`BEGIN IMMEDIATE ... COMMIT`) for terminal completion, self-referential lineage (`parent_exp_id`) and baseline (`baseline_id`) foreign keys (`ON DELETE RESTRICT`), opaque approval dereferencing (`{operation_id}:{request_id}`), and separate `active_baselines` registry preserving historical row immutability.
+4. Implemented comprehensive test suite in `tests/test_memory_ledger_boundary.py`: 19 contract tests covering all 8 PM non-negotiable gates, symlink containment, competing multi-writer concurrency, and explicit cross-backend isolation (`experiments.sqlite ≠ checkpoints.sqlite`).
+5. Verified all quality gates: Ruff check, Ruff format, Mypy default & Python 3.10, CLI health check, and `git diff --check`. Full test suite stands at 280 passed (0 warnings).
+6. Generated implementation report in `docs/reports/ISSUE-45-PHASE-2F-REPORT.md` and updated `STATUS.md`.
+
+**Why:** Satisfies ADR-0004 and roadmap milestones `[P§10]`, `[P§12]`, `[P§24]`, `[P§25]`, `[P§26]`, `[P§29.2]`, `[P§29.4]`, `[P§29.5]`, `[P§33]`, `[P§34]`. Establishes the permanent domain memory and quantitative experiment ledger substrate required for autonomous CV engineering.
+
+**Broke:** Initial symlink containment test in pytest used `tmp_path` as both workspace root and location for external directories, causing `tmp_path/outside` to be a subpath of `tmp_path`; resolved by placing workspace inside `tmp_path / "workspace"` so sibling directories are strictly outside.
+
+**Learned:** In SQLite relational schemas enforcing `ON DELETE RESTRICT` on self-referential foreign keys, `PRAGMA foreign_keys = ON;` must be executed immediately upon opening every connection; otherwise SQLite silently permits parent deletion and corrupts relational integrity.
+
+**Left open:** Commit, push branch, open PR linked to Issue #45, verify CI matrix across Python 3.10–3.13, and await Official PM review.
+
+---
+
+## 2026-09-13 — Phase 2F PR #46 Official PM Review Hardening (feature/ajmunna/phase-2f-memory-ledger)
+
+**Did:**
+1. Reconciled metric completeness validation against authoritative ADR-0004 §2.4.C: eliminated all loosened `OR` rules (`latency_inference_ms OR latency_e2e_ms` and `gpu_hours OR training_time_seconds`). Training now strictly requires all 4 validation accuracy metrics AND all 3 training resource metrics (`gpu_hours`, `training_time_seconds`, `peak_vram_mb`). Optimization and benchmark workloads strictly require all 5 on-target system metrics (`latency_inference_ms`, `latency_e2e_ms`, `throughput_fps`, `peak_vram_mb`, `power_draw_watts`). Added negative unit tests for every omitted required metric independently.
+2. Implemented database-level triggers enforcing comprehensive terminal child-record immutability at the SQLite persistence boundary: added `trg_immutable_experiments_update`, `trg_immutable_experiments_delete`, and before INSERT/UPDATE/DELETE triggers on `accuracy_metrics`, `system_metrics`, `hyperparameters`, and `artifacts` child tables that abort any raw SQL statement modifying or deleting records of terminal experiments (`completed`, `failed`, `cancelled`).
+3. Enforced strict reproducibility validation in `create_experiment()`: non-empty 40-hex `commit_sha`, non-empty `dataset_version`, valid integer `seed >= 0`, non-empty `config_uri` and `config_hash`, non-empty `hyperparameters` mapping, positive `input_resolution` tuple `(width, height)`, positive integer `batch_size`, and valid enum instances for `target` and `workload_type`. Added independent test cases asserting failure for each invalid field.
+4. Represented optional persisted metrics as `float | None` in `SystemMetrics` (`peak_vram_mb: float | None = None`, `peak_ram_mb: float | None = None`). Updated loader to preserve `None` rather than fabricating synthetic `0.0`.
+5. Added database-level triggers `trg_validate_active_baseline_insert` and `trg_validate_active_baseline_update` to `active_baselines` enforcing that the referenced `exp_id` must be in `completed` status and have a matching `workload_type`. Added tests proving raw SQL statements violating baseline invariants are rejected.
+6. Implemented strong concurrency regression test simulating 20 simultaneous competing worker threads creating experiments under `BEGIN IMMEDIATE ... COMMIT`, asserting exactly 20 records created, 0 IntegrityErrors, 20 unique IDs, sequential contiguous numbers without duplicates or gaps, and all records intact.
+7. Hardened structured Markdown parser: enforced strict schema validation in `get_architectural_decisions()` and `get_learned_heuristics()`, raising `ProjectMemoryFormatError` on missing required properties (`decision_id`, `timestamp`, `title`, `rationale` for decisions; `heuristic_id`, `context`, `observation`, `recommendation` for heuristics) and on duplicate IDs.
+8. Hardened YAML schema validation in `get_hardware_constraints()`: strictly validates dictionary structure without type coercion, rejecting unexpected keys, missing keys, non-positive constraints, empty device string, and empty precision lists with `ProjectMemoryFormatError`.
+9. Updated PR #46 report, `STATUS.md`, and test suite. Total test suite expanded to 284 passed (23 Phase 2F contract and regression tests), 0 warnings.
+10. Ran all local quality gates: Ruff check, Ruff format, Mypy default, Mypy Python 3.10, CLI health check, `git diff --check`.
+
+**Why:** `[P§10]`, `[P§12]`, `[P§24]`, `[P§25]`, `[P§26]`, `[P§29.2]`, `[P§29.4]`, `[P§29.5]`, `[P§33]`, `[P§34]`, and ADR-0004 §2.4.B–§2.4.C. Resolves all 9 findings in the Official PM Review on PR #46, guaranteeing fail-closed persistence contracts, database-level immutability, and zero uncontracted loosening.
+
+**Broke:** Nothing. All 284 pytest tests pass (0 warnings), Ruff check and format pass, Mypy passes on default and Python 3.10 targets, CLI health check passes, `git diff --check` clean.
+
+**Learned:** In SQLite, relying solely on Python-level state machine checks leaves child records vulnerable to raw SQL mutations (`DELETE FROM ... WHERE exp_id = ...`); database triggers `BEFORE INSERT/UPDATE/DELETE` referencing parent state establish immutable persistence guarantees that cannot be bypassed even by direct SQL access.
+
+**Left open:** Push hardened commit to `origin feature/ajmunna/phase-2f-memory-ledger`, monitor GitHub Actions CI on PR #46, and request Official PM re-review.
+
+---
+
+## 2026-09-14 — Phase 2F PR #46 Metric Applicability Contract Hardening (feature/ajmunna/phase-2f-memory-ledger)
+
+**Did:**
+1. Resolved Official PM Review blocker on PR #46 regarding metric applicability contracts: eliminated all remaining arbitrary `OR` semantics in `cv_agent/experiments/metrics_validator.py`.
+2. Explicitly represented metric applicability at the experiment boundary: added immutable `accuracy_metric_requirements: tuple[str, ...]` to `ExperimentSpec` and SQLite column `experiments.accuracy_metric_requirements`.
+3. Enforced fail-closed validation on `create_experiment()` and `complete_experiment()`:
+   - `evaluation`: Mandates non-empty `accuracy_metric_requirements` declaring applicable task-specific accuracy evidence (e.g. detection mAP/precision/recall, classification top-1/F1, segmentation IoU/dice). Completion strictly verifies EVERY declared metric is present (zero arbitrary OR). Mandates on-target system metrics when evaluating deployability `[P§12]`.
+   - `optimization`: Mandates non-empty `accuracy_metric_requirements` declaring post-optimization accuracy and tolerance evidence. Completion strictly verifies EVERY declared metric is present (zero arbitrary OR). Mandates all 5 on-target system metrics.
+   - `benchmark`: Mandates non-empty `accuracy_metric_requirements` declaring relevant accuracy verification evidence. Completion strictly verifies EVERY declared metric is present (zero arbitrary OR). Mandates all 5 on-target stream system metrics.
+   - `training`: Strictly requires all four validation accuracy metrics (`map_50`, `map_50_95`, `precision`, `recall`) AND all three training resource metrics (`gpu_hours`, `training_time_seconds`, `peak_vram_mb`), plus any additional declared accuracy requirements.
+4. Added dedicated regression tests (`test_arbitrary_single_metric_cannot_satisfy_multi_metric_requirements` and independent failure tests) proving that an arbitrary single populated metric cannot satisfy multi-metric requirements across evaluation, optimization, and benchmark. Total test suite expanded to 285 passed (24 Phase 2F contract & regression tests), 0 warnings.
+5. Updated `docs/reports/ISSUE-45-PHASE-2F-REPORT.md`, `STATUS.md`, and ran all local quality gates (Ruff check, Ruff format, Mypy default & Python 3.10, CLI health check, `git diff --check`).
+
+**Why:** ADR-0004 §2.4.C, `[P§12]`, `[P§25]`, `[P§29.4]`. Satisfies the Official PM's non-negotiable architectural ruling that task-specific, post-optimization tolerance, and benchmark verification evidence must be explicitly declared and validated without arbitrary OR semantics or blind universally mandatory assumptions.
+
+**Broke:** Nothing. All 285 pytest tests pass (0 warnings), Ruff check and format pass, Mypy passes on default and Python 3.10 targets, CLI health check passes, `git diff --check` clean.
+
+**Learned:** Workload-aware validation requires decoupling the declaration of applicable evidence from execution verification: by capturing `accuracy_metric_requirements` on the immutable `ExperimentSpec` and persisting it in SQLite, the ledger can strictly validate completion evidence without guessing task applicability or relying on arbitrary OR heuristics.
+
+**Left open:** Push hardened commit to `origin feature/ajmunna/phase-2f-memory-ledger`, update PR #46 description, monitor GitHub Actions CI on PR #46 across Python 3.10–3.13, and request Official PM final approval.
