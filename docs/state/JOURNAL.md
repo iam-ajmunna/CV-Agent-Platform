@@ -942,5 +942,32 @@ Added 8 new regression tests, expanding the Phase 2D contract test suite to 35 t
 
 **Left open:** Scoping and planning for Phase 2F under Official PM direction.
 
+---
+
+## 2026-09-13 — Phase 2F (ADR-0004 Project Memory & Experiment Ledger) Implementation (feature/ajmunna/phase-2f-memory-ledger)
+
+**Did:**
+1. Created short-lived branch `feature/ajmunna/phase-2f-memory-ledger` from latest `main` to implement Issue #45.
+2. Implemented `cv_agent/memory/`:
+   - `interfaces.py`: Frozen typed dataclasses (`HardwareConstraints`, `ArchitecturalDecision`, `LearnedHeuristic`) and protocols (`ProjectMemoryReader`, `ProjectMemoryWriter`).
+   - `service.py`: `GitProjectMemory` implementing symlink-aware containment validation (`Path.resolve().is_relative_to(workspace_root)`), canonical YAML parsing/serialization for `hardware_constraints.yaml`, and structured markdown serialization for `architectural_choices.md` and `learned_heuristics.md`.
+3. Implemented `cv_agent/experiments/`:
+   - `interfaces.py`: `ExperimentStatus`, `WorkloadType`, `ExecutionTarget`, `AccuracyMetrics`, `SystemMetrics`, `ArtifactManifest`, `ExperimentSpec`, `ExperimentRecord`, and `ExperimentLedger` protocol.
+   - `state_machine.py`: Enforces formal §2.4.B lifecycle transition matrix; forbids mutation of terminal states (`completed`, `failed`, `cancelled`) with `ExperimentImmutabilityError`.
+   - `metrics_validator.py`: Implements exact ADR-0004 §2.4.C metric completeness validation across all four workloads (`training`, `evaluation`, `optimization`, `benchmark`), strictly upholding `[P§29.4]`.
+   - `ledger.py`: `SQLiteExperimentLedger` managing `.cv_agent/state/experiments.sqlite` with `PRAGMA foreign_keys = ON;`, `PRAGMA journal_mode = WAL;`, atomic transaction blocks (`BEGIN IMMEDIATE ... COMMIT`) for terminal completion, self-referential lineage (`parent_exp_id`) and baseline (`baseline_id`) foreign keys (`ON DELETE RESTRICT`), opaque approval dereferencing (`{operation_id}:{request_id}`), and separate `active_baselines` registry preserving historical row immutability.
+4. Implemented comprehensive test suite in `tests/test_memory_ledger_boundary.py`: 19 contract tests covering all 8 PM non-negotiable gates, symlink containment, competing multi-writer concurrency, and explicit cross-backend isolation (`experiments.sqlite ≠ checkpoints.sqlite`).
+5. Verified all quality gates: Ruff check, Ruff format, Mypy default & Python 3.10, CLI health check, and `git diff --check`. Full test suite stands at 280 passed (0 warnings).
+6. Generated implementation report in `docs/reports/ISSUE-45-PHASE-2F-REPORT.md` and updated `STATUS.md`.
+
+**Why:** Satisfies ADR-0004 and roadmap milestones `[P§10]`, `[P§12]`, `[P§24]`, `[P§25]`, `[P§26]`, `[P§29.2]`, `[P§29.4]`, `[P§29.5]`, `[P§33]`, `[P§34]`. Establishes the permanent domain memory and quantitative experiment ledger substrate required for autonomous CV engineering.
+
+**Broke:** Initial symlink containment test in pytest used `tmp_path` as both workspace root and location for external directories, causing `tmp_path/outside` to be a subpath of `tmp_path`; resolved by placing workspace inside `tmp_path / "workspace"` so sibling directories are strictly outside.
+
+**Learned:** In SQLite relational schemas enforcing `ON DELETE RESTRICT` on self-referential foreign keys, `PRAGMA foreign_keys = ON;` must be executed immediately upon opening every connection; otherwise SQLite silently permits parent deletion and corrupts relational integrity.
+
+**Left open:** Commit, push branch, open PR linked to Issue #45, verify CI matrix across Python 3.10–3.13, and await Official PM review.
+
+
 
 
