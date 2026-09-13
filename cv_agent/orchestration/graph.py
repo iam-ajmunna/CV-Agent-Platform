@@ -198,9 +198,7 @@ class SQLiteLangGraphCheckpointer(BaseCheckpointSaver):
         with self._get_conn() as conn:
             for k, v in new_versions.items():
                 t, d = (
-                    self.serde.dumps_typed(values[k])
-                    if k in values
-                    else ("empty", b"")
+                    self.serde.dumps_typed(values[k]) if k in values else ("empty", b"")
                 )
                 conn.execute(
                     """
