@@ -3,32 +3,34 @@
 > **Rewritten** every session. Describes **now**, never history — history lives in
 > `JOURNAL.md`. Hard cap: 60 lines. If it exceeds that, you are logging, not stating.
 
-**Updated:** 2026-09-11 · **Phase:** 2A — Domain / Contract Substrate · **Health:** green
+**Updated:** 2026-09-13 · **Phase:** 2B — Capability Registry Subsystem · **Health:** green
 
 ## Where we are
 
-Phase 1's 13 frozen ADRs remain the implementation contracts. Issue #35 establishes
-the first Phase 2 slice: immutable, typed ADR-0001 domain contracts without execution,
-discovery, persistence, or authorization policy `[P§23]`, `[P§34]`.
+PR #38 implements the authoritative, immutable ADR-0001 `CapabilityRegistry` subsystem
+for Issue #37. Official PM review corrections (unified `from_definitions()` validation
+and publication pipeline, enforced post-load immutability and single-publication semantics,
+and explicit `Traversable` Python 3.10 stdlib rationale) are implemented and verified `[P§23]`, `[P§34]`.
 
 ## In flight
 
-| Item | Issue | State |
-|---|---|---|
-| Foundational domain contracts | #35 / PR #36 | Review finding resolved (deterministic candidate tie-breaker); awaiting CI matrix |
+| Item | Issue | PR | State |
+|---|---|---|---|
+| Capability Registry Subsystem | #37 | #38 | Review corrections applied; 137 tests pass; quality gates green |
 
 ## Next 3 actions
 
-1. Verify complete CI matrix passes on PR #36.
-2. Obtain Official PM review and merge PR #36 only after approval.
-3. Schedule the next approved Phase 2 issue; do not begin Phase 2B without it.
+1. Push PR #38 review corrections to `feature/ajmunna/phase-2b-capability-registry`.
+2. Verify full GitHub Actions CI matrix runs (Python 3.10–3.13).
+3. Request Official PM final re-review and approval for merge to `main`.
 
 ## Blockers
 
-- None for Issue #35.
+- None. All quality gates, Mypy (including 3.10 target), Ruff, and 137 tests pass.
 
 ## Scope guard
 
-Issue #35 implements only typed identity, binding, availability, deterministic
-resolution, and resolution-snapshot contracts. Persistence, tools/MCP, LLM, orchestration,
-reasoning, training, evaluation, deployment, and monitoring remain out of scope `[P§19]`–`[P§23]`, `[P§34]`.
+Issue #37 implements only typed capability catalog loading, bindings, immutable registry
+indexes, deterministic resolution, and resolution snapshot emission. Tool execution, MCP,
+LLM gateway, orchestration, persistence, reasoning, training, evaluation, deployment,
+and monitoring remain out of scope `[P§19]`–`[P§23]`, `[P§34]`.
