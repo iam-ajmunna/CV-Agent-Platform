@@ -1,7 +1,7 @@
 # Issue #39 — Phase 2C Implementation Report
 
 **Issue:** [#39](https://github.com/iam-ajmunna/CV-Agent-Platform/issues/39)
-**PR:** To be created
+**PR:** [#40](https://github.com/iam-ajmunna/CV-Agent-Platform/pull/40)
 **Branch:** `feature/ajmunna/phase-2c-llm-gateway`
 **Status:** Implemented; all 15 acceptance criteria and PM constraints verified; all quality gates pass.
 
