@@ -3,34 +3,33 @@
 > **Rewritten** every session. Describes **now**, never history — history lives in
 > `JOURNAL.md`. Hard cap: 60 lines. If it exceeds that, you are logging, not stating.
 
-**Updated:** 2026-09-13 · **Phase:** 2B — Capability Registry Subsystem · **Health:** green
+**Updated:** 2026-09-13 · **Phase:** Phase 2B Merged to Main · **Health:** green
 
 ## Where we are
 
-PR #38 implements the authoritative, immutable ADR-0001 `CapabilityRegistry` subsystem
-for Issue #37. Official PM review corrections (unified `from_definitions()` validation
-and publication pipeline, enforced post-load immutability and single-publication semantics,
-and explicit `Traversable` Python 3.10 stdlib rationale) are implemented and verified `[P§23]`, `[P§34]`.
+Phase 2A (typed domain substrate) and Phase 2B (authoritative ADR-0001 `CapabilityRegistry`)
+are verified and squash-merged to `main` (commit `974cd77`, PR #38, Issue #37 closed).
+The trunk has an immutable, deterministic capability registry subsystem with 137 passing tests `[P§23]`, `[P§34]`.
 
 ## In flight
 
-| Item | Issue | PR | State |
-|---|---|---|---|
-| Capability Registry Subsystem | #37 | #38 | Review corrections applied; 137 tests pass; quality gates green |
+| Item | Issue | State |
+|---|---|---|
+| Milestone Scoping | — | Awaiting PM milestone definition for next subsystem |
 
 ## Next 3 actions
 
-1. Push PR #38 review corrections to `feature/ajmunna/phase-2b-capability-registry`.
-2. Verify full GitHub Actions CI matrix runs (Python 3.10–3.13).
-3. Request Official PM final re-review and approval for merge to `main`.
+1. Establish and scope the next subsystem milestone/issue with the Official PM.
+2. Cut short-lived feature branch from `main`.
+3. Implement subsystem behind acceptance criteria and complete CI verification.
 
 ## Blockers
 
-- None. All quality gates, Mypy (including 3.10 target), Ruff, and 137 tests pass.
+- None. Trunk is clean, all tests pass (0 warnings), full CI matrix green.
 
 ## Scope guard
 
-Issue #37 implements only typed capability catalog loading, bindings, immutable registry
+The capability subsystem implements typed catalog loading, bindings, immutable registry
 indexes, deterministic resolution, and resolution snapshot emission. Tool execution, MCP,
 LLM gateway, orchestration, persistence, reasoning, training, evaluation, deployment,
-and monitoring remain out of scope `[P§19]`–`[P§23]`, `[P§34]`.
+and monitoring remain cleanly isolated and out of scope `[P§19]`–`[P§23]`, `[P§34]`.
