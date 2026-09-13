@@ -850,3 +850,23 @@ Added 8 new regression tests, expanding the Phase 2D contract test suite to 35 t
 **Learned:** Security boundaries must never treat empty collections as "check skipped" — default state must always be fail-closed.
 
 **Left open:** Push commit to PR #42, update PR #42 description on GitHub, verify CI matrix across Python 3.10–3.13, and await Official PM review.
+
+---
+
+## 2026-09-13 — Phase 2D (ADR-0005 Tools & MCP Subsystem) Merged to main
+
+**Did:**
+1. Squash-merged PR #42 (`feat(tools): implement Phase 2D ADR-0005 Tool & MCP Protocol Subsystem`) into `main` (merge commit `4df52d984f82b6c0f4c30b2bc6dae4e3e4633796`).
+2. Confirmed Issue #41 automatically closed upon PR merge.
+3. Cleaned up and pruned feature branch `feature/ajmunna/phase-2d-tools-mcp` locally and remotely.
+4. Synchronized local workspace to `main` at commit `4df52d9`.
+5. Verified GitHub Actions CI on `main` across Python 3.10–3.13 matrix (run `34756638330` — 100% green).
+6. Updated `STATUS.md` and `JOURNAL.md` to reflect Phase 2D merged state and readiness for Phase 2E.
+
+**Why:** Completes the execution substrate milestone (Phase 2D) per ADR-0005 and roadmap `[P§15]`, `[P§20]`, `[P§24]`, `[P§29.4]`, `[P§34]`. Establishes the authoritative tool execution boundary required by downstream orchestration (ADR-0003).
+
+**Broke:** Nothing. All 210 tests pass (0 warnings), Ruff lint/format clean, Mypy clean on default and 3.10 targets, CLI health check passes, `git diff --check` clean.
+
+**Learned:** Enforcing fail-closed authorization and strict candidate discovery mapping at untrusted protocol boundaries prevents dynamic endpoints from bypassing capability governance.
+
+**Left open:** Scoping and architectural design for Phase 2E (ADR-0003 Orchestration Subsystem) under Official PM direction.
