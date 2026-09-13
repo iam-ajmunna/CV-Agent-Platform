@@ -715,3 +715,63 @@ Added 9 new regression tests covering all findings, expanding test suite to 137 
 
 **Left open:** Push review corrections to PR #38, verify CI matrix, and request Official PM re-review.
 
+---
+
+## 2026-09-13 — Phase 2C ADR-0002 LLM Gateway Implementation (feature/ajmunna/phase-2c-llm-gateway)
+
+**Did:** Implemented the authoritative ADR-0002 `LLMGateway` Subsystem under Issue #39 according to the frozen ADR-0002 contract and the Official PM's 10 review constraints:
+1. Canonical contracts in `cv_agent/llm/contracts.py`: `TextBlock`, `ImageBlock`, `ToolContentBlock`, `ToolResultBlock`, `ContentBlock`, `Message`, `LLMRequirements`, `ModelProfile`, `ModelSelector`, `RoutingPolicy`, `RetryPolicy`, `FallbackPolicy`, `StructuredOutputSpec`, `ToolCall`, `CostRecord`, `LLMRequest`, `LLMResponse`, `LLMStreamEvent`. Defensively wrapped mappings in `MappingProxyType` to enforce post-init immutability. Enforced Invariant 14 secret isolation rejecting sensitive metadata keys.
+2. Normalized error hierarchy in `cv_agent/llm/errors.py`: standardized `FailureCategory` and frozen error classes. Nuanced authentication fallback support.
+3. Provider protocol in `cv_agent/llm/provider.py`: `LLMProvider` protocol (`complete`, `stream`).
+4. Gateway in `cv_agent/llm/gateway.py`: pre-execution capability and governance filtering (configured vs eligible candidates; 0 provider calls on mismatch); single bounded execution loop with unique `attempt_id` and stable `request_id`; strict timeout idempotency safety (no retry/fallback on timeout for non-idempotent requests); fail-closed policy denial; two-layer structured output schema validation; streaming terminal lifecycle invariant (`UsageEvent` precedes `StreamDoneEvent` only if reported; `StreamErrorEvent` is terminal).
+5. Mock adapter in `cv_agent/llm/mock.py`: `MockProviderAdapter` with multimodal, structured output, tool calling, and scriptable failure/recovery sequences. Preserved legacy `FakeLLMProvider` compatibility.
+6. Triple-layer provider isolation audit: AST imports, repository-wide text audit, and public export type boundary audit. Zero external provider SDK dependencies.
+Added 21 contract tests covering all 15 acceptance criteria in `tests/test_llm_gateway.py`. Total test suite expanded to 158 tests.
+
+**Why:** Addresses Issue #39, implementing the foundational model-inference substrate of ADR-0002 without crossing into tool execution (ADR-0005) or workflow orchestration (ADR-0003) `[P§20]`, `[P§34]`.
+
+**Broke:** Nothing. All 158 pytest tests pass (0 warnings), Ruff lint/format pass, Mypy passes on both default and Python 3.10 targets, CLI health check passes.
+
+**Learned:** Distinguishing static candidate eligibility from configured routing candidates before provider invocation guarantees that invalid hardware, multimodal, or token requirements fail fast without incurring latency or provider retry overhead.
+
+**Left open:** Open PR for Issue #39, verify full CI matrix, and request Official PM review.
+
+---
+
+## 2026-09-13 — PR #40 Official PM Review Corrections (feature/ajmunna/phase-2c-llm-gateway)
+
+**Did:** Addressed all six blocking review findings on PR #40:
+1. Faithful timeout/idempotency semantics: eliminated uncontracted `metadata["idempotent"]` logic; introduced `is_operation_repeatable(request)` gateway decision mechanism; codified that timeout means execution state is potentially unknown; non-repeatable operations receive zero automatic retry and zero automatic fallback on timeout; repeatable operations retry only when provider has explicit `supports_idempotency_keys = True`; timeout fallback across distinct providers is prohibited.
+2. Default fail-fast authentication: clarified and narrowed implementation and report to default fail-fast authentication (`AuthenticationError.retryable = False`, `fallback_eligible = False`), failing fast without automatic retry or fallback.
+3. Canonical model profile resolution: model profiles are indexed strictly by `f"{provider_id}:{model_id}"`; eliminated ambiguous fallback lookup by bare `model_id`. Added regression test verifying distinct profiles for shared model identifiers across providers (`provider-a:model-x` vs `provider-b:model-x`).
+4. Zero model profile manufacturing: removed synthetic capability synthesis in `create_gateway()`; unconfigured models raise `UnsupportedModelError`. Statically rejected unconfigured routing candidates with zero provider calls.
+5. Deterministic JSON Schema validator: implemented pure-Python standard library validator in `cv_agent/llm/schema.py` enforcing types, properties, required keys, additionalProperties, items, enums, and constraints. Added negative test rejecting malformed types (`{"bbox": "not-an-array", "label": 123}`).
+6. Deep defensive immutability: implemented recursive `deep_freeze()` converting nested mappings to `MappingProxyType`, lists to tuples, and sets to frozensets. Added regression test verifying nested schema immutability and `TypeError` on attempted mutation.
+Added 9 new regression tests covering all findings, expanding test suite to 167 tests (0 warnings).
+
+**Why:** Addresses PR #40 blocking review findings, ensuring full fidelity to frozen ADR-0002 contracts, robust idempotency and timeout safety, complete schema enforcement, and deep immutability `[P§20]`, `[P§34]`.
+
+**Broke:** Nothing. All 167 pytest tests pass (0 warnings), Ruff lint/format pass, Mypy passes on both default and Python 3.10 targets, CLI health check passes.
+
+**Learned:** Pure-Python recursive data freezing and deterministic JSON schema validation satisfy strict contract guarantees without bloating core dependencies with heavy third-party packages.
+
+**Left open:** Push review corrections to PR #40, verify GitHub Actions CI matrix, and request Official PM re-review.
+
+---
+
+## 2026-09-13 — PR #40 PM Re-Review Corrections (feature/ajmunna/phase-2c-llm-gateway)
+
+**Did:** Resolved all three blocking findings from the PM re-review on PR #40:
+1. Removed `tools` field from `LLMRequest` to adhere strictly to frozen ADR-0002 §8 verbatim. Reworked `LLMGateway.is_operation_repeatable()` to operate only on legitimate Phase 2C contracts, establishing a fail-closed safe default of non-repeatable (`False`) unless an explicit gateway `repeatability_evaluator` callback determines repeatability.
+2. Canonical model profile duplicate rejection: updated `LLMGateway.__init__`, `register_model_profile()`, and `create_gateway()` to deterministically reject duplicate canonical identities (`provider_id:model_id`) with `ValueError` instead of silently overwriting existing profiles.
+3. Enforced streaming lifecycle invariants: `LLMGateway.stream()` validates event ordering, buffering `StreamDoneEvent` to ensure `UsageEvent` always precedes `StreamDoneEvent` when reported, rejecting out-of-order `Done → Usage` with `LLMError(category="invalid_request")`, and suppressing any `StreamDoneEvent` following a terminal `StreamErrorEvent`.
+Added 6 new regression tests covering all three re-review findings, expanding the test suite to 173 passing tests (0 warnings). Updated PR #40 description to reflect default fail-fast authentication and frozen contracts.
+
+**Why:** Addresses PM re-review requirements, ensuring strict fidelity to frozen ADR-0002 contracts, deterministic configuration registration, and robust stream event sequence validation `[P§20]`, `[P§34]`.
+
+**Broke:** Nothing. All 173 pytest tests pass, Ruff lint/format pass, Mypy passes on default and Python 3.10 targets, CLI health check passes.
+
+**Learned:** Buffering terminal completion events in streaming generators provides deterministic boundary validation for malformed provider event sequences without discarding or reordering legitimate streaming chunks.
+
+**Left open:** Verify GitHub Actions CI matrix on PR #40 and merge upon Official PM authorization.
+
