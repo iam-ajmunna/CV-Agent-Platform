@@ -92,7 +92,8 @@ class CVAgent:
             lg_ok = False
 
         try:
-            self._registry.load()
+            if not getattr(self._registry, "is_loaded", False):
+                self._registry.load()
             cap_count = self._registry.capability_count
             registry_ok = True
         except Exception:  # noqa: BLE001

@@ -132,6 +132,34 @@ class TestRegistryImmutability:
         caps = registry.list_capabilities()
         assert isinstance(caps, tuple)
 
+    def test_load_cannot_be_called_twice_on_loaded_registry(
+        self, registry: CapabilityRegistry
+    ) -> None:
+        initial_count = registry.capability_count
+        with pytest.raises(DomainValidationError) as exc:
+            registry.load()
+        assert exc.value.code == ValidationCode.INVALID_VALUE
+        assert "already loaded" in str(exc.value)
+        assert registry.capability_count == initial_count
+
+    def test_load_cannot_be_called_on_registry_from_definitions(self) -> None:
+        cap = CapabilityDefinition(
+            capability_id=CapabilityId("test.cap"),
+            version="1.0.0",
+            stage=Stage.TRAIN,
+            description="A test capability",
+            risk_level="low",
+            requires_approval=False,
+        )
+        reg = CapabilityRegistry.from_definitions(capabilities=(cap,))
+        assert reg.is_loaded is True
+        with pytest.raises(DomainValidationError) as exc:
+            reg.load()
+        assert exc.value.code == ValidationCode.INVALID_VALUE
+        assert "already loaded" in str(exc.value)
+        assert reg.capability_count == 1
+        assert reg.get_capability("test.cap") == cap
+
 
 class TestDeterministicResolutionAndSnapshots:
     def test_resolve_produces_immutable_resolution_snapshot(
@@ -337,3 +365,203 @@ class TestMemoryConstruction:
         assert reg.get_skill_bindings("test.cap") == (binding,)
         assert reg.get_tool_bindings("test.skill") == (tool_binding,)
         assert reg.get_agent_bindings("test.tool") == (agent_binding,)
+
+    def test_from_definitions_rejects_duplicate_capability_id(self) -> None:
+        cap1 = CapabilityDefinition(
+            capability_id=CapabilityId("duplicate.cap"),
+            version="1.0.0",
+            stage=Stage.TRAIN,
+            description="First cap",
+            risk_level="low",
+            requires_approval=False,
+        )
+        cap2 = CapabilityDefinition(
+            capability_id=CapabilityId("duplicate.cap"),
+            version="2.0.0",
+            stage=Stage.EVALUATE,
+            description="Second cap with same ID",
+            risk_level="high",
+            requires_approval=True,
+        )
+        with pytest.raises(DomainValidationError) as exc:
+            CapabilityRegistry.from_definitions(capabilities=(cap1, cap2))
+        assert exc.value.code == ValidationCode.INVALID_VALUE
+        assert "Duplicate capability ID" in str(exc.value)
+
+    def test_from_definitions_rejects_skill_binding_referencing_unregistered_capability(
+        self,
+    ) -> None:
+        binding = SkillBinding(
+            capability_id=CapabilityId("unregistered.cap"),
+            skill_id=SkillId("test.skill"),
+            compatibility=CompatibilityConstraint(),
+            priority=50,
+            provenance=Provenance(kind=ProvenanceKind.INTERNAL),
+        )
+        with pytest.raises(DomainValidationError) as exc:
+            CapabilityRegistry.from_definitions(
+                capabilities=(),
+                skill_bindings=(binding,),
+            )
+        assert exc.value.code == ValidationCode.INVALID_VALUE
+        assert "unregistered capability" in str(exc.value)
+
+    def test_from_definitions_rejects_duplicate_skill_binding(self) -> None:
+        cap = CapabilityDefinition(
+            capability_id=CapabilityId("test.cap"),
+            version="1.0.0",
+            stage=Stage.TRAIN,
+            description="A test capability",
+            risk_level="low",
+            requires_approval=False,
+        )
+        binding1 = SkillBinding(
+            capability_id=cap.capability_id,
+            skill_id=SkillId("test.skill"),
+            compatibility=CompatibilityConstraint(),
+            priority=50,
+            provenance=Provenance(kind=ProvenanceKind.INTERNAL),
+        )
+        binding2 = SkillBinding(
+            capability_id=cap.capability_id,
+            skill_id=SkillId("test.skill"),
+            compatibility=CompatibilityConstraint(),
+            priority=80,
+            provenance=Provenance(kind=ProvenanceKind.INTERNAL),
+        )
+        with pytest.raises(DomainValidationError) as exc:
+            CapabilityRegistry.from_definitions(
+                capabilities=(cap,),
+                skill_bindings=(binding1, binding2),
+            )
+        assert exc.value.code == ValidationCode.INVALID_VALUE
+        assert "Duplicate SkillBinding" in str(exc.value)
+
+    def test_from_definitions_rejects_tool_binding_referencing_unregistered_skill(
+        self,
+    ) -> None:
+        cap = CapabilityDefinition(
+            capability_id=CapabilityId("test.cap"),
+            version="1.0.0",
+            stage=Stage.TRAIN,
+            description="A test capability",
+            risk_level="low",
+            requires_approval=False,
+        )
+        tool_binding = ToolBinding(
+            skill_id=SkillId("unregistered.skill"),
+            tool_id=ToolId("test.tool"),
+            compatibility=CompatibilityConstraint(),
+        )
+        with pytest.raises(DomainValidationError) as exc:
+            CapabilityRegistry.from_definitions(
+                capabilities=(cap,),
+                tool_bindings=(tool_binding,),
+            )
+        assert exc.value.code == ValidationCode.INVALID_VALUE
+        assert "unregistered skill" in str(exc.value)
+
+    def test_from_definitions_rejects_duplicate_tool_binding(self) -> None:
+        cap = CapabilityDefinition(
+            capability_id=CapabilityId("test.cap"),
+            version="1.0.0",
+            stage=Stage.TRAIN,
+            description="A test capability",
+            risk_level="low",
+            requires_approval=False,
+        )
+        binding = SkillBinding(
+            capability_id=cap.capability_id,
+            skill_id=SkillId("test.skill"),
+            compatibility=CompatibilityConstraint(),
+            priority=50,
+            provenance=Provenance(kind=ProvenanceKind.INTERNAL),
+        )
+        tb1 = ToolBinding(
+            skill_id=binding.skill_id,
+            tool_id=ToolId("test.tool"),
+            compatibility=CompatibilityConstraint(),
+        )
+        tb2 = ToolBinding(
+            skill_id=binding.skill_id,
+            tool_id=ToolId("test.tool"),
+            compatibility=CompatibilityConstraint(requirements={"v": "2"}),
+        )
+        with pytest.raises(DomainValidationError) as exc:
+            CapabilityRegistry.from_definitions(
+                capabilities=(cap,),
+                skill_bindings=(binding,),
+                tool_bindings=(tb1, tb2),
+            )
+        assert exc.value.code == ValidationCode.INVALID_VALUE
+        assert "Duplicate ToolBinding" in str(exc.value)
+
+    def test_from_definitions_rejects_agent_binding_referencing_unregistered_tool(
+        self,
+    ) -> None:
+        cap = CapabilityDefinition(
+            capability_id=CapabilityId("test.cap"),
+            version="1.0.0",
+            stage=Stage.TRAIN,
+            description="A test capability",
+            risk_level="low",
+            requires_approval=False,
+        )
+        binding = SkillBinding(
+            capability_id=cap.capability_id,
+            skill_id=SkillId("test.skill"),
+            compatibility=CompatibilityConstraint(),
+            priority=50,
+            provenance=Provenance(kind=ProvenanceKind.INTERNAL),
+        )
+        agent_binding = AgentBinding(
+            tool_id=ToolId("unregistered.tool"),
+            agent_id=AgentId("test.agent"),
+        )
+        with pytest.raises(DomainValidationError) as exc:
+            CapabilityRegistry.from_definitions(
+                capabilities=(cap,),
+                skill_bindings=(binding,),
+                agent_bindings=(agent_binding,),
+            )
+        assert exc.value.code == ValidationCode.INVALID_VALUE
+        assert "unregistered tool" in str(exc.value)
+
+    def test_from_definitions_rejects_duplicate_agent_binding(self) -> None:
+        cap = CapabilityDefinition(
+            capability_id=CapabilityId("test.cap"),
+            version="1.0.0",
+            stage=Stage.TRAIN,
+            description="A test capability",
+            risk_level="low",
+            requires_approval=False,
+        )
+        binding = SkillBinding(
+            capability_id=cap.capability_id,
+            skill_id=SkillId("test.skill"),
+            compatibility=CompatibilityConstraint(),
+            priority=50,
+            provenance=Provenance(kind=ProvenanceKind.INTERNAL),
+        )
+        tb = ToolBinding(
+            skill_id=binding.skill_id,
+            tool_id=ToolId("test.tool"),
+            compatibility=CompatibilityConstraint(),
+        )
+        ab1 = AgentBinding(
+            tool_id=tb.tool_id,
+            agent_id=AgentId("test.agent"),
+        )
+        ab2 = AgentBinding(
+            tool_id=tb.tool_id,
+            agent_id=AgentId("test.agent"),
+        )
+        with pytest.raises(DomainValidationError) as exc:
+            CapabilityRegistry.from_definitions(
+                capabilities=(cap,),
+                skill_bindings=(binding,),
+                tool_bindings=(tb,),
+                agent_bindings=(ab1, ab2),
+            )
+        assert exc.value.code == ValidationCode.INVALID_VALUE
+        assert "Duplicate AgentBinding" in str(exc.value)

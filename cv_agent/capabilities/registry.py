@@ -15,13 +15,20 @@ import builtins
 import json
 import sys
 import uuid
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Literal
 
+# Traversable compatibility:
+# Python 3.11 introduced `importlib.resources.abc.Traversable`, and Python 3.12+
+# deprecated `importlib.abc.Traversable`. However, Python 3.10's standard library
+# does not include `importlib.resources.abc`. To maintain compatibility across
+# the supported Python matrix (3.10–3.13) with zero deprecation warnings on 3.12+,
+# we conditionally import from `importlib.resources.abc` on Python >= 3.11 and
+# fall back to `importlib.abc` on Python 3.10.
 if sys.version_info >= (3, 11):
     from importlib.resources.abc import Traversable
 else:
@@ -195,50 +202,45 @@ class CapabilityRegistry:
         self._version: str = "unknown"
         self._loaded: bool = False
 
+    @property
+    def is_loaded(self) -> bool:
+        """Return True if registry state has been loaded or published."""
+        return self._loaded
+
     @classmethod
     def from_definitions(
         cls,
         *,
         version: str = "1.0.0",
-        capabilities: tuple[CapabilityDefinition, ...] = (),
-        skill_bindings: tuple[SkillBinding, ...] = (),
-        tool_bindings: tuple[ToolBinding, ...] = (),
-        agent_bindings: tuple[AgentBinding, ...] = (),
+        capabilities: tuple[CapabilityDefinition, ...] | Sequence[CapabilityDefinition] = (),
+        skill_bindings: tuple[SkillBinding, ...] | Sequence[SkillBinding] = (),
+        tool_bindings: tuple[ToolBinding, ...] | Sequence[ToolBinding] = (),
+        agent_bindings: tuple[AgentBinding, ...] | Sequence[AgentBinding] = (),
     ) -> CapabilityRegistry:
-        """Construct an immutable registry instance directly from typed domain objects."""
+        """Construct an immutable registry instance directly from typed domain objects.
+
+        Validates uniqueness, cross-reference integrity across the binding hierarchy,
+        and publishes immutable mappings via the shared publication pathway.
+        """
         registry = cls()
-        caps_dict: dict[CapabilityId, CapabilityDefinition] = {}
-        for cap in capabilities:
-            caps_dict[cap.capability_id] = cap
-
-        sb_dict: dict[CapabilityId, list[SkillBinding]] = {}
-        for sb in skill_bindings:
-            sb_dict.setdefault(sb.capability_id, []).append(sb)
-
-        tb_dict: dict[SkillId, list[ToolBinding]] = {}
-        for tb in tool_bindings:
-            tb_dict.setdefault(tb.skill_id, []).append(tb)
-
-        ab_dict: dict[ToolId, list[AgentBinding]] = {}
-        for ab in agent_bindings:
-            ab_dict.setdefault(ab.tool_id, []).append(ab)
-
-        registry._capabilities = MappingProxyType(caps_dict)
-        registry._skill_bindings = MappingProxyType(
-            {k: tuple(v) for k, v in sb_dict.items()}
+        registry._publish_validated_state(
+            version=version,
+            capabilities=capabilities,
+            skill_bindings=skill_bindings,
+            tool_bindings=tool_bindings,
+            agent_bindings=agent_bindings,
         )
-        registry._tool_bindings = MappingProxyType(
-            {k: tuple(v) for k, v in tb_dict.items()}
-        )
-        registry._agent_bindings = MappingProxyType(
-            {k: tuple(v) for k, v in ab_dict.items()}
-        )
-        registry._version = version
-        registry._loaded = True
         return registry
 
     def load(self) -> None:
         """Load and publish immutable registry state from the configured resource."""
+        if self._loaded:
+            raise DomainValidationError(
+                ValidationCode.INVALID_VALUE,
+                "registry.state",
+                "CapabilityRegistry is already loaded and immutable; state cannot be reloaded.",
+            )
+
         if self._path is None or not self._path.is_file():
             path_str = str(self._path) if self._path is not None else "<none>"
             raise FileNotFoundError(
@@ -250,13 +252,162 @@ class CapabilityRegistry:
 
         self._load_from_dict(raw)
 
-    def _load_from_dict(self, raw: dict[str, Any]) -> None:
-        # Local mutable collections during loading phase
-        version: str = raw.get("version", "1.0.0")
+    def _publish_validated_state(
+        self,
+        *,
+        version: str,
+        capabilities: Sequence[CapabilityDefinition],
+        skill_bindings: Sequence[SkillBinding] = (),
+        tool_bindings: Sequence[ToolBinding] = (),
+        agent_bindings: Sequence[AgentBinding] = (),
+        known_skill_ids: set[SkillId] | None = None,
+        known_tool_ids: set[ToolId] | None = None,
+        legacy_capabilities: Mapping[str, Capability] | None = None,
+        legacy_items: Mapping[tuple[ItemType, str], RegistryItem] | None = None,
+    ) -> None:
+        """Shared validation and publication path for both memory and file-loaded registries.
+
+        Enforces:
+        - Single-publication immutability (cannot replace or reload published state).
+        - Unique capability IDs.
+        - Cross-reference integrity:
+          - SkillBinding capability_id must reference a registered capability.
+          - ToolBinding skill_id must reference a registered/bound skill.
+          - AgentBinding tool_id must reference a registered/bound tool.
+        - Unique binding pairs (no duplicate capability-skill, skill-tool, or tool-agent bindings).
+        """
+        if self._loaded:
+            raise DomainValidationError(
+                ValidationCode.INVALID_VALUE,
+                "registry.state",
+                "CapabilityRegistry is already loaded and immutable; state cannot be replaced.",
+            )
+
+        # 1. Validate capability definitions and detect duplicate IDs
         caps_dict: dict[CapabilityId, CapabilityDefinition] = {}
+        for cap in capabilities:
+            if cap.capability_id in caps_dict:
+                raise DomainValidationError(
+                    ValidationCode.INVALID_VALUE,
+                    "capability.id",
+                    f"Duplicate capability ID detected in registry: {cap.capability_id!r}",
+                    cap.capability_id,
+                )
+            caps_dict[cap.capability_id] = cap
+
+        # 2. Validate skill bindings
         sb_dict: dict[CapabilityId, list[SkillBinding]] = {}
+        seen_skill_bindings: set[tuple[CapabilityId, SkillId]] = set()
+        registered_skills: set[SkillId] = set()
+        if known_skill_ids is not None:
+            registered_skills.update(known_skill_ids)
+
+        for sb in skill_bindings:
+            if sb.capability_id not in caps_dict:
+                raise DomainValidationError(
+                    ValidationCode.INVALID_VALUE,
+                    "skill_binding.capability_id",
+                    f"SkillBinding references unregistered capability: {sb.capability_id!r}",
+                    sb.capability_id,
+                )
+            pair = (sb.capability_id, sb.skill_id)
+            if pair in seen_skill_bindings:
+                raise DomainValidationError(
+                    ValidationCode.INVALID_VALUE,
+                    "skill_binding",
+                    f"Duplicate SkillBinding for capability {sb.capability_id!r} and skill {sb.skill_id!r}",
+                    sb.skill_id,
+                )
+            seen_skill_bindings.add(pair)
+            registered_skills.add(sb.skill_id)
+            sb_dict.setdefault(sb.capability_id, []).append(sb)
+
+        # 3. Validate tool bindings
         tb_dict: dict[SkillId, list[ToolBinding]] = {}
+        seen_tool_bindings: set[tuple[SkillId, ToolId]] = set()
+        registered_tools: set[ToolId] = set()
+        if known_tool_ids is not None:
+            registered_tools.update(known_tool_ids)
+
+        for tb in tool_bindings:
+            if tb.skill_id not in registered_skills:
+                raise DomainValidationError(
+                    ValidationCode.INVALID_VALUE,
+                    "tool_binding.skill_id",
+                    f"ToolBinding references unregistered skill: {tb.skill_id!r}",
+                    tb.skill_id,
+                )
+            pair_tool = (tb.skill_id, tb.tool_id)
+            if pair_tool in seen_tool_bindings:
+                raise DomainValidationError(
+                    ValidationCode.INVALID_VALUE,
+                    "tool_binding",
+                    f"Duplicate ToolBinding for skill {tb.skill_id!r} and tool {tb.tool_id!r}",
+                    tb.tool_id,
+                )
+            seen_tool_bindings.add(pair_tool)
+            registered_tools.add(tb.tool_id)
+            tb_dict.setdefault(tb.skill_id, []).append(tb)
+
+        # 4. Validate agent bindings
         ab_dict: dict[ToolId, list[AgentBinding]] = {}
+        seen_agent_bindings: set[tuple[ToolId, AgentId]] = set()
+
+        for ab in agent_bindings:
+            if ab.tool_id not in registered_tools:
+                raise DomainValidationError(
+                    ValidationCode.INVALID_VALUE,
+                    "agent_binding.tool_id",
+                    f"AgentBinding references unregistered tool: {ab.tool_id!r}",
+                    ab.tool_id,
+                )
+            pair_agent = (ab.tool_id, ab.agent_id)
+            if pair_agent in seen_agent_bindings:
+                raise DomainValidationError(
+                    ValidationCode.INVALID_VALUE,
+                    "agent_binding",
+                    f"Duplicate AgentBinding for tool {ab.tool_id!r} and agent {ab.agent_id!r}",
+                    ab.agent_id,
+                )
+            seen_agent_bindings.add(pair_agent)
+            ab_dict.setdefault(ab.tool_id, []).append(ab)
+
+        # 5. Publish immutable state
+        self._capabilities = MappingProxyType(caps_dict)
+        self._skill_bindings = MappingProxyType(
+            {
+                k: tuple(sorted(v, key=lambda b: (-b.priority, str(b.skill_id))))
+                for k, v in sb_dict.items()
+            }
+        )
+        self._tool_bindings = MappingProxyType(
+            {
+                k: tuple(sorted(v, key=lambda b: str(b.tool_id)))
+                for k, v in tb_dict.items()
+            }
+        )
+        self._agent_bindings = MappingProxyType(
+            {
+                k: tuple(sorted(v, key=lambda b: str(b.agent_id)))
+                for k, v in ab_dict.items()
+            }
+        )
+        self._legacy_capabilities = MappingProxyType(
+            dict(legacy_capabilities) if legacy_capabilities is not None else {}
+        )
+        self._legacy_items = MappingProxyType(
+            dict(legacy_items) if legacy_items is not None else {}
+        )
+        self._version = version
+        self._loaded = True
+
+    def _load_from_dict(self, raw: dict[str, Any]) -> None:
+        # Local collections during JSON parsing phase
+        version: str = raw.get("version", "1.0.0")
+        parsed_capabilities: list[CapabilityDefinition] = []
+        parsed_skill_bindings: list[SkillBinding] = []
+        parsed_tool_bindings: list[ToolBinding] = []
+        parsed_agent_bindings: list[AgentBinding] = []
         legacy_caps_dict: dict[str, Capability] = {}
         legacy_items_dict: dict[tuple[ItemType, str], RegistryItem] = {}
 
@@ -278,13 +429,13 @@ class CapabilityRegistry:
                     )
                 ),
             )
-            caps_dict[cap_id] = cap_def
+            parsed_capabilities.append(cap_def)
             legacy_caps_dict[cap_data["id"]] = _parse_legacy_capability(cap_data)
 
             # Extract declarative skill bindings from relevant_skills if not explicitly defined
             for skill_name in cap_data.get("relevant_skills", []):
                 skill_id = SkillId(skill_name)
-                sb_dict.setdefault(cap_id, []).append(
+                parsed_skill_bindings.append(
                     SkillBinding(
                         capability_id=cap_id,
                         skill_id=skill_id,
@@ -317,7 +468,7 @@ class CapabilityRegistry:
                 priority=int(b_data.get("priority", 100)),
                 provenance=prov,
             )
-            sb_dict.setdefault(cap_id, []).append(sb)
+            parsed_skill_bindings.append(sb)
 
         for t_data in raw.get("tool_bindings", []):
             skill_id = SkillId(t_data["skill_id"])
@@ -325,14 +476,14 @@ class CapabilityRegistry:
             compat = CompatibilityConstraint(
                 requirements=t_data.get("compatibility", {})
             )
-            tb_dict.setdefault(skill_id, []).append(
+            parsed_tool_bindings.append(
                 ToolBinding(skill_id=skill_id, tool_id=tool_id, compatibility=compat)
             )
 
         for a_data in raw.get("agent_bindings", []):
             tool_id = ToolId(a_data["tool_id"])
             agent_id = AgentId(a_data["agent_id"])
-            ab_dict.setdefault(tool_id, []).append(
+            parsed_agent_bindings.append(
                 AgentBinding(tool_id=tool_id, agent_id=agent_id)
             )
 
@@ -343,35 +494,29 @@ class CapabilityRegistry:
             "agents": "agent",
             "knowledge_sources": "knowledge_source",
         }
+        known_skill_ids: set[SkillId] = set()
+        known_tool_ids: set[ToolId] = set()
         for json_key, item_type in type_map.items():
             for item_data in raw.get(json_key, []):
                 item = _parse_legacy_item(item_data, item_type)
                 legacy_items_dict[(item.item_type, item.id)] = item
+                if item_type == "skill":
+                    known_skill_ids.add(SkillId(item.id))
+                elif item_type == "tool":
+                    known_tool_ids.add(ToolId(item.id))
 
-        # 4. Publish immutable state
-        self._capabilities = MappingProxyType(caps_dict)
-        self._skill_bindings = MappingProxyType(
-            {
-                k: tuple(sorted(v, key=lambda b: (-b.priority, str(b.skill_id))))
-                for k, v in sb_dict.items()
-            }
+        # 4. Route through unified validation and publication path
+        self._publish_validated_state(
+            version=version,
+            capabilities=parsed_capabilities,
+            skill_bindings=parsed_skill_bindings,
+            tool_bindings=parsed_tool_bindings,
+            agent_bindings=parsed_agent_bindings,
+            known_skill_ids=known_skill_ids,
+            known_tool_ids=known_tool_ids,
+            legacy_capabilities=legacy_caps_dict,
+            legacy_items=legacy_items_dict,
         )
-        self._tool_bindings = MappingProxyType(
-            {
-                k: tuple(sorted(v, key=lambda b: str(b.tool_id)))
-                for k, v in tb_dict.items()
-            }
-        )
-        self._agent_bindings = MappingProxyType(
-            {
-                k: tuple(sorted(v, key=lambda b: str(b.agent_id)))
-                for k, v in ab_dict.items()
-            }
-        )
-        self._legacy_capabilities = MappingProxyType(legacy_caps_dict)
-        self._legacy_items = MappingProxyType(legacy_items_dict)
-        self._version = version
-        self._loaded = True
 
     def _ensure_loaded(self) -> None:
         if not self._loaded:

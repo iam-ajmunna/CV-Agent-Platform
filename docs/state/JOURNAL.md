@@ -696,3 +696,22 @@ passes cleanly on both default and Python 3.10 targets.
 projections prevents them from competing with or degrading the authoritative ADR-0001 domain models.
 
 **Left open:** Open PR for Issue #37 and verify complete CI matrix.
+
+---
+
+## 2026-09-13 — PR #38 Official PM Review Corrections (feature/ajmunna/phase-2b-capability-registry)
+
+**Did:** Addressed all three blocking review findings on PR #38:
+1. Unified validation and publication pipeline: refactored `from_definitions()` and `_load_from_dict()` to both route through `_publish_validated_state(...)`. Enforced duplicate capability ID rejection, reference integrity across the binding hierarchy (skill bindings referencing registered capabilities, tool bindings referencing registered skills, agent bindings referencing registered tools), and duplicate binding pair rejection with structured `DomainValidationError`s.
+2. Enforced post-load immutability and single-publication semantics: added public `is_loaded` property and raised `DomainValidationError` when `load()` or `_publish_validated_state()` is called on an already loaded/published registry. Guarded `CVAgent.health_check()` to check `is_loaded`. Added regression tests verifying second load attempts are rejected without state mutation.
+3. Explicit `Traversable` migration documentation: documented in code comments and implementation report that `importlib.resources.abc.Traversable` is used on Python 3.11+ to eliminate Python 3.12+ deprecation warnings, while `importlib.abc.Traversable` is conditionally retained on Python 3.10 where `importlib.resources.abc` does not exist in standard library.
+Added 9 new regression tests covering all findings, expanding test suite to 137 tests.
+
+**Why:** Addresses PR #38 blocking review findings, ensuring full invariant enforcement, post-load immutability, and zero regression across Python 3.10–3.13 without architectural changes `[P§23]`, `[P§34]`.
+
+**Broke:** Nothing. All 137 pytest tests pass (0 warnings), Ruff lint/format pass, Mypy passes on both default and Python 3.10 targets, and CLI health check passes.
+
+**Learned:** Having a single `_publish_validated_state(...)` pipeline guarantees memory-constructed registries have identical semantic and invariant guarantees to resource-loaded registries.
+
+**Left open:** Push review corrections to PR #38, verify CI matrix, and request Official PM re-review.
+
