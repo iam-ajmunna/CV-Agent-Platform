@@ -55,6 +55,7 @@ from cv_agent.orchestration.state_machine import (
     validate_operation_transition,
 )
 from cv_agent.orchestration.store import (
+    CHECKPOINT_SCHEMA_VERSION,
     CheckpointCorruptionError,
     SQLiteOrchestrationStore,
     StaleFencingLeaseError,
@@ -290,6 +291,18 @@ class TestLeaseFencingAndConcurrency:
         with temp_store._get_connection() as conn:
             conn.execute(
                 """
+                INSERT INTO sessions (session_id, thread_id, lifecycle_status, created_at, updated_at)
+                VALUES (?, ?, 'initializing', ?, ?)
+                """,
+                (
+                    "session-exp",
+                    "thread-exp",
+                    (now - timedelta(seconds=60)).isoformat(),
+                    (now - timedelta(seconds=60)).isoformat(),
+                ),
+            )
+            conn.execute(
+                """
                 INSERT INTO leases (session_id, thread_id, lease_id, owner_instance_id, acquired_at, expires_at, fencing_epoch)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
@@ -328,6 +341,18 @@ class TestLeaseFencingAndConcurrency:
         expired_time = now - timedelta(seconds=5)
 
         with temp_store._get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO sessions (session_id, thread_id, lifecycle_status, created_at, updated_at)
+                VALUES (?, ?, 'initializing', ?, ?)
+                """,
+                (
+                    "sess-dead",
+                    "thr-dead",
+                    (now - timedelta(seconds=20)).isoformat(),
+                    (now - timedelta(seconds=20)).isoformat(),
+                ),
+            )
             conn.execute(
                 """
                 INSERT INTO leases (session_id, thread_id, lease_id, owner_instance_id, acquired_at, expires_at, fencing_epoch)
@@ -422,6 +447,7 @@ class TestPersistentApprovalSecurityTuple:
         envelope = build_operation_envelope("trt_compile", 1, payload)
         return OperationIntent(
             operation_id=OperationId(value="op-trt-01"),
+            session_id="session-test-01",
             operation_version=1,
             operation_type="trt_compilation",
             canonical_payload=envelope,
@@ -493,6 +519,7 @@ class TestPersistentApprovalSecurityTuple:
         )
         tampered_op = OperationIntent(
             operation_id=sample_operation.operation_id,
+            session_id=sample_operation.session_id,
             operation_version=sample_operation.operation_version,
             operation_type=sample_operation.operation_type,
             canonical_payload=tampered_envelope,
@@ -623,12 +650,27 @@ class TestSideEffectReconciliationProtocol:
         envelope = build_operation_envelope("eval_job", 1, {"metric": "map50"})
         return OperationIntent(
             operation_id=OperationId(value="op-recon-01"),
+            session_id="session-test-01",
             operation_version=1,
             operation_type="evaluation",
             canonical_payload=envelope,
             target_identity="remote_target",
             created_at=datetime.now(timezone.utc),
         )
+
+    def _advance_to_unknown(
+        self,
+        store: SQLiteOrchestrationStore,
+        op: OperationIntent,
+        lease: ExecutionLease,
+    ) -> None:
+        store.save_operation(op, lease)
+        store.update_operation_status(op.operation_id, OperationStatus.VALIDATED, lease)
+        store.update_operation_status(
+            op.operation_id, OperationStatus.DISPATCHING, lease
+        )
+        store.update_operation_status(op.operation_id, OperationStatus.RUNNING, lease)
+        store.update_operation_status(op.operation_id, OperationStatus.UNKNOWN, lease)
 
     def test_unknown_transitions_to_reconciling(
         self,
@@ -637,10 +679,7 @@ class TestSideEffectReconciliationProtocol:
         sample_operation: OperationIntent,
     ) -> None:
         """Ambiguous operations transition cleanly into RECONCILING."""
-        temp_store.save_operation(sample_operation, active_lease)
-        temp_store.update_operation_status(
-            sample_operation.operation_id, OperationStatus.UNKNOWN, active_lease
-        )
+        self._advance_to_unknown(temp_store, sample_operation, active_lease)
 
         coord = ReconciliationCoordinator(temp_store)
         coord.initiate_reconciliation(sample_operation.operation_id, active_lease)
@@ -654,7 +693,10 @@ class TestSideEffectReconciliationProtocol:
         active_lease: ExecutionLease,
         sample_operation: OperationIntent,
     ) -> None:
-        temp_store.save_operation(sample_operation, active_lease)
+        self._advance_to_unknown(temp_store, sample_operation, active_lease)
+        coord_init = ReconciliationCoordinator(temp_store)
+        coord_init.initiate_reconciliation(sample_operation.operation_id, active_lease)
+
         reconciler = self.MockReconciler(OperationStatus.COMPLETED)
         coord = ReconciliationCoordinator(temp_store, reconciler=reconciler)
 
@@ -667,7 +709,10 @@ class TestSideEffectReconciliationProtocol:
         active_lease: ExecutionLease,
         sample_operation: OperationIntent,
     ) -> None:
-        temp_store.save_operation(sample_operation, active_lease)
+        self._advance_to_unknown(temp_store, sample_operation, active_lease)
+        coord_init = ReconciliationCoordinator(temp_store)
+        coord_init.initiate_reconciliation(sample_operation.operation_id, active_lease)
+
         reconciler = self.MockReconciler(OperationStatus.CREATED)
         coord = ReconciliationCoordinator(temp_store, reconciler=reconciler)
 
@@ -681,17 +726,23 @@ class TestSideEffectReconciliationProtocol:
         sample_operation: OperationIntent,
     ) -> None:
         """PM Gate 6: UNRESOLVED must never be silently converted into FAILED or COMPLETED."""
-        temp_store.save_operation(sample_operation, active_lease)
-        temp_store.update_operation_status(
-            sample_operation.operation_id, OperationStatus.UNKNOWN, active_lease
-        )
+        self._advance_to_unknown(temp_store, sample_operation, active_lease)
 
-        # Target reports UNKNOWN still
-        reconciler = self.MockReconciler(OperationStatus.UNKNOWN)
-        coord = ReconciliationCoordinator(temp_store, reconciler=reconciler)
+        coord = ReconciliationCoordinator(temp_store, reconciler=None)
+        coord.initiate_reconciliation(sample_operation.operation_id, active_lease)
 
         outcome = coord.reconcile_operation(sample_operation, active_lease)
         assert outcome == ReconciliationOutcome.UNRESOLVED
+
+        # Operation must NOT be mutated to COMPLETED or FAILED in the store
+        # It must remain RECONCILING
+        with temp_store._get_connection() as conn:
+            cur = conn.execute(
+                "SELECT status FROM operations WHERE operation_id = ?",
+                (sample_operation.operation_id.value,),
+            )
+            status = cur.fetchone()["status"]
+            assert status == OperationStatus.RECONCILING.value
 
 
 class TestDurableStoreIntegrityAndSafeRetention:
@@ -736,7 +787,11 @@ class TestDurableStoreIntegrityAndSafeRetention:
 
         with pytest.raises(CheckpointCorruptionError) as exc:
             store.load_state("thr-ver")
-        assert exc.value.code == "UNSUPPORTED_SCHEMA_VERSION"
+        assert "CHECKPOINT_CORRUPTION" in exc.value.code
+        # ADR-0003 §3.13: Verify session entered RECOVERY_REQUIRED in SQLite
+        assert (
+            store.get_lifecycle_status("sess-ver") == LifecycleStatus.RECOVERY_REQUIRED
+        )
 
     def test_pruning_races_and_protection_of_active_leases(
         self, temp_store: SQLiteOrchestrationStore
@@ -760,6 +815,7 @@ class TestDurableStoreIntegrityAndSafeRetention:
         envelope = build_operation_envelope("eval", 1, {"metric": "acc"})
         op = OperationIntent(
             operation_id=OperationId(value="op-protected-prune"),
+            session_id=active_lease.session_id,
             operation_version=1,
             operation_type="eval",
             canonical_payload=envelope,
@@ -838,6 +894,7 @@ class TestLangGraphWorkflowIntegration:
         envelope = build_operation_envelope("train", 1, {"epochs": 100})
         op = OperationIntent(
             operation_id=OperationId(value="op-train-01"),
+            session_id=active_lease.session_id,
             operation_version=1,
             operation_type="training",
             canonical_payload=envelope,
@@ -902,3 +959,357 @@ class TestLangGraphWorkflowIntegration:
                     assert root not in forbidden, (
                         f"Forbidden from-import {root} in {py_file.name}"
                     )
+
+
+class TestPMRulingRegressionCoverage:
+    """Explicit regression tests for the 7 architectural blockers identified in PM review of PR #44."""
+
+    def test_sqlite_sole_lifecycle_authority(
+        self, temp_store: SQLiteOrchestrationStore, active_lease: ExecutionLease
+    ) -> None:
+        """PM Finding 1: SQLite is the sole lifecycle authority; state persists across instances."""
+        # Initial status in sessions table
+        assert (
+            temp_store.get_lifecycle_status(active_lease.session_id)
+            == LifecycleStatus.INITIALIZING
+        )
+
+        # Atomic transition to READY
+        status, ev = temp_store.transition_lifecycle(
+            active_lease.session_id,
+            LifecycleStatus.READY,
+            "session_ready",
+            {"reason": "initialized"},
+            active_lease,
+        )
+        assert status == LifecycleStatus.READY
+        assert ev.sequence_number == 1
+
+        # Direct database query verifies persistence
+        with temp_store._get_connection() as conn:
+            cur = conn.execute(
+                "SELECT lifecycle_status FROM sessions WHERE session_id = ?",
+                (active_lease.session_id,),
+            )
+            assert cur.fetchone()["lifecycle_status"] == LifecycleStatus.READY.value
+
+        # Fresh instance on same SQLite database reads identical authoritative status
+        fresh_store = SQLiteOrchestrationStore(temp_store.db_path, wal_mode=False)
+        assert (
+            fresh_store.get_lifecycle_status(active_lease.session_id)
+            == LifecycleStatus.READY
+        )
+
+    def test_atomic_lifecycle_transition_and_event_sequence_rollback(
+        self, temp_store: SQLiteOrchestrationStore, active_lease: ExecutionLease
+    ) -> None:
+        """PM Finding 3: Illegal lifecycle transition rolls back sequence allocation and state atomically."""
+        temp_store.transition_lifecycle(
+            active_lease.session_id,
+            LifecycleStatus.READY,
+            "session_ready",
+            {},
+            active_lease,
+        )
+        assert (
+            temp_store.get_lifecycle_status(active_lease.session_id)
+            == LifecycleStatus.READY
+        )
+
+        # Attempt illegal jump READY -> COMPLETED (bypassing PLANNING/EXECUTING)
+        with pytest.raises(InvalidStateTransitionError):
+            temp_store.transition_lifecycle(
+                active_lease.session_id,
+                LifecycleStatus.COMPLETED,
+                "illegal_finish",
+                {},
+                active_lease,
+            )
+
+        # Authoritative state remains READY; no sequence 2 consumed
+        assert (
+            temp_store.get_lifecycle_status(active_lease.session_id)
+            == LifecycleStatus.READY
+        )
+        events = temp_store.list_events(active_lease.session_id)
+        assert len(events) == 1
+        assert events[0].sequence_number == 1
+
+        # Next valid transition gets sequence 2
+        _, valid_ev = temp_store.transition_lifecycle(
+            active_lease.session_id,
+            LifecycleStatus.PLANNING,
+            "planning",
+            {},
+            active_lease,
+        )
+        assert valid_ev.sequence_number == 2
+
+    def test_operation_state_transition_validation_rejects_illegal_jump(
+        self, temp_store: SQLiteOrchestrationStore, active_lease: ExecutionLease
+    ) -> None:
+        """PM Finding 2: update_operation_status enforces validate_operation_transition."""
+        envelope = build_operation_envelope("compile", 1, {"target": "trt"})
+        op = OperationIntent(
+            operation_id=OperationId(value="op-trans-01"),
+            session_id=active_lease.session_id,
+            operation_version=1,
+            operation_type="compile",
+            canonical_payload=envelope,
+            target_identity="local",
+            created_at=datetime.now(timezone.utc),
+        )
+        temp_store.save_operation(op, active_lease)
+
+        # Illegal direct jump: CREATED -> RUNNING
+        with pytest.raises(InvalidStateTransitionError):
+            temp_store.update_operation_status(
+                op.operation_id, OperationStatus.RUNNING, active_lease
+            )
+
+        # Illegal direct jump: CREATED -> UNKNOWN
+        with pytest.raises(InvalidStateTransitionError):
+            temp_store.update_operation_status(
+                op.operation_id, OperationStatus.UNKNOWN, active_lease
+            )
+
+    def test_save_operation_cannot_reset_running_to_created(
+        self, temp_store: SQLiteOrchestrationStore, active_lease: ExecutionLease
+    ) -> None:
+        """PM Finding 2: save_operation cannot reset an existing non-CREATED operation to CREATED."""
+        envelope = build_operation_envelope("compile", 1, {"target": "trt"})
+        op = OperationIntent(
+            operation_id=OperationId(value="op-reset-01"),
+            session_id=active_lease.session_id,
+            operation_version=1,
+            operation_type="compile",
+            canonical_payload=envelope,
+            target_identity="local",
+            created_at=datetime.now(timezone.utc),
+        )
+        temp_store.save_operation(op, active_lease)
+        temp_store.update_operation_status(
+            op.operation_id, OperationStatus.VALIDATED, active_lease
+        )
+        temp_store.update_operation_status(
+            op.operation_id, OperationStatus.DISPATCHING, active_lease
+        )
+        temp_store.update_operation_status(
+            op.operation_id, OperationStatus.RUNNING, active_lease
+        )
+
+        # Attempting save_operation on existing RUNNING operation must reject status reset
+        with pytest.raises(InvalidStateTransitionError) as exc:
+            temp_store.save_operation(op, active_lease)
+        assert "Cannot reset existing operation" in str(exc.value)
+
+    def test_release_lease_preserves_checkpoints_and_session(
+        self, temp_store: SQLiteOrchestrationStore, active_lease: ExecutionLease
+    ) -> None:
+        """PM Finding 4: Releasing a lease does not delete or invalidate checkpoints or session history."""
+        # Save checkpoints and events under active lease
+        temp_store.save_state({"step": 1, "loss": 0.42}, active_lease)
+        temp_store.record_event(
+            active_lease.session_id, "step_done", {"step": 1}, active_lease
+        )
+
+        # Release lease
+        temp_store.release_lease(active_lease)
+
+        # Verify lease record is removed
+        with temp_store._get_connection() as conn:
+            cur = conn.execute(
+                "SELECT * FROM leases WHERE session_id = ?", (active_lease.session_id,)
+            )
+            assert cur.fetchone() is None
+
+            # But sessions, checkpoints, and events remain intact under foreign key constraints
+            cur_sess = conn.execute(
+                "SELECT * FROM sessions WHERE session_id = ?",
+                (active_lease.session_id,),
+            )
+            assert cur_sess.fetchone() is not None
+
+            cur_cp = conn.execute(
+                "SELECT * FROM checkpoints WHERE session_id = ?",
+                (active_lease.session_id,),
+            )
+            assert cur_cp.fetchone() is not None
+
+            cur_ev = conn.execute(
+                "SELECT * FROM events WHERE session_id = ?", (active_lease.session_id,)
+            )
+            assert cur_ev.fetchone() is not None
+
+        # load_state still recovers the checkpoint cleanly without active lease
+        loaded = temp_store.load_state(active_lease.thread_id)
+        assert loaded == {"step": 1, "loss": 0.42}
+
+    def test_pruning_relational_protection_no_json_dependency(
+        self, temp_store: SQLiteOrchestrationStore, active_lease: ExecutionLease
+    ) -> None:
+        """PM Finding 5: Pruning protects active sessions via relational FKs, not JSON string searching."""
+        envelope = build_operation_envelope("op", 1, {"metric": "loss"})
+        op = OperationIntent(
+            operation_id=OperationId(value="op-relational-prune"),
+            session_id=active_lease.session_id,
+            operation_version=1,
+            operation_type="training",
+            canonical_payload=envelope,
+            target_identity="local",
+            created_at=datetime.now(timezone.utc),
+        )
+        temp_store.save_operation(op, active_lease)
+
+        # Even with completely empty event payloads (no operation_id in JSON), relational check protects session
+        temp_store.record_event(active_lease.session_id, "audit_tick", {}, active_lease)
+        temp_store.save_state({"checkpoint": "val"}, active_lease)
+
+        # Release the lease so unexpired lease doesn't trivially protect it
+        temp_store.release_lease(active_lease)
+
+        # Prune with future timestamp: since operation is in CREATED (active), session must be preserved!
+        now = datetime.now(timezone.utc)
+        deleted = temp_store.prune_checkpoints(older_than=now + timedelta(days=1))
+        assert deleted == 0
+        assert temp_store.load_state(active_lease.thread_id) is not None
+
+    def test_checkpoint_corruption_persists_recovery_required_and_diagnostic_event(
+        self, tmp_path: Path
+    ) -> None:
+        """PM Finding 6: Corrupt checkpoints persist RECOVERY_REQUIRED and diagnostic event in SQLite."""
+        db_path = tmp_path / "checkpoints.sqlite"
+        store = SQLiteOrchestrationStore(db_path, wal_mode=False)
+        lease = store.acquire_lease("sess-corrupt", "thr-corrupt", "worker-1")
+
+        # Corrupt state blob manually
+        with store._get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO checkpoints (checkpoint_id, session_id, thread_id, sequence_number, schema_version, state_blob, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "cp-bad",
+                    lease.session_id,
+                    lease.thread_id,
+                    1,
+                    CHECKPOINT_SCHEMA_VERSION,
+                    "INVALID_JSON_NOT_A_BLOB{{{",
+                    datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+
+        with pytest.raises(CheckpointCorruptionError) as exc:
+            store.load_state("thr-corrupt")
+        assert "CHECKPOINT_CORRUPTION_RECOVERY_REQUIRED" in str(exc.value)
+
+        # ADR-0003 §3.13: SQLite sessions table authoritatively recorded RECOVERY_REQUIRED
+        assert (
+            store.get_lifecycle_status("sess-corrupt")
+            == LifecycleStatus.RECOVERY_REQUIRED
+        )
+
+        # Checkpoint corruption diagnostic event was persisted to SQLite events table
+        events = store.list_events("sess-corrupt")
+        assert len(events) >= 1
+        corrupt_events = [
+            e for e in events if e.event_type == "checkpoint_corruption_detected"
+        ]
+        assert "cp-bad" in str(corrupt_events[0].payload["reasons"])
+        assert corrupt_events[0].payload["thread_id"] == "thr-corrupt"
+
+    def test_recovery_selection_selects_newest_valid_checkpoint(
+        self, tmp_path: Path
+    ) -> None:
+        """PM Finding 6: Recovery selects newest valid checkpoint if an older valid one exists (ADR-0003 §3.13)."""
+        db_path = tmp_path / "checkpoints.sqlite"
+        store = SQLiteOrchestrationStore(db_path, wal_mode=False)
+        lease = store.acquire_lease("sess-multi", "thr-multi", "worker-1")
+
+        # Save valid checkpoint at sequence 1
+        store.save_state({"step": 1, "valid": True}, lease)
+
+        # Manually inject corrupt checkpoint at sequence 2
+        with store._get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO checkpoints (checkpoint_id, session_id, thread_id, sequence_number, schema_version, state_blob, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "cp-corrupt-seq2",
+                    lease.session_id,
+                    lease.thread_id,
+                    2,
+                    CHECKPOINT_SCHEMA_VERSION,
+                    "CORRUPT_JSON_DATA",
+                    datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+
+        # load_state selects the newest VALID checkpoint (sequence 1)
+        recovered = store.load_state("thr-multi")
+        assert recovered == {"step": 1, "valid": True}
+
+    def test_exact_numeric_policy_close_floats_produce_distinct_hashes(self) -> None:
+        """PM Finding 7: Close float values never collapse to the same canonical representation/hash."""
+        v1 = 1.0000000000000002
+        v2 = 1.0000000000000004
+        assert v1 != v2
+
+        h1 = compute_payload_hash({"val": v1})
+        h2 = compute_payload_hash({"val": v2})
+        assert h1 != h2
+
+    def test_exact_numeric_policy_int_vs_float_distinct_hashes(self) -> None:
+        """PM Finding 7: Exact numeric policy preserves integer vs float type distinction."""
+        c_int = canonicalize_payload({"rate": 1})
+        c_float = canonicalize_payload({"rate": 1.0})
+        assert c_int == '{"rate":1}'
+        assert c_float == '{"rate":1.0}'
+        assert compute_payload_hash({"rate": 1}) != compute_payload_hash({"rate": 1.0})
+
+    def test_exact_numeric_policy_negative_zero_normalized(self) -> None:
+        """PM Finding 7: Negative zero -0.0 is normalized to 0.0 in canonical payload."""
+        c1 = canonicalize_payload({"val": -0.0})
+        c2 = canonicalize_payload({"val": 0.0})
+        assert c1 == '{"val":0.0}'
+        assert c2 == '{"val":0.0}'
+        assert compute_payload_hash({"val": -0.0}) == compute_payload_hash({"val": 0.0})
+
+    def test_exact_numeric_policy_rejects_non_finite_values(self) -> None:
+        """PM Finding 7: Non-finite float values (NaN, Inf, -Inf) are rejected fail-closed."""
+        with pytest.raises(ValueError, match="Non-finite float value"):
+            canonicalize_payload({"bad": float("nan")})
+
+        with pytest.raises(ValueError, match="Non-finite float value"):
+            canonicalize_payload({"bad": float("inf")})
+
+        with pytest.raises(ValueError, match="Non-finite float value"):
+            canonicalize_payload({"bad": float("-inf")})
+
+    def test_langgraph_sqlite_checkpointer_persistence(
+        self, temp_store: SQLiteOrchestrationStore, active_lease: ExecutionLease
+    ) -> None:
+        """PM Finding 1 & Gate D: LangGraph checkpointer persists workflow state to SQLite."""
+        graph = create_orchestration_graph(temp_store, active_lease)
+        state: OrchestrationGraphState = {
+            "session_id": active_lease.session_id,
+            "thread_id": active_lease.thread_id,
+            "lifecycle_status": LifecycleStatus.INITIALIZING.value,
+            "task": "benchmark",
+            "requires_approval": False,
+        }
+        config = {"configurable": {"thread_id": active_lease.thread_id}}
+        result = graph.invoke(state, config=config)
+        assert result["lifecycle_status"] == LifecycleStatus.COMPLETED.value
+
+        # Verify checkpoints table in SQLite has persisted LangGraph checkpoints
+        with temp_store._get_connection() as conn:
+            cur = conn.execute(
+                "SELECT COUNT(*) as cnt FROM lg_checkpoints WHERE thread_id = ?",
+                (active_lease.thread_id,),
+            )
+            count = cur.fetchone()["cnt"]
+            assert count > 0

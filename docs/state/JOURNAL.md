@@ -897,3 +897,28 @@ Added 8 new regression tests, expanding the Phase 2D contract test suite to 35 t
 
 **Left open:** Push branch `feature/ajmunna/phase-2e-orchestration`, open PR linked to Issue #43, verify GitHub Actions CI matrix across Python 3.10–3.13, and submit for Official PM review.
 
+---
+
+## 2026-09-13 — Phase 2E PR #44 Hardening Pass (feature/ajmunna/phase-2e-orchestration)
+
+**Did:**
+1. Addressed all 7 architectural blockers identified in the Official PM Review of PR #44 ("CHANGES REQUIRED — DO NOT MERGE"):
+   - **Finding 1 (SQLite as true lifecycle authority):** Introduced parent `sessions` table in SQLite tracking `session_id`, `thread_id`, `lifecycle_status`, `created_at`, `updated_at`. Implemented `store.transition_lifecycle()` and `store.get_lifecycle_status()`. Replaced LangGraph `MemorySaver` default with `SQLiteLangGraphCheckpointer` saving checkpoints and blobs directly in SQLite (`lg_checkpoints`, `lg_blobs`, `lg_writes`).
+   - **Finding 2 (Operation state transition validation):** Wired `validate_operation_transition()` directly into `store.update_operation_status()` to fail closed on illegal transitions. Hardened `store.save_operation()` to check current status and prevent resetting active non-`CREATED` operations back to `CREATED`.
+   - **Finding 3 (Atomic lifecycle transition + monotonic sequence allocation):** Combined lease verification, lifecycle status update in `sessions`, monotonic sequence allocation, diagnostic event insertion, and optional checkpoint save into a single atomic SQLite transaction (`BEGIN IMMEDIATE ... COMMIT`). Rollbacks discard both state mutation and sequence consumption.
+   - **Finding 4 (Relational session parent & lease lifecycle fix):** Restructured foreign keys: `sessions` is now the root entity; `leases` references `sessions(session_id) ON DELETE CASCADE`; `checkpoints` and `events` reference `sessions(session_id)`. `release_lease()` deletes the active lease row without violating foreign keys or deleting session history.
+   - **Finding 5 (Authoritative relational retention pruning):** Added authoritative `session_id` columns to `operations` and `approvals` tables. Refactored `prune_checkpoints()` to use purely relational SQL queries against unexpired leases, pending approvals, and active operations, eliminating all JSON string searching.
+   - **Finding 6 (Corrupt checkpoint recovery & persistent RECOVERY_REQUIRED):** Updated `load_state()` to inspect candidate checkpoints in reverse chronological order and select the newest valid checkpoint if an older one remains valid. If all checkpoints are corrupt or no valid checkpoint exists, atomically persists `RECOVERY_REQUIRED` in `sessions`, writes a diagnostic `checkpoint_corruption_detected` event, and raises `CheckpointCorruptionError`.
+   - **Finding 7 (Exact numeric canonicalization policy):** Replaced lossy `:.10g` truncation with David Gay's exact shortest representation in `json.dumps(..., allow_nan=False)`. Validated numbers with `math.isfinite()` (rejecting `nan`, `inf`, `-inf`), normalized `-0.0` to `0.0`, and preserved int vs float type distinctions.
+2. Added `TestPMRulingRegressionCoverage` test class to `tests/test_orchestration_boundary.py` containing 13 targeted tests verifying each PM finding. Total test suite expanded to 261 passed (51 orchestration contract tests).
+3. Verified all quality gates: Ruff check, Ruff format, Mypy default, Mypy Python 3.10, CLI health check, and `git diff --check`.
+
+**Why:** `[P§19]`–`[P§22]`, `[P§24]`, `[P§34]`, and ADR-0003 §3.1–§3.13. Strictly satisfies the Official PM's non-negotiable architectural rulings that SQLite must remain the sole and immutable authority over lifecycle state, sequence allocation, lease fencing, and recovery.
+
+**Broke:** Initial `SQLiteLangGraphCheckpointer` implementation had minor typing mismatches against `BaseCheckpointSaver` and threw a thread-check exception; resolved by setting `check_same_thread=False` on `sqlite3.connect()` and aligning parameter types with `RunnableConfig`.
+
+**Learned:** In hybrid architectures where an external framework (LangGraph) executes workflows atop a custom state engine (ADR-0003), the framework must be relegated strictly to a stateless runtime adapter whose checkpointer writes directly to the primary database, while all lifecycle and status mutations are gated through atomic database transactions.
+
+**Left open:** Push hardened commits to `origin feature/ajmunna/phase-2e-orchestration`, monitor GitHub Actions CI on PR #44, and request PM review.
+
+

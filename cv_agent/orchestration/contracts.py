@@ -100,6 +100,7 @@ class OperationIntent(BaseModel):
 
     model_config = ConfigDict(frozen=True)
     operation_id: OperationId
+    session_id: str = Field(min_length=1)
     operation_version: int = Field(ge=1)
     operation_type: str = Field(min_length=1)
     canonical_payload: OperationPayloadEnvelope
@@ -135,6 +136,7 @@ class ApprovalRequest(BaseModel):
 
     model_config = ConfigDict(frozen=True)
     request_id: str = Field(min_length=1)
+    session_id: str = Field(min_length=1)
     operation_id: OperationId
     operation_version: int = Field(ge=1)
     canonical_payload_hash: str = Field(min_length=1)
@@ -222,6 +224,18 @@ class OrchestrationStore(Protocol):
     def list_events(
         self, session_id: str, since_sequence: int | None = None
     ) -> Sequence[OrchestrationEvent]: ...
+
+    def transition_lifecycle(
+        self,
+        session_id: str,
+        target_status: LifecycleStatus,
+        event_type: str,
+        event_payload: Mapping[str, Any],
+        lease: ExecutionLease,
+        checkpoint_state: Mapping[str, Any] | None = None,
+    ) -> tuple[LifecycleStatus, OrchestrationEvent]: ...
+
+    def get_lifecycle_status(self, session_id: str) -> LifecycleStatus | None: ...
 
     def prune_checkpoints(self, older_than: datetime) -> int: ...
 

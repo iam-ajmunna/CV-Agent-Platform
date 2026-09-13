@@ -35,10 +35,19 @@ class InvalidStateTransitionError(Exception):
 # Authoritative session transitions (ADR-0003 §3.9 & Invariant 17)
 _VALID_LIFECYCLE_TRANSITIONS: dict[LifecycleStatus, frozenset[LifecycleStatus]] = {
     LifecycleStatus.INITIALIZING: frozenset(
-        {LifecycleStatus.READY, LifecycleStatus.FAILED}
+        {
+            LifecycleStatus.READY,
+            LifecycleStatus.FAILED,
+            LifecycleStatus.RECOVERY_REQUIRED,
+        }
     ),
     LifecycleStatus.READY: frozenset(
-        {LifecycleStatus.PLANNING, LifecycleStatus.PAUSED, LifecycleStatus.FAILED}
+        {
+            LifecycleStatus.PLANNING,
+            LifecycleStatus.PAUSED,
+            LifecycleStatus.FAILED,
+            LifecycleStatus.RECOVERY_REQUIRED,
+        }
     ),
     LifecycleStatus.PLANNING: frozenset(
         {
@@ -46,6 +55,7 @@ _VALID_LIFECYCLE_TRANSITIONS: dict[LifecycleStatus, frozenset[LifecycleStatus]] 
             LifecycleStatus.EXECUTING,
             LifecycleStatus.PAUSED,
             LifecycleStatus.FAILED,
+            LifecycleStatus.RECOVERY_REQUIRED,
         }
     ),
     LifecycleStatus.AWAITING_APPROVAL: frozenset(
@@ -54,6 +64,7 @@ _VALID_LIFECYCLE_TRANSITIONS: dict[LifecycleStatus, frozenset[LifecycleStatus]] 
             LifecycleStatus.PLANNING,
             LifecycleStatus.PAUSED,
             LifecycleStatus.FAILED,
+            LifecycleStatus.RECOVERY_REQUIRED,
         }
     ),
     LifecycleStatus.EXECUTING: frozenset(
@@ -70,6 +81,7 @@ _VALID_LIFECYCLE_TRANSITIONS: dict[LifecycleStatus, frozenset[LifecycleStatus]] 
             LifecycleStatus.COMPLETED,
             LifecycleStatus.FAILED,
             LifecycleStatus.PAUSED,
+            LifecycleStatus.RECOVERY_REQUIRED,
         }
     ),
     LifecycleStatus.PAUSED: frozenset(
@@ -78,12 +90,14 @@ _VALID_LIFECYCLE_TRANSITIONS: dict[LifecycleStatus, frozenset[LifecycleStatus]] 
             LifecycleStatus.PLANNING,
             LifecycleStatus.EXECUTING,
             LifecycleStatus.FAILED,
+            LifecycleStatus.RECOVERY_REQUIRED,
         }
     ),
     LifecycleStatus.RECOVERY_REQUIRED: frozenset(
         {
             LifecycleStatus.INITIALIZING,
             LifecycleStatus.READY,
+            LifecycleStatus.PAUSED,
             LifecycleStatus.FAILED,
         }
     ),

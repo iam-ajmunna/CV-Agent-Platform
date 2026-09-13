@@ -34,6 +34,7 @@ from cv_agent.orchestration.contracts import (
 from cv_agent.orchestration.fencing import LeaseManager
 from cv_agent.orchestration.graph import (
     OrchestrationGraphState,
+    SQLiteLangGraphCheckpointer,
     create_orchestration_graph,
 )
 from cv_agent.orchestration.reconciliation import (
@@ -78,6 +79,7 @@ __all__ = [
     "OrchestratorConfig",
     "ReconciliationCoordinator",
     "ReconciliationOutcome",
+    "SQLiteLangGraphCheckpointer",
     "SQLiteOrchestrationStore",
     "SessionId",
     "StaleFencingLeaseError",

@@ -61,6 +61,7 @@ class ApprovalManager:
 
         req = ApprovalRequest(
             request_id=request_id,
+            session_id=operation.session_id,
             operation_id=operation.operation_id,
             operation_version=operation.operation_version,
             canonical_payload_hash=operation.canonical_payload.payload_hash,

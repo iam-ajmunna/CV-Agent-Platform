@@ -24,12 +24,18 @@ from cv_agent.orchestration.contracts import (
     ApprovalRequest,
     ApprovalStatus,
     ExecutionLease,
+    LifecycleStatus,
     OperationId,
     OperationIntent,
     OperationPayloadEnvelope,
     OperationStatus,
     OrchestrationEvent,
     OrchestrationStore,
+)
+from cv_agent.orchestration.state_machine import (
+    InvalidStateTransitionError,
+    validate_lifecycle_transition,
+    validate_operation_transition,
 )
 
 CHECKPOINT_SCHEMA_VERSION: int = 1
@@ -99,6 +105,15 @@ class SQLiteOrchestrationStore(OrchestrationStore):
 
             conn.executescript(
                 """
+                CREATE TABLE IF NOT EXISTS sessions (
+                    session_id TEXT PRIMARY KEY,
+                    thread_id TEXT NOT NULL,
+                    lifecycle_status TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_sessions_thread ON sessions(thread_id);
+
                 CREATE TABLE IF NOT EXISTS leases (
                     session_id TEXT PRIMARY KEY,
                     thread_id TEXT NOT NULL,
@@ -106,7 +121,8 @@ class SQLiteOrchestrationStore(OrchestrationStore):
                     owner_instance_id TEXT NOT NULL,
                     acquired_at TEXT NOT NULL,
                     expires_at TEXT NOT NULL,
-                    fencing_epoch INTEGER NOT NULL
+                    fencing_epoch INTEGER NOT NULL,
+                    FOREIGN KEY (session_id) REFERENCES sessions(session_id) ON DELETE CASCADE
                 );
 
                 CREATE TABLE IF NOT EXISTS checkpoints (
@@ -117,12 +133,13 @@ class SQLiteOrchestrationStore(OrchestrationStore):
                     schema_version INTEGER NOT NULL,
                     state_blob TEXT NOT NULL,
                     created_at TEXT NOT NULL,
-                    FOREIGN KEY (session_id) REFERENCES leases(session_id)
+                    FOREIGN KEY (session_id) REFERENCES sessions(session_id) ON DELETE CASCADE
                 );
                 CREATE INDEX IF NOT EXISTS idx_checkpoints_thread ON checkpoints(thread_id, sequence_number);
 
                 CREATE TABLE IF NOT EXISTS operations (
                     operation_id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL,
                     operation_version INTEGER NOT NULL,
                     operation_type TEXT NOT NULL,
                     schema_id TEXT NOT NULL,
@@ -133,9 +150,11 @@ class SQLiteOrchestrationStore(OrchestrationStore):
                     target_identity TEXT NOT NULL,
                     status TEXT NOT NULL,
                     created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY (session_id) REFERENCES sessions(session_id) ON DELETE CASCADE
                 );
                 CREATE INDEX IF NOT EXISTS idx_operations_status ON operations(status);
+                CREATE INDEX IF NOT EXISTS idx_operations_session ON operations(session_id);
 
                 CREATE TABLE IF NOT EXISTS events (
                     session_id TEXT NOT NULL,
@@ -144,12 +163,14 @@ class SQLiteOrchestrationStore(OrchestrationStore):
                     event_type TEXT NOT NULL,
                     timestamp TEXT NOT NULL,
                     payload_json TEXT NOT NULL,
-                    PRIMARY KEY (session_id, sequence_number)
+                    PRIMARY KEY (session_id, sequence_number),
+                    FOREIGN KEY (session_id) REFERENCES sessions(session_id) ON DELETE CASCADE
                 );
                 CREATE INDEX IF NOT EXISTS idx_events_session_seq ON events(session_id, sequence_number);
 
                 CREATE TABLE IF NOT EXISTS approvals (
                     request_id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL,
                     operation_id TEXT NOT NULL,
                     operation_version INTEGER NOT NULL,
                     canonical_payload_hash TEXT NOT NULL,
@@ -165,9 +186,11 @@ class SQLiteOrchestrationStore(OrchestrationStore):
                     bound_payload_hash TEXT,
                     bound_resource_scope TEXT,
                     bound_policy_version TEXT,
-                    decision_metadata_json TEXT
+                    decision_metadata_json TEXT,
+                    FOREIGN KEY (session_id) REFERENCES sessions(session_id) ON DELETE CASCADE
                 );
                 CREATE INDEX IF NOT EXISTS idx_approvals_op ON approvals(operation_id, operation_version);
+                CREATE INDEX IF NOT EXISTS idx_approvals_session ON approvals(session_id);
                 """
             )
 
@@ -226,6 +249,22 @@ class SQLiteOrchestrationStore(OrchestrationStore):
         with self._get_connection() as conn:
             conn.execute("BEGIN IMMEDIATE;")
             try:
+                # Ensure authoritative session record exists in sessions
+                conn.execute(
+                    """
+                    INSERT INTO sessions (session_id, thread_id, lifecycle_status, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(session_id) DO NOTHING
+                    """,
+                    (
+                        session_id,
+                        thread_id,
+                        LifecycleStatus.INITIALIZING.value,
+                        now.isoformat(),
+                        now.isoformat(),
+                    ),
+                )
+
                 cur = conn.execute(
                     "SELECT lease_id, owner_instance_id, expires_at, fencing_epoch FROM leases WHERE session_id = ?",
                     (session_id,),
@@ -365,38 +404,239 @@ class SQLiteOrchestrationStore(OrchestrationStore):
                 conn.execute("ROLLBACK;")
                 raise
 
-    def load_state(self, thread_id: str) -> object | None:
-        """Load the newest valid checkpoint state for thread_id."""
+    def transition_lifecycle(
+        self,
+        session_id: str,
+        target_status: LifecycleStatus,
+        event_type: str,
+        event_payload: Mapping[str, Any],
+        lease: ExecutionLease,
+        checkpoint_state: Mapping[str, Any] | None = None,
+    ) -> tuple[LifecycleStatus, OrchestrationEvent]:
+        """Atomically transition lifecycle status, allocate monotonic sequence, and log event.
+
+        Enforces ADR-0003 §3.9 & §3.10 and PM Gates 1, 2, 3:
+        1. Verifies lease fencing atomically.
+        2. Retrieves authoritative current lifecycle status from SQLite `sessions` table.
+        3. Validates transition using `validate_lifecycle_transition()`.
+        4. Mutates `sessions.lifecycle_status`.
+        5. Allocates next monotonic sequence number for `session_id`.
+        6. Inserts the lifecycle transition audit event.
+        7. If `checkpoint_state` is provided, persists checkpoint in the same transaction.
+        All changes commit or roll back together atomically.
+        """
+        if lease.session_id != session_id:
+            raise StaleFencingLeaseError(
+                "SESSION_MISMATCH",
+                f"Lease session {lease.session_id!r} does not match target session {session_id!r}.",
+            )
+
+        now = datetime.now(timezone.utc)
+        now_str = now.isoformat()
+        event_id = str(uuid.uuid4())
+        payload_dict = dict(event_payload)
+        payload_dict["target_status"] = target_status.value
+        payload_json = json.dumps(payload_dict, ensure_ascii=False, sort_keys=True)
+
+        with self._get_connection() as conn:
+            conn.execute("BEGIN IMMEDIATE;")
+            try:
+                self._validate_lease_fencing(conn, lease)
+
+                cur = conn.execute(
+                    "SELECT lifecycle_status FROM sessions WHERE session_id = ?",
+                    (session_id,),
+                )
+                row = cur.fetchone()
+                if row is None:
+                    current_status = LifecycleStatus.INITIALIZING
+                    conn.execute(
+                        """
+                        INSERT INTO sessions (session_id, thread_id, lifecycle_status, created_at, updated_at)
+                        VALUES (?, ?, ?, ?, ?)
+                        """,
+                        (
+                            session_id,
+                            lease.thread_id,
+                            current_status.value,
+                            now_str,
+                            now_str,
+                        ),
+                    )
+                else:
+                    current_status = LifecycleStatus(row["lifecycle_status"])
+
+                # Validate transition against authoritative state machine
+                validate_lifecycle_transition(current_status, target_status)
+
+                # Mutate lifecycle status in SQLite
+                conn.execute(
+                    "UPDATE sessions SET lifecycle_status = ?, updated_at = ? WHERE session_id = ?",
+                    (target_status.value, now_str, session_id),
+                )
+
+                # Monotonically allocate sequence number
+                cur_seq = conn.execute(
+                    "SELECT COALESCE(MAX(sequence_number), 0) + 1 AS next_seq FROM events WHERE session_id = ?",
+                    (session_id,),
+                )
+                next_seq = int(cur_seq.fetchone()["next_seq"])
+
+                conn.execute(
+                    """
+                    INSERT INTO events (session_id, sequence_number, event_id, event_type, timestamp, payload_json)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        session_id,
+                        next_seq,
+                        event_id,
+                        event_type,
+                        now_str,
+                        payload_json,
+                    ),
+                )
+
+                # Optional atomic checkpoint
+                if checkpoint_state is not None:
+                    cp_id = str(uuid.uuid4())
+                    cp_blob = json.dumps(
+                        checkpoint_state, ensure_ascii=False, sort_keys=True
+                    )
+                    cur_cp = conn.execute(
+                        "SELECT COALESCE(MAX(sequence_number), 0) + 1 AS next_cp FROM checkpoints WHERE thread_id = ?",
+                        (lease.thread_id,),
+                    )
+                    next_cp = int(cur_cp.fetchone()["next_cp"])
+                    conn.execute(
+                        """
+                        INSERT INTO checkpoints (checkpoint_id, session_id, thread_id, sequence_number, schema_version, state_blob, created_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            cp_id,
+                            session_id,
+                            lease.thread_id,
+                            next_cp,
+                            CHECKPOINT_SCHEMA_VERSION,
+                            cp_blob,
+                            now_str,
+                        ),
+                    )
+
+                conn.execute("COMMIT;")
+                return (
+                    target_status,
+                    OrchestrationEvent(
+                        session_id=session_id,
+                        sequence_number=next_seq,
+                        event_id=event_id,
+                        event_type=event_type,
+                        timestamp=now,
+                        payload=payload_dict,
+                    ),
+                )
+            except Exception:
+                conn.execute("ROLLBACK;")
+                raise
+
+    def get_lifecycle_status(self, session_id: str) -> LifecycleStatus | None:
+        """Query the authoritative lifecycle status for a session from SQLite."""
         with self._get_connection() as conn:
             cur = conn.execute(
-                """
-                SELECT checkpoint_id, sequence_number, schema_version, state_blob
-                FROM checkpoints
-                WHERE thread_id = ?
-                ORDER BY sequence_number DESC
-                LIMIT 1
-                """,
-                (thread_id,),
+                "SELECT lifecycle_status FROM sessions WHERE session_id = ?",
+                (session_id,),
             )
             row = cur.fetchone()
             if row is None:
                 return None
+            return LifecycleStatus(row["lifecycle_status"])
 
-            schema_ver = int(row["schema_version"])
-            if schema_ver != CHECKPOINT_SCHEMA_VERSION:
-                raise CheckpointCorruptionError(
-                    "UNSUPPORTED_SCHEMA_VERSION",
-                    f"Checkpoint {row['checkpoint_id']!r} has schema_version={schema_ver}, expected {CHECKPOINT_SCHEMA_VERSION}. "
-                    "Session requires migration or recovery.",
-                )
+    def load_state(self, thread_id: str) -> object | None:
+        """Load newest valid checkpoint state for thread_id, selecting newest valid (ADR-0003 §3.13).
 
-            try:
-                return json.loads(row["state_blob"])
-            except json.JSONDecodeError as exc:
-                raise CheckpointCorruptionError(
-                    "CORRUPTED_CHECKPOINT_BLOB",
-                    f"Checkpoint {row['checkpoint_id']!r} state_blob is invalid JSON: {exc}",
-                ) from exc
+        If corruption is detected and no valid checkpoint remains, transitions session to RECOVERY_REQUIRED.
+        """
+        with self._get_connection() as conn:
+            cur = conn.execute(
+                """
+                SELECT checkpoint_id, session_id, sequence_number, schema_version, state_blob
+                FROM checkpoints
+                WHERE thread_id = ?
+                ORDER BY sequence_number DESC
+                """,
+                (thread_id,),
+            )
+            rows = cur.fetchall()
+            if not rows:
+                return None
+
+            corruption_reasons: list[str] = []
+            session_id: str | None = None
+
+            # Recovery selection: find newest valid checkpoint supported by integrity contract
+            for row in rows:
+                session_id = str(row["session_id"])
+                schema_ver = int(row["schema_version"])
+                if schema_ver != CHECKPOINT_SCHEMA_VERSION:
+                    corruption_reasons.append(
+                        f"Checkpoint {row['checkpoint_id']!r} unsupported schema_version={schema_ver}"
+                    )
+                    continue
+
+                try:
+                    return json.loads(row["state_blob"])
+                except json.JSONDecodeError as exc:
+                    corruption_reasons.append(
+                        f"Checkpoint {row['checkpoint_id']!r} invalid JSON: {exc}"
+                    )
+                    continue
+
+            # If we reached here, checkpoints exist but NO valid checkpoint remains!
+            # ADR-0003 §3.13: session enters RECOVERY_REQUIRED with diagnostic evidence preserved
+            now_str = _iso_now()
+            if session_id is not None:
+                try:
+                    conn.execute("BEGIN IMMEDIATE;")
+                    conn.execute(
+                        "UPDATE sessions SET lifecycle_status = ?, updated_at = ? WHERE session_id = ?",
+                        (LifecycleStatus.RECOVERY_REQUIRED.value, now_str, session_id),
+                    )
+                    # Persist corruption diagnostic event
+                    cur_seq = conn.execute(
+                        "SELECT COALESCE(MAX(sequence_number), 0) + 1 AS next_seq FROM events WHERE session_id = ?",
+                        (session_id,),
+                    )
+                    next_seq = int(cur_seq.fetchone()["next_seq"])
+                    diag_payload = {
+                        "reasons": corruption_reasons,
+                        "thread_id": thread_id,
+                        "session_id": session_id,
+                    }
+                    conn.execute(
+                        """
+                        INSERT INTO events (session_id, sequence_number, event_id, event_type, timestamp, payload_json)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            session_id,
+                            next_seq,
+                            str(uuid.uuid4()),
+                            "checkpoint_corruption_detected",
+                            now_str,
+                            json.dumps(diag_payload, ensure_ascii=False),
+                        ),
+                    )
+                    conn.execute("COMMIT;")
+                except sqlite3.Error:
+                    conn.execute("ROLLBACK;")
+
+            reasons_summary = "; ".join(corruption_reasons)
+            raise CheckpointCorruptionError(
+                "CHECKPOINT_CORRUPTION_RECOVERY_REQUIRED",
+                f"Thread {thread_id!r} checkpoints are corrupt and no valid checkpoint remains. "
+                f"Session transitioned to RECOVERY_REQUIRED. Diagnostic evidence: {reasons_summary}",
+            )
 
     def save_state(self, state: object, lease: ExecutionLease) -> None:
         """Atomically persist a state checkpoint under the protection of the active execution lease."""
@@ -522,7 +762,7 @@ class SQLiteOrchestrationStore(OrchestrationStore):
             return tuple(events)
 
     def save_operation(self, operation: OperationIntent, lease: ExecutionLease) -> None:
-        """Persist or update an operation intent under lease fencing."""
+        """Persist or update an operation intent under lease fencing, validating transitions."""
         now_str = _iso_now()
         payload_json = json.dumps(
             operation.canonical_payload.payload, ensure_ascii=False, sort_keys=True
@@ -533,37 +773,72 @@ class SQLiteOrchestrationStore(OrchestrationStore):
             try:
                 self._validate_lease_fencing(conn, lease)
 
-                conn.execute(
-                    """
-                    INSERT INTO operations (
-                        operation_id, operation_version, operation_type,
-                        schema_id, schema_version, canonicalization_version,
-                        payload_hash, payload_json, target_identity, status,
-                        created_at, updated_at
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(operation_id) DO UPDATE SET
-                        operation_version = excluded.operation_version,
-                        payload_hash = excluded.payload_hash,
-                        payload_json = excluded.payload_json,
-                        target_identity = excluded.target_identity,
-                        updated_at = excluded.updated_at
-                    """,
-                    (
-                        operation.operation_id.value,
-                        operation.operation_version,
-                        operation.operation_type,
-                        operation.canonical_payload.schema_id,
-                        operation.canonical_payload.schema_version,
-                        operation.canonical_payload.canonicalization_version,
-                        operation.canonical_payload.payload_hash,
-                        payload_json,
-                        operation.target_identity,
-                        OperationStatus.CREATED.value,
-                        operation.created_at.isoformat(),
-                        now_str,
-                    ),
+                cur = conn.execute(
+                    "SELECT status FROM operations WHERE operation_id = ?",
+                    (operation.operation_id.value,),
                 )
+                row = cur.fetchone()
+
+                if row is None:
+                    conn.execute(
+                        """
+                        INSERT INTO operations (
+                            operation_id, session_id, operation_version, operation_type,
+                            schema_id, schema_version, canonicalization_version,
+                            payload_hash, payload_json, target_identity, status,
+                            created_at, updated_at
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            operation.operation_id.value,
+                            operation.session_id,
+                            operation.operation_version,
+                            operation.operation_type,
+                            operation.canonical_payload.schema_id,
+                            operation.canonical_payload.schema_version,
+                            operation.canonical_payload.canonicalization_version,
+                            operation.canonical_payload.payload_hash,
+                            payload_json,
+                            operation.target_identity,
+                            OperationStatus.CREATED.value,
+                            operation.created_at.isoformat(),
+                            now_str,
+                        ),
+                    )
+                else:
+                    existing_status = OperationStatus(row["status"])
+                    if existing_status != OperationStatus.CREATED:
+                        raise InvalidStateTransitionError(
+                            "operation_status",
+                            existing_status.value,
+                            OperationStatus.CREATED.value,
+                            f"Cannot reset existing operation {operation.operation_id.value!r} from {existing_status.value!r} to CREATED.",
+                        )
+
+                    conn.execute(
+                        """
+                        UPDATE operations
+                        SET session_id = ?, operation_version = ?, operation_type = ?,
+                            schema_id = ?, schema_version = ?, canonicalization_version = ?,
+                            payload_hash = ?, payload_json = ?, target_identity = ?, updated_at = ?
+                        WHERE operation_id = ?
+                        """,
+                        (
+                            operation.session_id,
+                            operation.operation_version,
+                            operation.operation_type,
+                            operation.canonical_payload.schema_id,
+                            operation.canonical_payload.schema_version,
+                            operation.canonical_payload.canonicalization_version,
+                            operation.canonical_payload.payload_hash,
+                            payload_json,
+                            operation.target_identity,
+                            now_str,
+                            operation.operation_id.value,
+                        ),
+                    )
+
                 conn.execute("COMMIT;")
             except Exception:
                 conn.execute("ROLLBACK;")
@@ -575,21 +850,30 @@ class SQLiteOrchestrationStore(OrchestrationStore):
         status: OperationStatus,
         lease: ExecutionLease,
     ) -> None:
-        """Update an operation status under lease fencing."""
+        """Update an operation status under lease fencing, validating transitions."""
         now_str = _iso_now()
         with self._get_connection() as conn:
             conn.execute("BEGIN IMMEDIATE;")
             try:
                 self._validate_lease_fencing(conn, lease)
 
-                res = conn.execute(
-                    "UPDATE operations SET status = ?, updated_at = ? WHERE operation_id = ?",
-                    (status.value, now_str, operation_id.value),
+                cur = conn.execute(
+                    "SELECT status FROM operations WHERE operation_id = ?",
+                    (operation_id.value,),
                 )
-                if res.rowcount == 0:
+                row = cur.fetchone()
+                if row is None:
                     raise KeyError(
                         f"Operation {operation_id.value!r} not found in store."
                     )
+
+                current_status = OperationStatus(row["status"])
+                validate_operation_transition(current_status, status)
+
+                conn.execute(
+                    "UPDATE operations SET status = ?, updated_at = ? WHERE operation_id = ?",
+                    (status.value, now_str, operation_id.value),
+                )
                 conn.execute("COMMIT;")
             except Exception:
                 conn.execute("ROLLBACK;")
@@ -600,7 +884,7 @@ class SQLiteOrchestrationStore(OrchestrationStore):
         with self._get_connection() as conn:
             cur = conn.execute(
                 """
-                SELECT operation_id, operation_version, operation_type,
+                SELECT operation_id, session_id, operation_version, operation_type,
                        schema_id, schema_version, canonicalization_version,
                        payload_hash, payload_json, target_identity, created_at
                 FROM operations
@@ -621,6 +905,7 @@ class SQLiteOrchestrationStore(OrchestrationStore):
             )
             return OperationIntent(
                 operation_id=OperationId(value=str(row["operation_id"])),
+                session_id=str(row["session_id"]),
                 operation_version=int(row["operation_version"]),
                 operation_type=str(row["operation_type"]),
                 canonical_payload=envelope,
@@ -640,14 +925,15 @@ class SQLiteOrchestrationStore(OrchestrationStore):
                 conn.execute(
                     """
                     INSERT INTO approvals (
-                        request_id, operation_id, operation_version,
+                        request_id, session_id, operation_id, operation_version,
                         canonical_payload_hash, policy_version, action_type,
                         risk_level, resource_scope, created_at, expires_at, decision
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         request.request_id,
+                        request.session_id,
                         request.operation_id.value,
                         request.operation_version,
                         request.canonical_payload_hash,
@@ -719,12 +1005,13 @@ class SQLiteOrchestrationStore(OrchestrationStore):
             return dict(row)
 
     def prune_checkpoints(self, older_than: datetime) -> int:
-        """PM Gate 7: Conservative false-negative retention pruning.
+        """PM Gate 7: Conservative false-negative retention pruning via authoritative relations.
 
         Strictly protects:
         - Sessions with active unexpired leases.
-        - Sessions associated with pending approvals.
+        - Sessions with pending approvals.
         - Sessions with active or unresolved operations (created, running, unknown, reconciling).
+        - Sessions with non-terminal lifecycle status.
         - experiments.sqlite is completely outside this store and never touched.
         """
         older_than_str = older_than.isoformat()
@@ -733,44 +1020,38 @@ class SQLiteOrchestrationStore(OrchestrationStore):
         with self._get_connection() as conn:
             conn.execute("BEGIN IMMEDIATE;")
             try:
-                # Find all session_ids that are PROTECTED:
                 # 1. Unexpired leases
-                protected_cur = conn.execute(
+                cur1 = conn.execute(
                     "SELECT DISTINCT session_id FROM leases WHERE expires_at >= ?",
                     (now_str,),
                 )
-                protected_sessions = {
-                    str(r["session_id"]) for r in protected_cur.fetchall()
-                }
+                protected_sessions = {str(r["session_id"]) for r in cur1.fetchall()}
 
-                # 2. Pending approvals & active operations
-                pending_appr = conn.execute(
-                    "SELECT DISTINCT operation_id FROM approvals WHERE decision = 'pending' OR decision IS NULL"
+                # 2. Pending approvals (authoritative session_id)
+                cur2 = conn.execute(
+                    "SELECT DISTINCT session_id FROM approvals WHERE decision = 'pending' OR decision IS NULL"
                 )
-                pending_op_ids = {
-                    str(r["operation_id"]) for r in pending_appr.fetchall()
-                }
+                protected_sessions.update(str(r["session_id"]) for r in cur2.fetchall())
 
-                active_ops = conn.execute(
+                # 3. Active or unresolved operations (authoritative session_id)
+                cur3 = conn.execute(
                     """
-                    SELECT DISTINCT operation_id FROM operations
-                    WHERE status IN ('created', 'validated', 'approval_required', 'dispatching', 'submitted', 'running', 'unknown', 'reconciling', 'cancel_requested')
-                    """
-                )
-                active_op_ids = {str(r["operation_id"]) for r in active_ops.fetchall()}
-                all_ops = pending_op_ids | active_op_ids
-
-                for op_id in all_ops:
-                    ev_cur = conn.execute(
-                        "SELECT DISTINCT session_id FROM events WHERE payload_json LIKE ?",
-                        (f"%{op_id}%",),
+                    SELECT DISTINCT session_id FROM operations
+                    WHERE status IN (
+                        'created', 'validated', 'approval_required',
+                        'dispatching', 'submitted', 'running',
+                        'unknown', 'reconciling', 'cancel_requested'
                     )
-                    for ev_row in ev_cur.fetchall():
-                        protected_sessions.add(str(ev_row["session_id"]))
+                    """
+                )
+                protected_sessions.update(str(r["session_id"]) for r in cur3.fetchall())
 
-                # If there are protected ops, check if any checkpoint belongs to sessions that reference them
-                # Since operations are identified by operation_id, to be conservative, any session created within 7 days or having active events is protected.
-                # Strictly delete checkpoints where session_id NOT IN protected_sessions and created_at < older_than
+                # 4. Non-terminal lifecycle sessions
+                cur4 = conn.execute(
+                    "SELECT DISTINCT session_id FROM sessions WHERE lifecycle_status NOT IN ('completed', 'failed')"
+                )
+                protected_sessions.update(str(r["session_id"]) for r in cur4.fetchall())
+
                 if protected_sessions:
                     placeholders = ",".join("?" for _ in protected_sessions)
                     query = f"DELETE FROM checkpoints WHERE created_at < ? AND session_id NOT IN ({placeholders})"

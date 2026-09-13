@@ -14,6 +14,7 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import json
+import math
 import unicodedata
 from collections.abc import Mapping, Sequence
 from collections.abc import Set as AbstractSet
@@ -54,13 +55,30 @@ _OBSERVATIONAL_KEYS: frozenset[str] = frozenset(
 
 
 def _canonicalize_value(value: Any) -> Any:
-    """Recursively normalize values into a deterministic, observational-free representation."""
-    if value is None or isinstance(value, (bool, int)):
+    """Recursively normalize values into a deterministic, observational-free representation.
+
+    Numeric Canonicalization Policy:
+    1. Booleans (True, False) retain boolean identity and are never coerced to ints.
+    2. Integers (int) retain exact integral value and are not coerced to floats.
+    3. Floats (float):
+       - Non-finite values (NaN, +Infinity, -Infinity) are strictly rejected with ValueError.
+       - Signed zero (-0.0) is normalized to positive zero (0.0).
+       - Finite floats preserve exact IEEE-754 double precision via Python's exact shortest
+         representation, guaranteeing that distinct values never collapse into identical hashes.
+    """
+    if value is None or isinstance(value, bool):
+        return value
+
+    if isinstance(value, int):
         return value
 
     if isinstance(value, float):
-        # Format floats consistently to avoid cross-platform float precision artifact strings
-        return f"{value:.10g}"
+        if not math.isfinite(value):
+            raise ValueError(
+                f"Non-finite float value {value!r} is prohibited in canonical operation payloads"
+            )
+        # Normalize -0.0 to 0.0
+        return 0.0 if value == 0.0 else value
 
     if isinstance(value, str):
         return unicodedata.normalize("NFC", value)
@@ -110,6 +128,7 @@ def canonicalize_payload(payload: object) -> str:
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
+        allow_nan=False,
     )
 
 
