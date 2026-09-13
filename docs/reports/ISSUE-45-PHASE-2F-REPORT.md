@@ -3,7 +3,7 @@
 **Issue:** [#45](https://github.com/iam-ajmunna/CV-Agent-Platform/issues/45)
 **PR:** [#46](https://github.com/iam-ajmunna/CV-Agent-Platform/pull/46)
 **Branch:** `feature/ajmunna/phase-2f-memory-ledger`
-**Status:** Implemented and hardened per PM review; all 284 tests pass (including 23 Phase 2F contract & regression tests); all quality gates pass.
+**Status:** Implemented and hardened per PM review; all 285 tests pass (including 24 Phase 2F contract & regression tests); all quality gates pass.
 
 ## Overview
 
@@ -40,13 +40,14 @@ The subsystem establishes the dual-layer persistence architecture:
 - WAL mode is enabled for crash-resilient concurrency.
 - Lineage relationships (`parent_exp_id` and `baseline_id`) enforce `ON DELETE RESTRICT`. Root baselines store `NULL` indicating no predecessor baseline.
 
-### Gate 5: Exact Workload-Aware Metric Completeness (No Loosened OR Semantics)
-- `complete_experiment()` validates required evidence strictly per ADR-0004 §2.4.C:
-  - `training`: All 4 validation accuracy metrics (`map_50`, `map_50_95`, `precision`, `recall`) AND all 3 training resource metrics (`gpu_hours`, `training_time_seconds`, `peak_vram_mb`).
-  - `evaluation`: Task-specific accuracy metrics (`map_50`, `map_50_95`, `precision`, `recall`) + on-target system metrics when evaluating deployability (`latency_inference_ms`, `peak_vram_mb`) `[P§12]`.
-  - `optimization`: Post-optimization accuracy/tolerance metrics (`map_50`, `map_50_95`, `precision`, `recall`) AND all 5 on-target system metrics (`latency_inference_ms`, `latency_e2e_ms`, `throughput_fps`, `peak_vram_mb`, `power_draw_watts`).
-  - `benchmark`: All 5 on-target system metrics under production stream conditions (`throughput_fps`, `latency_inference_ms`, `latency_e2e_ms`, `peak_vram_mb`, `power_draw_watts`) AND relevant accuracy verification.
-- Enforces `[P§29.4]`: Any completion lacking required on-target metrics fails closed with `IncompleteMetricsError`. Negative tests independently assert failure for every omitted required metric.
+### Gate 5: Explicit Metric Applicability Contracts (Zero Arbitrary OR Semantics)
+- `complete_experiment()` validates required evidence strictly per ADR-0004 §2.4.C using an explicit, typed metric applicability contract:
+  - `accuracy_metric_requirements`: Persisted at the experiment boundary in `ExperimentSpec` and SQLite column `experiments.accuracy_metric_requirements`.
+  - `training`: All 4 validation accuracy metrics (`map_50`, `map_50_95`, `precision`, `recall`) AND all 3 training resource metrics (`gpu_hours`, `training_time_seconds`, `peak_vram_mb`), plus any additional declared accuracy requirements.
+  - `evaluation`: Fails closed if no task-specific accuracy evidence is declared in `accuracy_metric_requirements`. Every declared metric must be present (no arbitrary OR). On-target system metrics (`throughput_fps`, `latency_inference_ms`, `peak_vram_mb`) mandatory when evaluating deployability `[P§12]`.
+  - `optimization`: Fails closed if no post-optimization accuracy/tolerance evidence is declared in `accuracy_metric_requirements`. Every declared metric must be present (no arbitrary OR). Plus all 5 on-target system metrics (`latency_inference_ms`, `latency_e2e_ms`, `throughput_fps`, `peak_vram_mb`, `power_draw_watts`).
+  - `benchmark`: Fails closed if no relevant accuracy verification evidence is declared in `accuracy_metric_requirements`. Every declared metric must be present (no arbitrary OR). Plus all 5 on-target stream system metrics (`throughput_fps`, `latency_inference_ms`, `latency_e2e_ms`, `peak_vram_mb`, `power_draw_watts`).
+- Enforces `[P§29.4]`: Any completion lacking required on-target metrics fails closed with `IncompleteMetricsError`. Negative tests prove that an arbitrary single metric cannot satisfy a multi-metric requirement.
 
 ### Gate 6: Active Baseline Mutability Isolation & DB-Level Integrity
 - Active baseline designations are maintained in a dedicated `active_baselines` table (`workload_type PRIMARY KEY`, `exp_id`, `updated_at`).
@@ -63,6 +64,7 @@ The subsystem establishes the dual-layer persistence architecture:
   - `input_resolution`: tuple of 2 positive integers `(width, height)`.
   - `batch_size`: positive integer.
   - `target` & `workload_type`: valid instances of `ExecutionTarget` and `WorkloadType`.
+  - `accuracy_metric_requirements`: non-empty for `evaluation`, `optimization`, and `benchmark`; contains mandatory validation metrics for `training`.
 - Fails closed with `ReproducibilityMetadataError` on any missing or invalid field, tested independently.
 
 ### Gate 8: Decoupled Approval Dereferencing
@@ -90,13 +92,13 @@ The subsystem establishes the dual-layer persistence architecture:
 ### 2. `cv_agent/experiments/`
 - `interfaces.py`: Enums (`ExperimentStatus`, `WorkloadType`, `ExecutionTarget`), immutable dataclasses (`AccuracyMetrics`, `SystemMetrics`, `ArtifactManifest`, `ExperimentSpec`, `ExperimentRecord`), and protocol (`ExperimentLedger`).
 - `state_machine.py`: State transition validator enforcing the §2.4.B matrix and terminal immutability.
-- `metrics_validator.py`: Workload-specific metric completeness validator enforcing exact §2.4.C requirements without OR loosening.
+- `metrics_validator.py`: Workload-specific metric completeness validator enforcing exact §2.4.C requirements with explicit metric applicability and zero arbitrary OR semantics.
 - `ledger.py`: `SQLiteExperimentLedger` managing schema creation, WAL/FK enforcement, database-level immutability triggers, baseline integrity triggers, atomic terminal transitions (`BEGIN IMMEDIATE ... COMMIT`), lineage verification, baseline registry management, and querying.
 - `__init__.py`: Public exports.
 
-## Test Suite & Verification Results (23 Tests)
+## Test Suite & Verification Results (24 Tests)
 
-`tests/test_memory_ledger_boundary.py` covers 23 comprehensive contract and regression scenarios:
+`tests/test_memory_ledger_boundary.py` covers 24 comprehensive contract and regression scenarios:
 1. `test_initialization_and_workspace_scoping`: Verifies memory tree creation and workspace scoping.
 2. `test_symlink_aware_workspace_containment`: Proves symlink traversal attacks outside workspace root fail closed with `WorkspaceContainmentError`.
 3. `test_hardware_constraints_roundtrip`: Verifies YAML serialization/deserialization.
@@ -110,16 +112,17 @@ The subsystem establishes the dual-layer persistence architecture:
 11. `test_lifecycle_transitions_enforce_matrix`: Verifies legal transitions and rejects illegal jumps.
 12. `test_terminal_immutability_completed`: Proves completed experiments reject all mutations.
 13. `test_terminal_immutability_failed_and_cancelled`: Proves failed and cancelled experiments reject all mutations.
-14. `test_metric_completeness_training_workload`: Proves training completion requires exact validation accuracy and all resource metrics.
-15. `test_metric_completeness_optimization_workload`: Proves optimization completion requires exact on-target latency/throughput/vram/power.
-16. `test_relational_lineage_and_foreign_keys`: Verifies `parent_exp_id` foreign keys and `ON DELETE RESTRICT`.
-17. `test_active_baseline_registry_isolation`: Verifies baseline designation updates registry without mutating experiment records.
-18. `test_concurrency_competing_writers`: Multi-threaded competing writers test under SQLite WAL.
-19. `test_cross_backend_isolation`: Explicit test verifying `experiments.sqlite ≠ checkpoints.sqlite`.
+14. `test_metric_contract_negative_tests_every_omitted_metric`: Proves completion requires exact validation accuracy and all resource metrics for every workload independently.
+15. `test_arbitrary_single_metric_cannot_satisfy_multi_metric_requirements`: Proves an arbitrary single populated metric cannot satisfy multi-metric requirements across evaluation, optimization, and benchmark.
+16. `test_missing_vs_zero_system_metrics`: Proves absence of persisted system metric remains None and not fabricated 0.0.
+17. `test_relational_lineage_and_foreign_keys`: Verifies `parent_exp_id` foreign keys and `ON DELETE RESTRICT`.
+18. `test_active_baseline_registry_isolation`: Verifies baseline designation updates registry without mutating experiment records.
+19. `test_concurrency_competing_writers`: Multi-threaded competing writers test under SQLite WAL.
 20. `test_terminal_child_records_db_level_immutability`: Proves direct SQL INSERT/UPDATE/DELETE on child tables of terminal experiments fail via SQLite triggers.
-21. `test_create_experiment_reproducibility_validation_independent_failures`: Tests independent validation failure for each reproducibility attribute.
+21. `test_create_experiment_reproducibility_validation_independent_failures`: Tests independent validation failure for each reproducibility attribute including metric applicability.
 22. `test_baseline_database_level_invariant_enforcement`: Proves direct SQL baseline inserts violating status or workload type fail via SQLite triggers.
-23. `test_concurrency_sequential_id_generation_regression`: 20-thread concurrency test verifying exactly 20 records, no duplicates, no gaps, 0 IntegrityErrors.
+23. `test_concurrency_strong_sequence_and_uniqueness`: 20-thread concurrency test verifying exactly 20 records, no duplicates, no gaps, 0 IntegrityErrors.
+24. `test_cross_backend_isolation`: Explicit test verifying `experiments.sqlite ≠ checkpoints.sqlite`.
 
 ## Quality Gates Summary
 
@@ -129,6 +132,6 @@ The subsystem establishes the dual-layer persistence architecture:
 | Ruff Format | `ruff format --check . [excludes]` | Pass (110 files already formatted) |
 | Mypy (Default) | `mypy cv_agent` | Pass (Success: no issues found in 51 source files) |
 | Mypy (Python 3.10) | `mypy --python-version 3.10 cv_agent/memory cv_agent/experiments` | Pass (Success: no issues found in 8 source files) |
-| Pytest Test Suite | `pytest -q` | Pass — 284 passed in 3.77s (0 warnings) |
+| Pytest Test Suite | `pytest -q` | Pass — 285 passed in 3.54s (0 warnings) |
 | CLI Health Check | `python -m cv_agent` | Pass — Runtime status OK |
 | Git Diff Check | `git diff --check` | Pass (Clean) |

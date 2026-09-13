@@ -991,3 +991,26 @@ Added 8 new regression tests, expanding the Phase 2D contract test suite to 35 t
 **Learned:** In SQLite, relying solely on Python-level state machine checks leaves child records vulnerable to raw SQL mutations (`DELETE FROM ... WHERE exp_id = ...`); database triggers `BEFORE INSERT/UPDATE/DELETE` referencing parent state establish immutable persistence guarantees that cannot be bypassed even by direct SQL access.
 
 **Left open:** Push hardened commit to `origin feature/ajmunna/phase-2f-memory-ledger`, monitor GitHub Actions CI on PR #46, and request Official PM re-review.
+
+---
+
+## 2026-09-14 — Phase 2F PR #46 Metric Applicability Contract Hardening (feature/ajmunna/phase-2f-memory-ledger)
+
+**Did:**
+1. Resolved Official PM Review blocker on PR #46 regarding metric applicability contracts: eliminated all remaining arbitrary `OR` semantics in `cv_agent/experiments/metrics_validator.py`.
+2. Explicitly represented metric applicability at the experiment boundary: added immutable `accuracy_metric_requirements: tuple[str, ...]` to `ExperimentSpec` and SQLite column `experiments.accuracy_metric_requirements`.
+3. Enforced fail-closed validation on `create_experiment()` and `complete_experiment()`:
+   - `evaluation`: Mandates non-empty `accuracy_metric_requirements` declaring applicable task-specific accuracy evidence (e.g. detection mAP/precision/recall, classification top-1/F1, segmentation IoU/dice). Completion strictly verifies EVERY declared metric is present (zero arbitrary OR). Mandates on-target system metrics when evaluating deployability `[P§12]`.
+   - `optimization`: Mandates non-empty `accuracy_metric_requirements` declaring post-optimization accuracy and tolerance evidence. Completion strictly verifies EVERY declared metric is present (zero arbitrary OR). Mandates all 5 on-target system metrics.
+   - `benchmark`: Mandates non-empty `accuracy_metric_requirements` declaring relevant accuracy verification evidence. Completion strictly verifies EVERY declared metric is present (zero arbitrary OR). Mandates all 5 on-target stream system metrics.
+   - `training`: Strictly requires all four validation accuracy metrics (`map_50`, `map_50_95`, `precision`, `recall`) AND all three training resource metrics (`gpu_hours`, `training_time_seconds`, `peak_vram_mb`), plus any additional declared accuracy requirements.
+4. Added dedicated regression tests (`test_arbitrary_single_metric_cannot_satisfy_multi_metric_requirements` and independent failure tests) proving that an arbitrary single populated metric cannot satisfy multi-metric requirements across evaluation, optimization, and benchmark. Total test suite expanded to 285 passed (24 Phase 2F contract & regression tests), 0 warnings.
+5. Updated `docs/reports/ISSUE-45-PHASE-2F-REPORT.md`, `STATUS.md`, and ran all local quality gates (Ruff check, Ruff format, Mypy default & Python 3.10, CLI health check, `git diff --check`).
+
+**Why:** ADR-0004 §2.4.C, `[P§12]`, `[P§25]`, `[P§29.4]`. Satisfies the Official PM's non-negotiable architectural ruling that task-specific, post-optimization tolerance, and benchmark verification evidence must be explicitly declared and validated without arbitrary OR semantics or blind universally mandatory assumptions.
+
+**Broke:** Nothing. All 285 pytest tests pass (0 warnings), Ruff check and format pass, Mypy passes on default and Python 3.10 targets, CLI health check passes, `git diff --check` clean.
+
+**Learned:** Workload-aware validation requires decoupling the declaration of applicable evidence from execution verification: by capturing `accuracy_metric_requirements` on the immutable `ExperimentSpec` and persisting it in SQLite, the ledger can strictly validate completion evidence without guessing task applicability or relying on arbitrary OR heuristics.
+
+**Left open:** Push hardened commit to `origin feature/ajmunna/phase-2f-memory-ledger`, update PR #46 description, monitor GitHub Actions CI on PR #46 across Python 3.10–3.13, and request Official PM final approval.

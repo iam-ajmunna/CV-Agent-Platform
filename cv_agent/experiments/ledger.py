@@ -131,6 +131,7 @@ class SQLiteExperimentLedger(ExperimentLedger):
                     precision TEXT NOT NULL,
                     config_uri TEXT NOT NULL,
                     config_hash TEXT NOT NULL,
+                    accuracy_metric_requirements TEXT NOT NULL,
                     parent_exp_id TEXT,
                     baseline_id TEXT,
                     approval_ref TEXT,
@@ -423,6 +424,34 @@ class SQLiteExperimentLedger(ExperimentLedger):
         if not isinstance(spec.precision, str) or not spec.precision.strip():
             raise ReproducibilityMetadataError("precision cannot be empty.")
 
+        # Validate accuracy_metric_requirements
+        if spec.workload_type in (
+            WorkloadType.EVALUATION,
+            WorkloadType.OPTIMIZATION,
+            WorkloadType.BENCHMARK,
+        ):
+            if (
+                not spec.accuracy_metric_requirements
+                or len(spec.accuracy_metric_requirements) == 0
+            ):
+                raise ReproducibilityMetadataError(
+                    f"accuracy_metric_requirements cannot be empty for workload {spec.workload_type.value!r}: "
+                    "applicable accuracy evidence must be explicitly declared."
+                )
+            for req in spec.accuracy_metric_requirements:
+                if not isinstance(req, str) or not req.strip():
+                    raise ReproducibilityMetadataError(
+                        f"Invalid metric requirement in accuracy_metric_requirements: {req!r}. "
+                        "All declared metrics must be non-empty strings."
+                    )
+        elif spec.workload_type == WorkloadType.TRAINING:
+            mand = {"map_50", "map_50_95", "precision", "recall"}
+            if not mand.issubset(set(spec.accuracy_metric_requirements)):
+                raise ReproducibilityMetadataError(
+                    f"Training workload requires accuracy_metric_requirements to contain {sorted(mand)}, "
+                    f"got {spec.accuracy_metric_requirements!r}."
+                )
+
     def create_experiment(self, spec: ExperimentSpec) -> ExperimentRecord:
         """Create a new experiment run in PROPOSED status [P§25]."""
         self._validate_spec_reproducibility(spec)
@@ -463,22 +492,26 @@ class SQLiteExperimentLedger(ExperimentLedger):
                 exp_id = self._generate_exp_id(conn)
                 w, h = spec.input_resolution
 
+                reqs_json = json.dumps(
+                    list(spec.accuracy_metric_requirements), ensure_ascii=False
+                )
+
                 conn.execute(
                     """
                     INSERT INTO experiments (
                         exp_id, name, hypothesis, workload_type, target,
                         model_name, model_variant, commit_sha, dataset_version,
                         seed, batch_size, input_resolution_w, input_resolution_h,
-                        precision, config_uri, config_hash, parent_exp_id,
-                        baseline_id, approval_ref, status, created_at, started_at,
-                        completed_at, job_id, error_message, notes
+                        precision, config_uri, config_hash, accuracy_metric_requirements,
+                        parent_exp_id, baseline_id, approval_ref, status, created_at,
+                        started_at, completed_at, job_id, error_message, notes
                     ) VALUES (
                         ?, ?, ?, ?, ?,
                         ?, ?, ?, ?,
                         ?, ?, ?, ?,
                         ?, ?, ?, ?,
                         ?, ?, ?, ?, ?,
-                        ?, ?, ?, ?
+                        ?, ?, ?, ?, ?
                     )
                     """,
                     (
@@ -498,6 +531,7 @@ class SQLiteExperimentLedger(ExperimentLedger):
                         spec.precision,
                         spec.config_uri,
                         spec.config_hash,
+                        reqs_json,
                         spec.parent_exp_id,
                         spec.baseline_id,
                         spec.approval_ref,
@@ -602,7 +636,7 @@ class SQLiteExperimentLedger(ExperimentLedger):
             conn.execute("BEGIN IMMEDIATE;")
             try:
                 cur = conn.execute(
-                    "SELECT status, workload_type FROM experiments WHERE exp_id = ?",
+                    "SELECT status, workload_type, accuracy_metric_requirements FROM experiments WHERE exp_id = ?",
                     (exp_id,),
                 )
                 row = cur.fetchone()
@@ -615,8 +649,15 @@ class SQLiteExperimentLedger(ExperimentLedger):
                 )
 
                 workload_type = WorkloadType(row["workload_type"])
+                raw_reqs = row["accuracy_metric_requirements"]
+                reqs = tuple(json.loads(raw_reqs)) if raw_reqs else ()
                 # Validate metric completeness per ADR-0004 §2.4.C
-                validate_metric_completeness(workload_type, accuracy, system)
+                validate_metric_completeness(
+                    workload_type,
+                    accuracy,
+                    system,
+                    accuracy_metric_requirements=reqs,
+                )
 
                 # Persist accuracy metrics
                 acc_dict: dict[str, float] = {}
@@ -946,6 +987,9 @@ class SQLiteExperimentLedger(ExperimentLedger):
                     checksums=chk_map if chk_map else None,
                 )
 
+            raw_reqs = row["accuracy_metric_requirements"]
+            reqs = tuple(json.loads(raw_reqs)) if raw_reqs else ()
+
             spec = ExperimentSpec(
                 name=str(row["name"]),
                 hypothesis=str(row["hypothesis"]),
@@ -964,6 +1008,7 @@ class SQLiteExperimentLedger(ExperimentLedger):
                 precision=str(row["precision"]),
                 config_uri=str(row["config_uri"]),
                 config_hash=str(row["config_hash"]),
+                accuracy_metric_requirements=reqs,
                 parent_exp_id=row["parent_exp_id"],
                 baseline_id=row["baseline_id"],
                 approval_ref=row["approval_ref"],

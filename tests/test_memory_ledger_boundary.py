@@ -40,6 +40,7 @@ from cv_agent.experiments import (
     SQLiteExperimentLedger,
     SystemMetrics,
     WorkloadType,
+    validate_metric_completeness,
 )
 from cv_agent.memory import (
     ArchitecturalDecision,
@@ -71,7 +72,22 @@ def _sample_spec(
     parent_exp_id: str | None = None,
     baseline_id: str | None = None,
     approval_ref: str | None = None,
+    accuracy_metric_requirements: tuple[str, ...] | None = None,
 ) -> ExperimentSpec:
+    if accuracy_metric_requirements is None:
+        if workload_type == WorkloadType.TRAINING:
+            reqs = ("map_50", "map_50_95", "precision", "recall")
+        elif workload_type == WorkloadType.OPTIMIZATION:
+            reqs = ("map_50", "map_50_95")
+        elif workload_type == WorkloadType.EVALUATION:
+            reqs = ("map_50", "precision", "recall")
+        elif workload_type == WorkloadType.BENCHMARK:
+            reqs = ("precision",)
+        else:
+            reqs = ()
+    else:
+        reqs = accuracy_metric_requirements
+
     return ExperimentSpec(
         name=name,
         hypothesis=hypothesis,
@@ -95,6 +111,7 @@ def _sample_spec(
         parent_exp_id=parent_exp_id,
         baseline_id=baseline_id,
         approval_ref=approval_ref,
+        accuracy_metric_requirements=reqs,
     )
 
 
@@ -452,6 +469,49 @@ class TestExperimentLedgerBoundary:
             ledger.create_experiment(_sample_spec(batch_size=0))
         assert "Invalid batch_size" in str(exc.value)
 
+        # 9. Empty accuracy_metric_requirements for evaluation
+        with pytest.raises(ReproducibilityMetadataError) as exc:
+            ledger.create_experiment(
+                _sample_spec(
+                    workload_type=WorkloadType.EVALUATION,
+                    accuracy_metric_requirements=(),
+                )
+            )
+        assert "accuracy_metric_requirements cannot be empty" in str(exc.value)
+
+        # 10. Empty accuracy_metric_requirements for optimization
+        with pytest.raises(ReproducibilityMetadataError) as exc:
+            ledger.create_experiment(
+                _sample_spec(
+                    workload_type=WorkloadType.OPTIMIZATION,
+                    accuracy_metric_requirements=(),
+                )
+            )
+        assert "accuracy_metric_requirements cannot be empty" in str(exc.value)
+
+        # 11. Empty accuracy_metric_requirements for benchmark
+        with pytest.raises(ReproducibilityMetadataError) as exc:
+            ledger.create_experiment(
+                _sample_spec(
+                    workload_type=WorkloadType.BENCHMARK,
+                    accuracy_metric_requirements=(),
+                )
+            )
+        assert "accuracy_metric_requirements cannot be empty" in str(exc.value)
+
+        # 12. Training missing one of 4 mandatory metrics
+        with pytest.raises(ReproducibilityMetadataError) as exc:
+            ledger.create_experiment(
+                _sample_spec(
+                    workload_type=WorkloadType.TRAINING,
+                    accuracy_metric_requirements=("map_50", "precision", "recall"),
+                )
+            )
+        assert (
+            "Training workload requires accuracy_metric_requirements to contain"
+            in str(exc.value)
+        )
+
     def test_approval_ref_format_validation(self, tmp_path: Path) -> None:
         ledger = SQLiteExperimentLedger(tmp_path)
         valid_spec = _sample_spec(approval_ref="op-1234:req-5678")
@@ -693,7 +753,11 @@ class TestExperimentLedgerBoundary:
         )
 
         # --- WorkloadType.OPTIMIZATION ---
-        full_opt_acc = AccuracyMetrics(map_50=0.84)
+        opt_spec = _sample_spec(
+            workload_type=WorkloadType.OPTIMIZATION,
+            accuracy_metric_requirements=("map_50", "map_50_95"),
+        )
+        full_opt_acc = AccuracyMetrics(map_50=0.84, map_50_95=0.64)
         full_opt_sys = SystemMetrics(
             peak_vram_mb=2048.0,
             peak_ram_mb=4096.0,
@@ -704,19 +768,21 @@ class TestExperimentLedgerBoundary:
         )
 
         def _assert_opt_fails(acc: AccuracyMetrics, sys: SystemMetrics, token: str):
-            r = ledger.create_experiment(
-                _sample_spec(workload_type=WorkloadType.OPTIMIZATION)
-            )
+            r = ledger.create_experiment(opt_spec)
             ledger.transition_status(r.exp_id, ExperimentStatus.RUNNING)
             with pytest.raises(IncompleteMetricsError) as ex:
                 ledger.complete_experiment(r.exp_id, acc, sys, art)
             assert token in str(ex.value)
 
-        # 8. Missing optimization accuracy
+        # 8. Missing map_50
         _assert_opt_fails(
-            AccuracyMetrics(), full_opt_sys, "post-optimization accuracy metric"
+            AccuracyMetrics(map_50_95=0.64), full_opt_sys, "accuracy.map_50"
         )
-        # 9. Missing latency_inference_ms (No OR!)
+        # 9. Missing map_50_95 (No arbitrary OR!)
+        _assert_opt_fails(
+            AccuracyMetrics(map_50=0.84), full_opt_sys, "accuracy.map_50_95"
+        )
+        # 10. Missing latency_inference_ms (No OR!)
         _assert_opt_fails(
             full_opt_acc,
             SystemMetrics(
@@ -728,7 +794,7 @@ class TestExperimentLedgerBoundary:
             ),
             "system.latency_inference_ms",
         )
-        # 10. Missing latency_e2e_ms (No OR!)
+        # 11. Missing latency_e2e_ms (No OR!)
         _assert_opt_fails(
             full_opt_acc,
             SystemMetrics(
@@ -740,7 +806,7 @@ class TestExperimentLedgerBoundary:
             ),
             "system.latency_e2e_ms",
         )
-        # 11. Missing throughput_fps
+        # 12. Missing throughput_fps
         _assert_opt_fails(
             full_opt_acc,
             SystemMetrics(
@@ -752,7 +818,7 @@ class TestExperimentLedgerBoundary:
             ),
             "system.throughput_fps",
         )
-        # 12. Missing peak_vram_mb
+        # 13. Missing peak_vram_mb
         _assert_opt_fails(
             full_opt_acc,
             SystemMetrics(
@@ -764,7 +830,7 @@ class TestExperimentLedgerBoundary:
             ),
             "system.peak_vram_mb",
         )
-        # 13. Missing power_draw_watts
+        # 14. Missing power_draw_watts
         _assert_opt_fails(
             full_opt_acc,
             SystemMetrics(
@@ -778,7 +844,11 @@ class TestExperimentLedgerBoundary:
         )
 
         # --- WorkloadType.BENCHMARK ---
-        full_bench_acc = AccuracyMetrics(precision=0.88)
+        bench_spec = _sample_spec(
+            workload_type=WorkloadType.BENCHMARK,
+            accuracy_metric_requirements=("precision", "recall"),
+        )
+        full_bench_acc = AccuracyMetrics(precision=0.88, recall=0.84)
         full_bench_sys = SystemMetrics(
             peak_vram_mb=2048.0,
             peak_ram_mb=4096.0,
@@ -789,19 +859,21 @@ class TestExperimentLedgerBoundary:
         )
 
         def _assert_bench_fails(acc: AccuracyMetrics, sys: SystemMetrics, token: str):
-            r = ledger.create_experiment(
-                _sample_spec(workload_type=WorkloadType.BENCHMARK)
-            )
+            r = ledger.create_experiment(bench_spec)
             ledger.transition_status(r.exp_id, ExperimentStatus.RUNNING)
             with pytest.raises(IncompleteMetricsError) as ex:
                 ledger.complete_experiment(r.exp_id, acc, sys, art)
             assert token in str(ex.value)
 
-        # 14. Missing benchmark accuracy
+        # 15. Missing recall
         _assert_bench_fails(
-            AccuracyMetrics(), full_bench_sys, "accuracy verification metric"
+            AccuracyMetrics(precision=0.88), full_bench_sys, "accuracy.recall"
         )
-        # 15. Missing benchmark latency_inference_ms
+        # 16. Missing precision
+        _assert_bench_fails(
+            AccuracyMetrics(recall=0.84), full_bench_sys, "accuracy.precision"
+        )
+        # 17. Missing benchmark latency_inference_ms
         _assert_bench_fails(
             full_bench_acc,
             SystemMetrics(
@@ -812,7 +884,7 @@ class TestExperimentLedgerBoundary:
             ),
             "system.latency_inference_ms",
         )
-        # 16. Missing benchmark latency_e2e_ms
+        # 18. Missing benchmark latency_e2e_ms
         _assert_bench_fails(
             full_bench_acc,
             SystemMetrics(
@@ -824,11 +896,155 @@ class TestExperimentLedgerBoundary:
             "system.latency_e2e_ms",
         )
 
+        # --- WorkloadType.EVALUATION ---
+        eval_spec = _sample_spec(
+            workload_type=WorkloadType.EVALUATION,
+            accuracy_metric_requirements=("map_50", "precision", "recall"),
+        )
+        full_eval_acc = AccuracyMetrics(map_50=0.82, precision=0.85, recall=0.80)
+        full_eval_sys = SystemMetrics(
+            throughput_fps=60.0, latency_inference_ms=15.0, peak_vram_mb=2048.0
+        )
+
+        def _assert_eval_fails(acc: AccuracyMetrics, sys: SystemMetrics, token: str):
+            r = ledger.create_experiment(eval_spec)
+            ledger.transition_status(r.exp_id, ExperimentStatus.RUNNING)
+            with pytest.raises(IncompleteMetricsError) as ex:
+                ledger.complete_experiment(r.exp_id, acc, sys, art)
+            assert token in str(ex.value)
+
+        # 19. Missing precision in evaluation
+        _assert_eval_fails(
+            AccuracyMetrics(map_50=0.82, recall=0.80),
+            full_eval_sys,
+            "accuracy.precision",
+        )
+        # 20. Missing recall in evaluation
+        _assert_eval_fails(
+            AccuracyMetrics(map_50=0.82, precision=0.85),
+            full_eval_sys,
+            "accuracy.recall",
+        )
+        # 21. Missing throughput_fps in deployability evaluation
+        _assert_eval_fails(
+            full_eval_acc,
+            SystemMetrics(latency_inference_ms=15.0, peak_vram_mb=2048.0),
+            "system.throughput_fps",
+        )
+        # 22. Missing latency_inference_ms in deployability evaluation
+        _assert_eval_fails(
+            full_eval_acc,
+            SystemMetrics(throughput_fps=60.0, peak_vram_mb=2048.0),
+            "system.latency_inference_ms",
+        )
+        # 23. Missing peak_vram_mb in deployability evaluation
+        _assert_eval_fails(
+            full_eval_acc,
+            SystemMetrics(throughput_fps=60.0, latency_inference_ms=15.0),
+            "system.peak_vram_mb",
+        )
+
+    def test_arbitrary_single_metric_cannot_satisfy_multi_metric_requirements(
+        self, tmp_path: Path
+    ) -> None:
+        """PM Ruling: Arbitrary single populated metric cannot satisfy multi-metric requirements (zero arbitrary OR)."""
+        ledger = SQLiteExperimentLedger(tmp_path)
+        art = ArtifactManifest(weights_uri="weights.pt", engine_uri="engine.trt")
+
+        # 1. EVALUATION with multi-metric requirements: ("map_50", "precision", "recall")
+        eval_spec = _sample_spec(
+            workload_type=WorkloadType.EVALUATION,
+            accuracy_metric_requirements=("map_50", "precision", "recall"),
+        )
+        r_eval = ledger.create_experiment(eval_spec)
+        ledger.transition_status(r_eval.exp_id, ExperimentStatus.RUNNING)
+
+        eval_sys = SystemMetrics(
+            throughput_fps=60.0, latency_inference_ms=15.0, peak_vram_mb=2048.0
+        )
+        # Providing ONLY map_50 fails (precision and recall still missing)
+        with pytest.raises(IncompleteMetricsError) as ex:
+            ledger.complete_experiment(
+                r_eval.exp_id, AccuracyMetrics(map_50=0.82), eval_sys, art
+            )
+        assert "accuracy.precision" in str(ex.value)
+        assert "accuracy.recall" in str(ex.value)
+
+        # 2. OPTIMIZATION with multi-metric requirements: ("map_50", "accuracy_drop_tolerance")
+        opt_spec = _sample_spec(
+            workload_type=WorkloadType.OPTIMIZATION,
+            accuracy_metric_requirements=("map_50", "accuracy_drop_tolerance"),
+        )
+        r_opt = ledger.create_experiment(opt_spec)
+        ledger.transition_status(r_opt.exp_id, ExperimentStatus.RUNNING)
+
+        opt_sys = SystemMetrics(
+            peak_vram_mb=2048.0,
+            peak_ram_mb=4096.0,
+            latency_inference_ms=12.5,
+            latency_e2e_ms=18.0,
+            throughput_fps=80.0,
+            power_draw_watts=12.0,
+        )
+        # Providing ONLY map_50 fails (requires tolerance too!)
+        with pytest.raises(IncompleteMetricsError) as ex:
+            ledger.complete_experiment(
+                r_opt.exp_id, AccuracyMetrics(map_50=0.82), opt_sys, art
+            )
+        assert "accuracy.accuracy_drop_tolerance" in str(ex.value)
+
+        # Providing both succeeds
+        completed_opt = ledger.complete_experiment(
+            r_opt.exp_id,
+            AccuracyMetrics(
+                map_50=0.82,
+                additional_metrics={"accuracy_drop_tolerance": 0.008},
+            ),
+            opt_sys,
+            art,
+        )
+        assert completed_opt.status == ExperimentStatus.COMPLETED
+
+        # 3. Direct validate_metric_completeness call with empty accuracy_metric_requirements fails closed
+        with pytest.raises(IncompleteMetricsError) as ex_eval:
+            validate_metric_completeness(
+                WorkloadType.EVALUATION,
+                AccuracyMetrics(map_50=0.90),
+                eval_sys,
+                accuracy_metric_requirements=(),
+            )
+        assert "No task-specific accuracy evidence declared" in str(ex_eval.value)
+
+        with pytest.raises(IncompleteMetricsError) as ex_opt:
+            validate_metric_completeness(
+                WorkloadType.OPTIMIZATION,
+                AccuracyMetrics(map_50=0.90),
+                opt_sys,
+                accuracy_metric_requirements=(),
+            )
+        assert "No post-optimization accuracy/tolerance evidence declared" in str(
+            ex_opt.value
+        )
+
+        with pytest.raises(IncompleteMetricsError) as ex_bench:
+            validate_metric_completeness(
+                WorkloadType.BENCHMARK,
+                AccuracyMetrics(precision=0.90),
+                opt_sys,
+                accuracy_metric_requirements=(),
+            )
+        assert "No relevant accuracy verification evidence declared" in str(
+            ex_bench.value
+        )
+
     def test_missing_vs_zero_system_metrics(self, tmp_path: Path) -> None:
         """PM Finding 4: Absence of persisted system metric must remain None, not fabricated 0.0."""
         ledger = SQLiteExperimentLedger(tmp_path)
         rec = ledger.create_experiment(
-            _sample_spec(workload_type=WorkloadType.OPTIMIZATION)
+            _sample_spec(
+                workload_type=WorkloadType.OPTIMIZATION,
+                accuracy_metric_requirements=("map_50",),
+            )
         )
         ledger.transition_status(rec.exp_id, ExperimentStatus.RUNNING)
 

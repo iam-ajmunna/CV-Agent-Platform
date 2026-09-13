@@ -108,6 +108,21 @@ class ExperimentSpec:
     parent_exp_id: str | None = None
     baseline_id: str | None = None
     approval_ref: str | None = None
+    accuracy_metric_requirements: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if isinstance(self.accuracy_metric_requirements, (list, tuple)):
+            reqs = tuple(self.accuracy_metric_requirements)
+        elif self.accuracy_metric_requirements is None:
+            reqs = ()
+        else:
+            reqs = tuple(self.accuracy_metric_requirements)
+
+        # Default for training workload if unspecified
+        if self.workload_type == WorkloadType.TRAINING and not reqs:
+            reqs = ("map_50", "map_50_95", "precision", "recall")
+
+        object.__setattr__(self, "accuracy_metric_requirements", reqs)
 
 
 @dataclass(frozen=True)
