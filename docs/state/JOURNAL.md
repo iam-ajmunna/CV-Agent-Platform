@@ -870,3 +870,30 @@ Added 8 new regression tests, expanding the Phase 2D contract test suite to 35 t
 **Learned:** Enforcing fail-closed authorization and strict candidate discovery mapping at untrusted protocol boundaries prevents dynamic endpoints from bypassing capability governance.
 
 **Left open:** Scoping and architectural design for Phase 2E (ADR-0003 Orchestration Subsystem) under Official PM direction.
+
+---
+
+## 2026-09-13 — Phase 2E (ADR-0003 Orchestration Subsystem) Implementation (feature/ajmunna/phase-2e-orchestration)
+
+**Did:**
+1. Created short-lived branch `feature/ajmunna/phase-2e-orchestration` from `main` to implement Issue #43 per frozen ADR-0003 and the 8 non-negotiable PM implementation gates.
+2. Verified LangGraph dependency compatibility (`langgraph>=0.2,<2` configured; `1.2.11` installed and verified).
+3. Implemented pure typed contracts (`cv_agent/orchestration/contracts.py`): authoritative enums (`LifecycleStatus`, `OperationStatus`, `ApprovalStatus`, `ReconciliationOutcome` using `(str, Enum)` for Python 3.10–3.13 compatibility), immutable Pydantic and dataclass models (`ExecutionLease`, `OperationPayloadEnvelope`, `OperationIntent`, `ApprovalRequest`, `ApprovalDecision`, `OrchestrationEvent`, `OrchestratorConfig`), and protocol abstractions (`OrchestrationStore`, `OperationReconciler`).
+4. Implemented canonicalization and hashing (`cv_agent/orchestration/canonicalization.py`): NFC Unicode normalization, recursive key sorting, set sorting, numerical normalization, stripping of observational metadata (`_OBSERVATIONAL_KEYS`), SHA-256 computation (`compute_payload_hash`), and envelope construction (`build_operation_envelope`).
+5. Implemented authoritative state machines (`cv_agent/orchestration/state_machine.py`): transition functions `validate_lifecycle_transition()` and `validate_operation_transition()`. Invariant 17 strictly enforced (`EVALUATING` is terminal-adjacent, exits only to `COMPLETED`, `FAILED`, `PAUSED`; transition from `EVALUATING` to `EXECUTING` is illegal and raises `InvalidStateTransitionError`).
+6. Implemented durable store (`cv_agent/orchestration/store.py`): `SQLiteOrchestrationStore` managing `.cv_agent/state/checkpoints.sqlite` with WAL mode, foreign keys (`PRAGMA foreign_keys = ON`), atomic SQL CAS lease fencing (`UPDATE leases ... WHERE session_id = ? AND fencing_epoch = ?`), transactional monotonic sequence allocation per session, checkpoint schema version validation (`CheckpointCorruptionError`), and conservative false-negative retention pruning (protecting active leases, pending approvals, and active operations; `experiments.sqlite` completely untouched).
+7. Implemented lease fencing coordinator (`cv_agent/orchestration/fencing.py`): `LeaseManager` providing `acquire()`, `renew()`, `verify_lease()`, and `session_scope()` context manager.
+8. Implemented persistent approvals (`cv_agent/orchestration/approvals.py`): `ApprovalManager` creating requests and verifying the complete 4-tuple security binding (`operation_version`, `canonical_payload_hash`, `policy_version`, `resource_scope`). Fails closed on any mismatch, expiration, or rejection (`ApprovalSecurityError`).
+9. Implemented side-effect reconciliation (`cv_agent/orchestration/reconciliation.py`): `ReconciliationCoordinator` handling ambiguous operations. Preserves tri-state outcomes (`CONFIRMED_COMPLETED`, `CONFIRMED_NOT_SUBMITTED`, `CONFIRMED_FAILED`, `UNRESOLVED`). `UNRESOLVED` never defaults to success or failure.
+10. Implemented LangGraph runtime adapter (`cv_agent/orchestration/graph.py`): `create_orchestration_graph()` constructing a `StateGraph(OrchestrationGraphState)` with nodes `initialize`, `plan`, `await_approval`, `execute`, `evaluate`, configured with `interrupt_before=["await_approval"]` for human-in-the-loop approvals, recording events into SQLite store under active lease.
+11. Implemented comprehensive test suite (`tests/test_orchestration_boundary.py`): 38 contract and regression tests covering all 8 PM implementation gates. Expanded total test suite to 248 passing tests (0 warnings).
+12. Updated CLI health check in `cv_agent/__main__.py` to display LangGraph status and version.
+
+**Why:** `[P§19]`–`[P§22]`, `[P§24]`, `[P§34]` — establishes the durable state management, transactional lifecycle progression, monotonic event logging, CAS lease fencing, persistent approval verification, and side-effect reconciliation substrate for autonomous computer vision engineering workflows.
+
+**Broke:** Nothing. All 248 pytest tests pass (0 warnings), Ruff lint and format checks pass, Mypy passes on default and Python 3.10 targets, CLI health check passes, `git diff --check` clean.
+
+**Learned:** Enforcing atomic compare-and-swap directly in SQL (`UPDATE ... WHERE fencing_epoch = ...`) eliminates race windows between concurrent worker processes, ensuring that distributed nodes cannot accidentally mutate state on stale leases.
+
+**Left open:** Push branch `feature/ajmunna/phase-2e-orchestration`, open PR linked to Issue #43, verify GitHub Actions CI matrix across Python 3.10–3.13, and submit for Official PM review.
+
