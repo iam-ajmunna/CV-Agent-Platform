@@ -1196,3 +1196,36 @@ Added 8 new regression tests, expanding the Phase 2D contract test suite to 35 t
 **Learned:** Total ordering across resolution candidates must incorporate both candidate requirement specificity and target capability/compute specificity in addition to lexicographical identifiers to guarantee deterministic, permutation-invariant resolution. Missing metadata must unconditionally fail closed when requirements are declared.
 
 **Left open:** Ready for final PM adversarial re-review on PR #50 and squash-merge authorization.
+
+---
+
+## 2026-09-14 — Phase 2H Milestone Closure: ADR-0007 Skills Architecture & NVIDIA Capability Discovery Accepted & Merged (`main`)
+
+**Did:**
+1. Official PM completed final adversarial review of PR #50; verified all blockers and residual findings resolved:
+   - **B1/B3:** Authoritative ADR-0001 capability enforcement mandatory and fail-closed.
+   - **B2:** Sole `AvailabilityState` ownership; zero duplicate lifecycle state machines.
+   - **I1:** Closed `SkillExecutionStatus` with async `DISPATCHED` / `ActiveJobHandoff` recovery owned by ADR-0003 Orchestration.
+   - **I2:** Semantic target validation with numeric CUDA compute, `HardwareClass` subsumption hierarchy, and C-identifier env var validation.
+   - **Gate 5 / D-022:** Local macOS host returns `KNOWN_BUT_UNAVAILABLE` with zero silent CPU fallback.
+   - **B4:** Mandatory tool dependency verification in `SkillResolver` failing closed if tools unverified.
+   - **I3:** Fail-closed declarative prerequisite evaluation even when target metadata is absent.
+   - **I4:** Bounded supported JSON Schema subset with fail-closed rejection of unsupported constructs and null support.
+   - **I5:** Total deterministic order-independent candidate and target resolution across all buckets and ties.
+   - **I6:** Ephemeral `DiscoveryCache` with capability index cleanup on re-registration.
+   - **I7:** Strict canonical regex validation without whitespace stripping.
+   - **I8:** DeepStream and TAO target prerequisites and hardware classes.
+   - **I9:** Defensive immutability across resolution and execution contracts.
+2. Official PM squash-merged PR #50 into `main` (merge commit: `65856ff8cd52a90ea4223003aff2fa32813c06b3`).
+3. Local and remote branch `feature/ajmunna/phase-2h-skills-architecture` deleted; Issue #49 closed.
+4. Recorded architectural decision `D-053` in `docs/state/DECISIONS.md`.
+5. Synchronized rolling state in `docs/state/STATUS.md` (46 lines, present tense, health: green).
+6. Full test suite passing at 356 items, Ruff check/format clean, Mypy clean on `cv_agent` (66 source files), and `git diff --check` clean.
+
+**Why:** `[P§15]`, `[P§23]`, `[P§24]`, `[P§29.4]`, `[P§29.9]`, `[P§34]`, and frozen ADR-0007 (`D-025`, `D-040`, `D-053`). Formally incorporates the procedural skills and NVIDIA capability discovery layer into the authoritative `main` trunk and closes Issue #49 per the single-trunk operating model.
+
+**Broke:** Nothing broken. 356 tests pass across 17 test modules, all quality gates green.
+
+**Learned:** Rigorous adversarial testing of candidate resolution must explicitly test input order permutations across all priority buckets and absent metadata conditions to ensure true fail-closed deterministic semantics.
+
+**Left open:** Phase 2H formally accepted and closed. Next architectural milestone is Phase 2I, subject to pre-implementation architecture review before runtime implementation.
