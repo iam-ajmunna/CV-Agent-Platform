@@ -1510,3 +1510,34 @@ Remediated the four findings from the Official PM adversarial review on PR #57:
 **Learned:** Subsystem launchers must avoid local target defaulting just as strictly as identity synthesis, and ranking keys must be explicitly composed when tuple tie-break directions differ across fields.
 
 **Left open:** Pushing remediation commit to `feature/ajmunna/phase-2k-training-subsystem` for PR #57 and awaiting second Official PM review.
+
+---
+
+## 2026-09-14 — Phase 2K Second Adversarial Review Remediation (PR #57)
+
+**Did:**
+Remediated both residual architectural concerns identified in the second Official PM adversarial review of PR #57:
+1. **B4: Mandatory `ToolExecutor` on `launch()` (`cv_agent/training/launcher.py`):**
+   - Updated `TrainingLauncher` protocol and `DefaultTrainingLauncher.launch()` signature to require `tool_executor: ToolExecutor` as a mandatory positional argument.
+   - Added fail-closed check `if tool_executor is None: raise TrainingExecutionError(...)`.
+   - Execution is unconditionally dispatched through ADR-0005: `launch()` cannot advance `LAUNCHING -> RUNNING` or return a `TrainingJobRecord` without actual tool dispatch.
+   - If `tool_executor` returns any non-success status, the launcher transitions `LAUNCHING -> FAILED` and raises `TrainingExecutionError`.
+2. **B5: Mandatory Authoritative `ToolId` on `abort_request()` (`cv_agent/training/launcher.py`):**
+   - Updated `TrainingLauncher` protocol and `DefaultTrainingLauncher.abort_request()` signature to require `tool_id: ToolId` as a mandatory positional argument.
+   - Removed unverified default `ToolId("cv.train.cancel")`.
+   - Added fail-closed check `if tool_id is None or not str(tool_id).strip(): raise TrainingExecutionError(...)`.
+3. **Adversarial Regression Tests Added (`tests/test_training_boundary.py`):**
+   - Updated existing boundary tests to supply mandatory `tool_executor` via `_make_mock_executor()` and explicit `tool_id`.
+   - Added `test_launch_requires_mandatory_tool_executor` asserting fail-closed rejection when `tool_executor=None`.
+   - Added `test_launch_fails_closed_on_failed_tool_execution` asserting transition `LAUNCHING -> FAILED` and exception when dispatch fails.
+   - Added `test_abort_request_requires_authoritative_tool_id` asserting fail-closed rejection when `tool_id=None`.
+   - Expanded test suite to 462 total passing tests.
+
+**Why:** Satisfies ADR-0005, ADR-0010, and PM architectural ruling: execution launchers must never advance to `RUNNING` without dispatching through the transport executor, and cancellation must not manufacture unestablished tool identities.
+
+**Broke:** Nothing broken. All 462 tests pass; Ruff lint/format clean; Mypy clean; package build clean; security audit clean.
+
+**Learned:** Making the transport executor strictly mandatory eliminates "mock-less" execution paths where preparation masquerades as dispatch, ensuring that runtime state transitions strictly reflect physical transport outcomes.
+
+**Left open:** Push remediation commit to `feature/ajmunna/phase-2k-training-subsystem` for PR #57, verify GitHub Actions CI matrix across Python 3.10–3.13, and request final PM review and merge disposition.
+

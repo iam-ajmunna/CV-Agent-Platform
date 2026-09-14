@@ -80,20 +80,24 @@ class TrainingLauncher(Protocol):
         operation_identity: OperationIdentity,
         approval_request: ApprovalRequest,
         approval_decision: ApprovalDecision,
+        tool_executor: ToolExecutor,
+        *,
         target_id: TargetId | None = None,
         job_id: TrainingJobId | None = None,
-        tool_executor: ToolExecutor | None = None,
     ) -> TrainingJobRecord:
-        """Dispatch an approved training plan to ADR-0005."""
+        """Dispatch an approved training plan to ADR-0005.
+
+        Execution transport is mandatory: tool_executor must be supplied.
+        """
         ...
 
     def abort_request(
         self,
         job_id: TrainingJobId,
         target_id: TargetId,
+        tool_id: ToolId,
         tool_executor: ToolExecutor,
         *,
-        cancel_tool_id: ToolId | None = None,
         execution_id: ExecutionId | None = None,
         timeout_seconds: int = 60,
     ) -> bool:
@@ -376,9 +380,10 @@ class DefaultTrainingLauncher:
         operation_identity: OperationIdentity,
         approval_request: ApprovalRequest,
         approval_decision: ApprovalDecision,
+        tool_executor: ToolExecutor,
+        *,
         target_id: TargetId | None = None,
         job_id: TrainingJobId | None = None,
-        tool_executor: ToolExecutor | None = None,
     ) -> TrainingJobRecord:
         """Launch training workload by verifying approval and delegating execution transport to ADR-0005.
 
@@ -386,8 +391,14 @@ class DefaultTrainingLauncher:
         1. Approval verification is performed strictly against authoritative ADR-0003 credentials.
         2. Target identity is derived from the authoritative approval context if not explicitly passed.
            Local synthesis (such as inventing 'default') is strictly prohibited.
-        3. A unique TrainingJobId is generated for each execution launch, preserving plan_id for lineage.
+        3. ToolExecutor is mandatory; launch() cannot advance to RUNNING without actual ADR-0005 dispatch.
+        4. A unique TrainingJobId is generated for each execution launch, preserving plan_id for lineage.
         """
+        if tool_executor is None:
+            raise TrainingExecutionError(
+                "ToolExecutor is mandatory for launch() to delegate execution transport to ADR-0005"
+            )
+
         self.validate_plan(plan)
         self.verify_approval(
             plan=plan,
@@ -422,18 +433,16 @@ class DefaultTrainingLauncher:
         invocation = self.prepare_invocation(
             plan, tool_id, target_id=resolved_target_id
         )
-        execution_id: ExecutionId | None = None
 
-        if tool_executor is not None:
-            result = self._dispatch_invocation(tool_executor, invocation)
-            execution_id = result.execution_id
-            if result.status != ToolExecutionStatus.SUCCESS:
-                validate_training_job_transition(
-                    TrainingJobStatus.LAUNCHING, TrainingJobStatus.FAILED
-                )
-                raise TrainingExecutionError(
-                    f"Tool execution failed for tool {tool_id!r}: {result.error_message}"
-                )
+        result = self._dispatch_invocation(tool_executor, invocation)
+        execution_id = result.execution_id
+        if result.status != ToolExecutionStatus.SUCCESS:
+            validate_training_job_transition(
+                TrainingJobStatus.LAUNCHING, TrainingJobStatus.FAILED
+            )
+            raise TrainingExecutionError(
+                f"Tool execution failed for tool {tool_id!r}: {result.error_message}"
+            )
 
         validate_training_job_transition(
             TrainingJobStatus.LAUNCHING, TrainingJobStatus.RUNNING
@@ -460,9 +469,9 @@ class DefaultTrainingLauncher:
         self,
         job_id: TrainingJobId,
         target_id: TargetId,
+        tool_id: ToolId,
         tool_executor: ToolExecutor,
         *,
-        cancel_tool_id: ToolId | None = None,
         execution_id: ExecutionId | None = None,
         timeout_seconds: int = 60,
     ) -> bool:
@@ -471,15 +480,18 @@ class DefaultTrainingLauncher:
             raise TrainingExecutionError(
                 "TargetId is required to emit cancellation signal via ADR-0005"
             )
+        if tool_id is None or not str(tool_id).strip():
+            raise TrainingExecutionError(
+                "Authoritative ToolId is required to emit cancellation signal via ADR-0005"
+            )
         if tool_executor is None:
             raise TrainingExecutionError(
                 "ToolExecutor is required to emit cancellation signal via ADR-0005"
             )
 
-        tool = cancel_tool_id or ToolId("cv.train.cancel")
         exec_id = execution_id or ExecutionId(f"exec-abort-{uuid.uuid4().hex[:12]}")
         invocation = ToolInvocation(
-            tool_id=tool,
+            tool_id=tool_id,
             parameters={"job_id": str(job_id)},
             target_id=target_id,
             execution_id=exec_id,

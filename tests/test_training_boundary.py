@@ -194,6 +194,30 @@ def _make_approval_context(
     return op_identity, app_request, app_decision
 
 
+def _make_mock_executor(
+    status: ToolExecutionStatus = ToolExecutionStatus.SUCCESS,
+    error_message: str | None = None,
+) -> Any:
+    class _MockExecutor:
+        def __init__(self) -> None:
+            self.invocations: list[ToolInvocation] = []
+
+        async def execute(self, invocation: ToolInvocation) -> ToolResult:
+            self.invocations.append(invocation)
+            return ToolResult(
+                tool_id=invocation.tool_id,
+                execution_id=invocation.execution_id,
+                target_id=invocation.target_id,
+                status=status,
+                error_message=error_message,
+            )
+
+        async def probe(self, tool: Any, target: Any) -> Any:
+            raise NotImplementedError
+
+    return _MockExecutor()
+
+
 # =============================================================================
 # Test 1: Training cannot construct an OperationIdentity
 # =============================================================================
@@ -225,6 +249,7 @@ def test_missing_authoritative_operation_identity() -> None:
             operation_identity=None,  # type: ignore[arg-type]
             approval_request=app_req,
             approval_decision=app_dec,
+            tool_executor=_make_mock_executor(),
         )
 
 
@@ -253,6 +278,7 @@ def test_wrong_operation_version() -> None:
             operation_identity=mismatched_op_id,
             approval_request=app_req,
             approval_decision=app_dec,
+            tool_executor=_make_mock_executor(),
         )
 
 
@@ -281,6 +307,7 @@ def test_wrong_canonical_payload_hash() -> None:
             operation_identity=tampered_op_id,
             approval_request=app_req,
             approval_decision=app_dec,
+            tool_executor=_make_mock_executor(),
         )
 
 
@@ -311,6 +338,7 @@ def test_wrong_target_identity() -> None:
             operation_identity=mismatched_op_id,
             approval_request=app_req,
             approval_decision=app_dec,
+            tool_executor=_make_mock_executor(),
         )
 
 
@@ -336,6 +364,7 @@ def test_cross_plan_approval_replay() -> None:
             operation_identity=op_id_a,
             approval_request=app_req_a,
             approval_decision=app_dec_a,
+            tool_executor=_make_mock_executor(),
         )
 
 
@@ -374,6 +403,7 @@ def test_cost_estimate_change_invalidates_approval() -> None:
             operation_identity=op_id,
             approval_request=app_req,
             approval_decision=app_dec,
+            tool_executor=_make_mock_executor(),
         )
 
 
@@ -957,6 +987,7 @@ def test_conflicting_target_id_rejected() -> None:
             approval_request=app_req,
             approval_decision=app_dec,
             target_id=TargetId("cluster-b"),  # Conflicting!
+            tool_executor=_make_mock_executor(),
         )
 
 
@@ -1032,10 +1063,11 @@ def test_abort_request_delegates_to_adr0005() -> None:
     job_id = TrainingJobId("job-test-abort-001")
     target_id = TargetId("remote-gpu-01")
 
-    # Successful cancellation delegation
+    # Successful cancellation delegation with authoritative ToolId
     result = launcher.abort_request(
         job_id=job_id,
         target_id=target_id,
+        tool_id=ToolId("cv.train.cancel"),
         tool_executor=executor,  # type: ignore[arg-type]
     )
 
@@ -1052,6 +1084,18 @@ def test_abort_request_delegates_to_adr0005() -> None:
         launcher.abort_request(
             job_id=job_id,
             target_id=None,  # type: ignore[arg-type]
+            tool_id=ToolId("cv.train.cancel"),
+            tool_executor=executor,  # type: ignore[arg-type]
+        )
+
+    # Missing tool_id fails closed
+    with pytest.raises(
+        TrainingExecutionError, match="Authoritative ToolId is required"
+    ):
+        launcher.abort_request(
+            job_id=job_id,
+            target_id=target_id,
+            tool_id=None,  # type: ignore[arg-type]
             tool_executor=executor,  # type: ignore[arg-type]
         )
 
@@ -1060,6 +1104,7 @@ def test_abort_request_delegates_to_adr0005() -> None:
         launcher.abort_request(
             job_id=job_id,
             target_id=target_id,
+            tool_id=ToolId("cv.train.cancel"),
             tool_executor=None,  # type: ignore[arg-type]
         )
 
@@ -1071,6 +1116,7 @@ def test_launch_rejects_missing_target_and_prevents_default_synthesis() -> None:
     """Verify launch rejects missing target_id and never synthesizes a default target."""
     launcher = DefaultTrainingLauncher()
     plan = _make_valid_plan()
+    mock_exec = _make_mock_executor()
 
     # Approval scope has no target (e.g. general plan resource scope)
     op_id, app_req, app_dec = _make_approval_context(
@@ -1088,6 +1134,7 @@ def test_launch_rejects_missing_target_and_prevents_default_synthesis() -> None:
             operation_identity=op_id,
             approval_request=app_req,
             approval_decision=app_dec,
+            tool_executor=mock_exec,
             target_id=None,  # Omitted!
         )
 
@@ -1112,6 +1159,7 @@ def test_launch_rejects_missing_target_and_prevents_default_synthesis() -> None:
         operation_identity=op_id_scoped,
         approval_request=app_req_scoped,
         approval_decision=app_dec_scoped,
+        tool_executor=mock_exec,
         target_id=None,  # Derived from authorized scope!
     )
     assert record.target_id == TargetId("cluster-h100")
@@ -1125,6 +1173,7 @@ def test_launch_unique_execution_identity_per_run() -> None:
     launcher = DefaultTrainingLauncher()
     plan = _make_valid_plan(plan_id="plan-exp-unique")
     op_id, app_req, app_dec = _make_approval_context(plan)
+    mock_exec = _make_mock_executor()
 
     rec1 = launcher.launch(
         plan=plan,
@@ -1132,6 +1181,7 @@ def test_launch_unique_execution_identity_per_run() -> None:
         operation_identity=op_id,
         approval_request=app_req,
         approval_decision=app_dec,
+        tool_executor=mock_exec,
     )
     rec2 = launcher.launch(
         plan=plan,
@@ -1139,6 +1189,7 @@ def test_launch_unique_execution_identity_per_run() -> None:
         operation_identity=op_id,
         approval_request=app_req,
         approval_decision=app_dec,
+        tool_executor=mock_exec,
     )
 
     # Different job identities for separate executions
@@ -1155,9 +1206,79 @@ def test_launch_unique_execution_identity_per_run() -> None:
         operation_identity=op_id,
         approval_request=app_req,
         approval_decision=app_dec,
+        tool_executor=mock_exec,
         job_id=custom_job_id,
     )
     assert rec_custom.job_id == custom_job_id
+
+
+# =============================================================================
+# B4 Regression: launch() requires mandatory ToolExecutor and fails closed
+# =============================================================================
+def test_launch_requires_mandatory_tool_executor() -> None:
+    """Verify launch fails closed if ToolExecutor is omitted (B4 finding)."""
+    launcher = DefaultTrainingLauncher()
+    plan = _make_valid_plan()
+    op_id, app_req, app_dec = _make_approval_context(plan)
+
+    with pytest.raises(
+        TrainingExecutionError,
+        match="ToolExecutor is mandatory for launch\\(\\)",
+    ):
+        launcher.launch(
+            plan=plan,
+            tool_id=ToolId("cv.train.execute"),
+            operation_identity=op_id,
+            approval_request=app_req,
+            approval_decision=app_dec,
+            tool_executor=None,  # type: ignore[arg-type]
+        )
+
+
+def test_launch_fails_closed_on_failed_tool_execution() -> None:
+    """Verify launch transitions LAUNCHING -> FAILED and raises when tool execution fails."""
+    launcher = DefaultTrainingLauncher()
+    plan = _make_valid_plan()
+    op_id, app_req, app_dec = _make_approval_context(plan)
+    failing_exec = _make_mock_executor(
+        status=ToolExecutionStatus.EXECUTION_FAILED,
+        error_message="GPU node out of memory",
+    )
+
+    with pytest.raises(
+        TrainingExecutionError,
+        match="Tool execution failed.*GPU node out of memory",
+    ):
+        launcher.launch(
+            plan=plan,
+            tool_id=ToolId("cv.train.execute"),
+            operation_identity=op_id,
+            approval_request=app_req,
+            approval_decision=app_dec,
+            tool_executor=failing_exec,
+        )
+
+
+# =============================================================================
+# B5 Regression: abort_request requires authoritative ToolId (no synthetic defaults)
+# =============================================================================
+def test_abort_request_requires_authoritative_tool_id() -> None:
+    """Verify abort_request fails closed if tool_id is omitted or empty (B5 finding)."""
+    launcher = DefaultTrainingLauncher()
+    mock_exec = _make_mock_executor()
+    job_id = TrainingJobId("job-001")
+    target_id = TargetId("remote-gpu-01")
+
+    with pytest.raises(
+        TrainingExecutionError,
+        match="Authoritative ToolId is required",
+    ):
+        launcher.abort_request(
+            job_id=job_id,
+            target_id=target_id,
+            tool_id=None,  # type: ignore[arg-type]
+            tool_executor=mock_exec,
+        )
 
 
 # =============================================================================
