@@ -1541,3 +1541,25 @@ Remediated both residual architectural concerns identified in the second Officia
 
 **Left open:** Push remediation commit to `feature/ajmunna/phase-2k-training-subsystem` for PR #57, verify GitHub Actions CI matrix across Python 3.10–3.13, and request final PM review and merge disposition.
 
+---
+
+## 2026-09-15 — Phase 2L ADR-0011 Architecture Review Remediation (PR #59)
+
+**Did:**
+Remediated all eight architecture findings (B1–B8) from the Official PM review of ADR-0011 under Issue #58:
+1. **B1 & B2 (ADR-0003 Authority & State Machine Decoupling):** Explicitly bound evaluation execution to authoritative ADR-0003 `OperationIdentity`, `ApprovalRequest`, and `ApprovalDecision`. Removed competing `EvaluationStatus` execution state machine; introduced `EvaluationVerdict` as a domain measurement finding rather than orchestration lifecycle.
+2. **B3 (Zero Target Synthesis):** Completely removed `compute_target_id = "default_evaluator"` and all synthetic fallback target logic. Execution targets must derive strictly from authorized ADR-0003 resource scopes or be explicitly supplied and verified.
+3. **B4 (Asynchronous Execution & ActiveJobHandoff):** Defined ADR-0005 `ActiveJobHandoff` execution delegation, reserving reconciliation and polling to ADR-0003. Explicitly codified that handoff expiration is an orchestration TTL boundary, not an evaluation failure.
+4. **B5 (Reproducible Statistical Baseline Comparison):** Defined closed `StatisticalTestType` methods (`PAIRED_T_TEST`, `WILCOXON_SIGNED_RANK`, `BOOTSTRAP_RESAMPLING`, `MCNEMAR_TEST`), test versioning, sample counts, p-value bounds, confidence levels, and deterministic regression rules.
+5. **B6 (Authoritative Verification Boundaries):** Defined explicit verification against ADR-0009 dataset manifests (disjointness, manifest hash, split validation with calibration split isolation) and ADR-0010 checkpoint manifests (content hashes and URI schemes).
+6. **B7 (Recursive Defensive Immutability & Functional Payload):** Required recursive `deep_freeze()` with `MappingProxyType`, and defined pure functional payload extraction (`extract_evaluation_operation_payload`) delegating hashing to ADR-0003.
+7. **B8 (Fail-Closed Metric & Systems Result Validation):** Enforced finite float validation (`math.isfinite`), quality metric bounds, monotonic latency percentile ordering ($0 \le \text{min} \le p_{50} \le p_{90} \le p_{95} \le p_{99} \le \text{max}$), strictly positive throughput, non-negative memory, and square confusion matrix dimensions matching class labels count.
+8. **CI Format Fix:** Wrapped long line in ADR-0011 code block to ensure `ruff format --check` passes cleanly across all Python versions.
+
+**Why:** Satisfies ADR-0001 through ADR-0010 architectural boundaries, zero-target-synthesis invariants, and PM ruling that architecture must be hardened and frozen prior to any runtime code implementation.
+
+**Broke:** Nothing broken. Documentation/architecture only. Full test suite (462 tests), Ruff lint/format, and type checks clean.
+
+**Learned:** Code blocks in markdown documentation are subject to Ruff format checks in CI; keeping embedded Python signatures formatted to project line lengths prevents documentation-only PRs from failing quality gates.
+
+**Left open:** Merging PR #59 to `main`, freezing ADR-0011, and awaiting Official PM authorization for Phase 2L runtime implementation.

@@ -458,7 +458,9 @@ class ErrorAnalysisRecord(BaseModel):
     localization_errors: int = Field(ge=0, default=0)
     classification_errors: int = Field(ge=0, default=0)
     slice_performance: Mapping[str, float] = Field(default_factory=dict)
-    representative_failure_hashes: tuple[ContentHash, ...] = Field(default_factory=tuple)
+    representative_failure_hashes: tuple[ContentHash, ...] = Field(
+        default_factory=tuple
+    )
 
 
 class BaselineComparisonResult(BaseModel):

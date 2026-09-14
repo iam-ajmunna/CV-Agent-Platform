@@ -3,14 +3,14 @@
 > **Rewritten** every session. Describes **now**, never history — history lives in
 > `JOURNAL.md`. Hard cap: 60 lines. If it exceeds that, you are logging, not stating.
 
-**Updated:** 2026-09-15 · **Phase:** Phase 2L Architecture Review · **Health:** yellow
+**Updated:** 2026-09-15 · **Phase:** Phase 2L Architecture Review · **Health:** green
 
 ## Where we are
 
 Phase 2K (ADR-0010 Training Subsystem) is accepted and merged on `main` at `3758f25`; its short-lived implementation branch is retired. Phase 2L is now at the ADR-0011 architecture-remediation gate under Issue #58.
 
 - ADR-0011 high-level evaluation responsibility is retained: deterministic model-quality and systems-performance measurement with authoritative dataset/model lineage.
-- Official PM review identified B1–B8; remediation amendments are being prepared before any runtime implementation.
+- Official PM review identified B1–B8; remediation amendments are implemented and verified in PR #59.
 - ADR-0003 remains the sole authority for operation identity, approval, lifecycle, leases/fencing, recovery, and external-operation state.
 - ADR-0005 remains the sole physical execution/transport boundary.
 - ADR-0004 remains the sole authoritative experiment-ledger persistence boundary.
@@ -20,7 +20,8 @@ Phase 2K (ADR-0010 Training Subsystem) is accepted and merged on `main` at `3758
 
 | Item | Issue | PR | State |
 |---|---|---|---|
-| Phase 2L architecture remediation | #58 | — | Amended ADR pending second PM review |
+| Phase 2L architecture remediation | #58 | #59 | Amended ADR passed PM review; CI rerun |
+
 
 ## Next 3 actions
 
