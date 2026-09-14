@@ -68,9 +68,9 @@ def compute_freshness(
     )
     try:
         pub_date = date.fromisoformat(published_date_str.strip())
-    except ValueError:
-        # Fallback if unparseable
-        pub_date = ref_date
+    except (ValueError, AttributeError):
+        # Fail closed on malformed/corrupted persisted date: treated as expired and degraded
+        return 0.05, True, True
 
     age_days = max(0, (ref_date - pub_date).days)
     horizons = (
@@ -120,7 +120,7 @@ class DefaultKnowledgeRetriever(KnowledgeRetriever):
         active_model_id = self.embedding_gateway.embedding_model_id
         self.store.validate_embedding_model(active_model_id)
 
-        all_chunk_ids = self.store.list_all_chunk_ids()
+        all_chunk_ids = self.store.list_all_chunk_ids(active_model_id)
         if not all_chunk_ids:
             return RetrievalResponse(
                 query=request.query,
@@ -140,7 +140,7 @@ class DefaultKnowledgeRetriever(KnowledgeRetriever):
         query_vectors = self.embedding_gateway.embed([request.query])
         query_vector = query_vectors[0] if query_vectors else ()
 
-        stored_vectors = self.store.load_vectors()
+        stored_vectors = self.store.load_partition_vectors(active_model_id)
         dense_scores: dict[str, float] = {}
         for cid in all_chunk_ids:
             cid_str = str(cid)

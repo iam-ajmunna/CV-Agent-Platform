@@ -33,7 +33,10 @@ class BM25Index:
         self.avg_doc_length: float = 0.0
 
     def add_document(self, chunk_id: str, text: str) -> None:
-        """Add a chunk to the index."""
+        """Add a chunk to the index, purging any previous postings if chunk_id exists."""
+        if chunk_id in self.chunk_lengths:
+            self.remove_document(chunk_id)
+
         tokens = tokenize(text)
         length = len(tokens)
         self.chunk_lengths[chunk_id] = length

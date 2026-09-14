@@ -32,8 +32,8 @@ _DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
 def _is_local_uri(uri: str) -> bool:
-    """Check if a URI points to a local file or relative path."""
-    return uri.startswith(("file://", "/", "./")) or ("://" not in uri)
+    """Check if a URI points to a local file or relative path per ADR-0006 §3.4."""
+    return uri.startswith("file://") or ("://" not in uri)
 
 
 def _validate_provenance(prov: Provenance) -> None:
@@ -43,6 +43,14 @@ def _validate_provenance(prov: Provenance) -> None:
 
     if not prov.source_uri or not prov.source_uri.strip():
         raise MissingProvenanceError("Provenance source_uri is missing or empty.")
+
+    # Important Finding #8: Local documents must use file:// scheme or relative path; raw absolute POSIX paths are rejected
+    clean_uri = prov.source_uri.strip()
+    if clean_uri.startswith("/") and not clean_uri.startswith("file://"):
+        raise MissingProvenanceError(
+            f"Local workspace document source_uri {prov.source_uri!r} uses a raw absolute POSIX path. "
+            "Local workspace documents must use 'file://...' scheme or a relative path."
+        )
 
     if not prov.author_or_organization or not prov.author_or_organization.strip():
         raise MissingProvenanceError(

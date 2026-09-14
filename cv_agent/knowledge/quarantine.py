@@ -19,17 +19,23 @@ def quarantine_chunk(
     evidence_weight: float = 1.0,
     signal_only: bool = False,
 ) -> str:
-    """Encapsulate a single knowledge chunk within passive data boundary tags."""
-    cid = html.escape(str(chunk.chunk_id))
-    uri = html.escape(chunk.provenance.source_uri)
-    published = html.escape(chunk.provenance.published_date)
+    """Encapsulate a single knowledge chunk within passive data boundary tags.
+
+    Untrusted source content is escaped using html.escape(..., quote=True) so that forged
+    closing tags (e.g. </knowledge_citation>) and embedded markup cannot escape or terminate
+    the boundary representation. Evidential source text is preserved in storage.
+    """
+    cid = html.escape(str(chunk.chunk_id), quote=True)
+    uri = html.escape(chunk.provenance.source_uri, quote=True)
+    published = html.escape(chunk.provenance.published_date, quote=True)
     signal_attr = ' signal_only="true"' if signal_only else ""
+    escaped_content = html.escape(chunk.content, quote=True)
 
     # Enclose chunk in passive knowledge citation tags with zero instruction authority
     return (
         f'<knowledge_citation id="{cid}" source="{uri}" date="{published}" '
         f'evidence="{evidence_weight:.2f}"{signal_attr}>\n'
-        f"{chunk.content}\n"
+        f"{escaped_content}\n"
         f"</knowledge_citation>"
     )
 

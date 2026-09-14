@@ -1063,4 +1063,32 @@ Added 8 new regression tests, expanding the Phase 2D contract test suite to 35 t
 
 **Learned:** Normalizing both dense cosine similarity ($[-1, 1] \rightarrow [0, 1]$) and sparse BM25 scores via min-max scaling before linear fusion eliminates score scale distortion between keyword matching and conceptual semantics while guaranteeing that composite re-ranking remains mathematically bounded.
 
-**Left open:** Commit, push branch `feature/ajmunna/phase-2g-knowledge-rag`, open PR linked to Issue #47, verify CI matrix across Python 3.10–3.13, and request Official PM adversarial review against all 10 gates.
+**Left open:** PR #48 opened; awaiting Official PM adversarial review against all 10 gates.
+
+---
+
+## 2026-09-14 — Phase 2G ADR-0006 PM Adversarial Review Remediations (feature/ajmunna/phase-2g-knowledge-rag)
+
+**Did:**
+1. Responded to the Official PM's adversarial review on PR #48 (3 Blockers + 5 Important Findings) against frozen ADR-0006.
+2. Corrected all 3 Blockers:
+   - **Blocker 1 (Quarantine boundary escape):** In `cv_agent/knowledge/quarantine.py`, escaped chunk content using `html.escape(chunk.content, quote=True)` prior to interpolating into `<knowledge_citation>` boundary tags, neutralizing forged `</knowledge_citation>` closing tags.
+   - **Blocker 2 (Atomic persistence rollback):** In `cv_agent/knowledge/store.py`, implemented atomic transactional persistence with in-memory backups of index/manifest files and tracking of newly created chunk files, rolling back all created files and restoring index backups on mid-operation write failures.
+   - **Blocker 3 (Partition-level embedding model isolation):** In `cv_agent/knowledge/store.py`, restructured vector persistence to model-scoped partitions under `.cv_agent/knowledge/partitions/{partition_id}/` (sanitized slug), with per-partition `manifest.json` and `vectors.json`. Updated `validate_embedding_model()` to strictly verify active model compatibility against partition manifests and reject mismatched partitions with `EmbeddingModelMismatchError`.
+3. Corrected all 5 Important Findings:
+   - **Important 4 (Exact 0.65/0.35 hybrid fusion):** Added explicit numerical verification test confirming $0.65 S_{\text{dense}} + 0.35 S_{\text{sparse}}$ within floating-point precision.
+   - **Important 5 (Real filesystem containment & symlinks):** Hardened path resolution in `store.py` and added regression test exercising real `..` path traversal escapes and workspace symlinks pointing to external directories.
+   - **Important 6 (BM25 inverted-index cleanup):** In `cv_agent/knowledge/bm25.py`, added document removal invocation in `add_document()` to purge stale postings before re-indexing chunks.
+   - **Important 7 (Invalid date fail-closed handling):** In `cv_agent/knowledge/retriever.py`, updated `compute_freshness()` to fail closed on unparseable dates to $(F=0.05, \text{is\_stale}=\text{True}, \text{is\_expired}=\text{True})$.
+   - **Important 8 (Raw absolute POSIX path rejection):** In `cv_agent/knowledge/ingester.py`, strictly rejected raw absolute POSIX paths (e.g. `/path`) without `file://` scheme as invalid provenance.
+4. Added 8 dedicated regression tests in `tests/test_knowledge_rag_boundary.py`, bringing Phase 2G boundary tests to 24 and the entire test suite to **309 passed** (0 warnings).
+5. Verified all quality gates: Ruff check clean, Ruff format check clean, Mypy clean (59 source files), `git diff --check` clean.
+6. Updated `docs/reports/ISSUE-47-PHASE-2G-REPORT.md` and `docs/state/STATUS.md`.
+
+**Why:** ADR-0006 §3.4, §3.6, §3.9, `[P§18]`, `[P§20]`, `[P§29.3]`, `[P§34]`. Satisfies the Official PM's non-negotiable architectural findings to ensure tamper-proof prompt quarantine, crash-resilient atomic index persistence, partition-level vector isolation, and fail-closed security.
+
+**Broke:** Nothing broken. 309 pytest tests pass, 0 warnings.
+
+**Learned:** Defense-in-depth in RAG systems requires escaping passive boundary tags to eliminate prompt boundary confusion, and organizing vector indexes into discrete, model-versioned filesystem partitions so model transitions cannot query stale or incompatible embedding dimensions.
+
+**Left open:** Commit, push to `origin feature/ajmunna/phase-2g-knowledge-rag`, monitor GitHub Actions CI matrix across Python 3.10–3.13, and submit remediation report to Official PM for second adversarial review.
