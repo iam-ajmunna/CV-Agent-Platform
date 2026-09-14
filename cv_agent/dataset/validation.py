@@ -263,6 +263,24 @@ def validate_annotation_geometry(
                         )
                     parsed_pts.append((px, py))
 
+                # Canonical ADR-0009 closure requirement:
+                # Polygon must be closed either via explicit declaration (closed=True / is_closed=True)
+                # or geometrically closed with identical start and end vertices.
+                is_explicitly_closed = (prim.get("closed") is True) or (
+                    prim.get("is_closed") is True
+                )
+                is_geometrically_closed = parsed_pts[0] == parsed_pts[-1]
+                if not (is_explicitly_closed or is_geometrically_closed):
+                    raise InvalidGeometryError(
+                        f"Item '{ch_str}' primitive #{idx} polygon is not closed: canonical ADR-0009 closure "
+                        f"requires explicit closure declaration ('closed': True) or identical first and last vertices",
+                        details={
+                            "content_hash": ch_str,
+                            "polygon": polygon,
+                            "primitive": dict(prim),
+                        },
+                    )
+
                 # Normalize polygon ring: if first and last point match, exclude duplicate trailing point for ring vertices
                 if parsed_pts[0] == parsed_pts[-1]:
                     ring = parsed_pts[:-1]

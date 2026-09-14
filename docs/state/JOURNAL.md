@@ -1377,4 +1377,40 @@ Remediated all 6 blocking findings from the Official PM adversarial review on PR
 
 **Learned:** Silent fallbacks (such as ignoring missing hashes or catching chmod failures) undermine immutable engineering contracts. Every contract requirement must fail closed immediately with a descriptive exception or failed audit result.
 
-**Left open:** Pushing remediation commit to `feature/ajmunna/phase-2j-dataset-subsystem` for PR #53 and awaiting Official PM second adversarial review.
+**Left open:** PR #53 updated, awaiting Official PM second adversarial review.
+
+---
+
+## 2026-09-14 — Phase 2J Second Adversarial Review Remediation (PR #53)
+
+**Did:**
+Remediated all 3 remaining contract-level blocking findings from the Official PM second adversarial review on PR #53:
+1. **Blocker 1 — Polygon Closure Enforcement Hardening:**
+   - Updated `validate_annotation_geometry()` in `cv_agent/dataset/validation.py` to enforce canonical polygon closure fail-closed.
+   - An annotation with an unclosed polygon where the closure field (`closed` / `is_closed`) is omitted and start/end vertices differ (`points[0] != points[-1]`) is now strictly rejected with `InvalidGeometryError` ("polygon is not closed: canonical ADR-0009 closure requires explicit closure declaration ('closed': True) or identical first and last vertices").
+   - Added regression test in `tests/test_dataset_boundary.py` verifying that an unclosed polygon with omitted closure declaration raises `InvalidGeometryError`.
+2. **Blocker 2 — Remote Storage Post-Upload Integrity Verification:**
+   - Implemented post-upload remote streaming SHA-256 byte verification in `S3Store.put_payload()` and `GCSStore.put_payload()` in `cv_agent/dataset/storage/remote.py`.
+   - After uploading the payload, the adapter streams the bytes persisted remotely (`s3.get_object` body / `blob.open`), computes their SHA-256 digest, and verifies it matches `content_hash`.
+   - If a mismatch occurs, the remote object is deleted and `PayloadCorruptionError` is raised fail-closed.
+   - Enhanced `test_remote_storage_s3_and_gcs_full_integrity_and_corruption_semantics` to test verified post-upload integrity as well as corrupt remote post-upload detection and cleanup for both S3 and GCS.
+3. **Blocker 3 — ADR-0003 4-Tuple Operation Identity Binding:**
+   - Enhanced `FileSystemDatasetRegistry.require_mutation_approval()` in `cv_agent/dataset/registry.py` to strictly bind and compare the approval evidence against the expected 4-tuple operation identity: `(operation_id, operation_version, canonical_payload_hash, target_identity)`.
+   - Prevents presentation of approval evidence from Operation A to authorize Operation B.
+   - Added exhaustive tests in `tests/test_dataset_boundary.py` verifying that presenting approval evidence with target identity mismatch, version mismatch, operation ID mismatch, or canonical payload hash mismatch fails closed with `DatasetApprovalRequiredError`.
+4. **Quality Gates Verified:**
+   - Pytest: 433 passed, 0 failures across 20 test modules.
+   - Ruff check: clean (no errors or warnings).
+   - Ruff format check: 148 files formatted.
+   - Mypy: clean across 83 source files in `cv_agent`.
+   - Git diff check: clean.
+   - Python -m build: clean sdist and wheel built.
+   - Pip-audit: clean (0 known vulnerabilities).
+
+**Why:** `[P§7]`, `[P§25]`, `[P§26]`, `[P§27]`, `[P§29.5]`, `[P§34]`, ADR-0003, and frozen ADR-0009. Guarantees that polygon geometries cannot bypass closure validation, remote uploads are cryptographically verified on the remote persistence layer before return, and approval evidence cannot be replayed across distinct operation identities.
+
+**Broke:** Nothing broken. 433 tests pass across 19 test modules, all quality gates green.
+
+**Learned:** Security and integrity checks must never be presence-only; every validation must bind evidence strictly to the exact target operation identity and cryptographic hash.
+
+**Left open:** Pushing remediation commit to `feature/ajmunna/phase-2j-dataset-subsystem` for PR #53 and awaiting final Official PM adversarial review.

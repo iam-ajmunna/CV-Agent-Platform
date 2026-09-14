@@ -3,17 +3,14 @@
 > **Rewritten** every session. Describes **now**, never history — history lives in
 > `JOURNAL.md`. Hard cap: 60 lines. If it exceeds that, you are logging, not stating.
 
-**Updated:** 2026-09-14 · **Phase:** Phase 2J Adversarial Remediation · **Health:** green
+**Updated:** 2026-09-14 · **Phase:** Phase 2J Second Review Remediation · **Health:** green
 
 ## Where we are
 
-Phase 2J (ADR-0009 Dataset Subsystem Architecture) remediated per Official PM adversarial review on PR #53 (`feature/ajmunna/phase-2j-dataset-subsystem`):
-- Finding 1 (B3): Partial perceptual metadata fails closed on missing `perceptual_hash`.
-- Finding 2 (B3): Camera/site split policies decoupled (`camera-disjoint` requires `camera_id`, `site-disjoint` requires `site_id`).
-- Finding 3 (B3): Temporal auditing completes strict timestamp ordering ($\max(train) < \min(eval)$) and window straddling checks.
-- Finding 4 (AC #8): Annotation geometry validation rejects `NaN`/`Inf` coordinates, non-closed polygons (`closed=False`), and zero-area/degenerate polygons.
-- Finding 5 (I2): Read-only publication `chmod(0o444)` fails closed with `DatasetError` and cleans up un-chmodded files instead of swallowing `OSError`.
-- Finding 6 (B4): Remote storage adapters (`S3Store`, `GCSStore`) fully implemented with streaming SHA-256 verification, atomic staging, corruption detection, and error semantics.
+Phase 2J (ADR-0009 Dataset Subsystem Architecture) remediated per Official PM second adversarial review on PR #53 (`feature/ajmunna/phase-2j-dataset-subsystem`):
+- Blocker 1: Polygon closure enforced fail-closed; unclosed polygons with omitted `closed` field and non-identical start/end vertices rejected with `InvalidGeometryError`.
+- Blocker 2: Remote storage upload integrity verification fully implemented with streaming SHA-256 validation of remotely persisted bytes in `S3Store` and `GCSStore`, deleting corrupted remote objects on mismatch and failing closed with `PayloadCorruptionError`.
+- Blocker 3: ADR-0003 4-tuple operation identity strictly bound and compared against expected identity `(operation_id, operation_version, canonical_payload_hash, target_identity)` in `FileSystemDatasetRegistry.require_mutation_approval()`, failing closed on any field mismatch.
 - Full 433-test suite passing (36 Phase 2J boundary tests, 0 failures).
 - All quality gates (Ruff check, format, Mypy on `cv_agent` across 83 source files, `git diff --check`, `python -m build`, `pip-audit`) clean.
 
@@ -21,17 +18,17 @@ Phase 2J (ADR-0009 Dataset Subsystem Architecture) remediated per Official PM ad
 
 | Item | Issue | PR | State |
 |---|---|---|---|
-| Phase 2J Adversarial Remediation | — | #53 | Remediations complete; pushing commit for Official PM second adversarial review |
+| Phase 2J Second Review Remediation | — | #53 | Second-round blockers remediated; pushing commit for Official PM review |
 
 ## Next 3 actions
 
-1. Commit remediation changes to `feature/ajmunna/phase-2j-dataset-subsystem`.
+1. Commit second review remediations to `feature/ajmunna/phase-2j-dataset-subsystem`.
 2. Push branch to update PR #53 and trigger CI matrix execution.
-3. Monitor CI and await Official PM second review and squash-merge authorization.
+3. Monitor CI and await Official PM final review and squash-merge authorization.
 
 ## Blockers
 
-- None. PR #53 awaiting second PM review.
+- None. PR #53 awaiting final PM review.
 
 ## Scope guard
 

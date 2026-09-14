@@ -101,8 +101,15 @@ class S3Store:
         # Check if already exists in bucket for deduplication
         try:
             s3.head_object(Bucket=self.bucket, Key=key)
-            return content_hash  # Already present, deduplicated
-        except Exception:  # noqa: BLE001, S110 - object does not exist yet or head probe failed
+            resp = s3.get_object(Bucket=self.bucket, Key=key)
+            hasher = hashlib.sha256()
+            body = resp.get("Body")
+            if body is not None:
+                for chunk in iter(lambda: body.read(_CHUNK_SIZE), b""):
+                    hasher.update(chunk)
+            if hasher.hexdigest().lower() == content_hash:
+                return content_hash
+        except Exception:  # noqa: BLE001, S110 - object does not exist yet or verification failed
             pass
 
         try:
@@ -115,6 +122,32 @@ class S3Store:
         except Exception as err:
             raise DatasetError(
                 f"Failed uploading payload {content_hash} to S3 bucket '{self.bucket}': {err}"
+            ) from err
+
+        # Post-upload remote-side integrity verification (fail-closed)
+        try:
+            resp = s3.get_object(Bucket=self.bucket, Key=key)
+            hasher = hashlib.sha256()
+            body = resp.get("Body")
+            if body is not None:
+                for chunk in iter(lambda: body.read(_CHUNK_SIZE), b""):
+                    hasher.update(chunk)
+            remote_hex = hasher.hexdigest().lower()
+            if remote_hex != content_hash:
+                try:
+                    s3.delete_object(Bucket=self.bucket, Key=key)
+                except Exception:  # noqa: BLE001, S110 - best-effort deletion of corrupted remote object
+                    pass
+                raise PayloadCorruptionError(
+                    expected_hash=str(content_hash),
+                    actual_hash=str(remote_hex),
+                    uri=self.get_uri(content_hash),
+                )
+        except PayloadCorruptionError:
+            raise
+        except Exception as err:
+            raise DatasetError(
+                f"Post-upload remote verification failed for S3 payload {content_hash}: {err}"
             ) from err
 
         return content_hash
@@ -242,13 +275,45 @@ class GCSStore:
         blob = bucket.blob(key)
 
         if blob.exists():
-            return content_hash  # Deduplicated
+            try:
+                hasher = hashlib.sha256()
+                with blob.open("rb") as stream:
+                    for chunk in iter(lambda: stream.read(_CHUNK_SIZE), b""):
+                        hasher.update(chunk)
+                if hasher.hexdigest().lower() == content_hash:
+                    return content_hash
+            except Exception:  # noqa: BLE001, S110 - object verification failed or blob inaccessible
+                pass
 
         try:
             blob.upload_from_filename(str(path))
         except Exception as err:
             raise DatasetError(
                 f"Failed uploading payload {content_hash} to GCS bucket '{self.bucket}': {err}"
+            ) from err
+
+        # Post-upload remote-side integrity verification (fail-closed)
+        try:
+            hasher = hashlib.sha256()
+            with blob.open("rb") as stream:
+                for chunk in iter(lambda: stream.read(_CHUNK_SIZE), b""):
+                    hasher.update(chunk)
+            remote_hex = hasher.hexdigest().lower()
+            if remote_hex != content_hash:
+                try:
+                    blob.delete()
+                except Exception:  # noqa: BLE001, S110 - best-effort deletion of corrupted remote blob
+                    pass
+                raise PayloadCorruptionError(
+                    expected_hash=str(content_hash),
+                    actual_hash=str(remote_hex),
+                    uri=self.get_uri(content_hash),
+                )
+        except PayloadCorruptionError:
+            raise
+        except Exception as err:
+            raise DatasetError(
+                f"Post-upload remote verification failed for GCS payload {content_hash}: {err}"
             ) from err
 
         return content_hash

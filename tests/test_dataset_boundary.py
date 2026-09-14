@@ -7,6 +7,7 @@ storage integrity, geometry gates, disjointness, and atomic publication.
 from __future__ import annotations
 
 import hashlib
+import io
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -576,6 +577,7 @@ def test_annotation_geometry_valid() -> None:
                 {
                     "class_name": "person",
                     "polygon": [(10, 10), (50, 10), (50, 50), (10, 50)],
+                    "closed": True,
                 },
             )
         },
@@ -833,12 +835,76 @@ def test_mutation_approval_enforces_adr0003_4tuple_identity(
             "dataset.delete", dataset_id, ver, rejected_evidence
         )
 
-    # Valid complete 4-tuple approval passes
+    # Valid complete 4-tuple approval passes when bound to exact operation identity
     valid_evidence = dict(rejected_evidence)
     valid_evidence["approved"] = True
     temp_registry.require_mutation_approval(
-        "dataset.delete", dataset_id, ver, valid_evidence
+        "dataset.delete",
+        dataset_id,
+        ver,
+        valid_evidence,
+        expected_operation_id="op-dataset-delete-01",
+        expected_canonical_payload_hash="abc123canonicalhash",
     )
+
+    # PM Adversarial Review Blocker 3: Approval for Operation A presented to Operation B fails closed
+    # 1. Target dataset identity mismatch
+    other_dataset = DatasetId("traffic.cam")
+    with pytest.raises(
+        DatasetApprovalRequiredError,
+        match="ADR-0003 operation identity mismatch.*target_identity mismatch",
+    ):
+        temp_registry.require_mutation_approval(
+            "dataset.delete",
+            other_dataset,
+            ver,
+            valid_evidence,
+            expected_operation_id="op-dataset-delete-01",
+            expected_canonical_payload_hash="abc123canonicalhash",
+        )
+
+    # 2. Target version identity mismatch
+    other_ver = DatasetVersion("v2.0.0")
+    with pytest.raises(
+        DatasetApprovalRequiredError,
+        match="ADR-0003 operation identity mismatch.*target_identity mismatch",
+    ):
+        temp_registry.require_mutation_approval(
+            "dataset.delete",
+            dataset_id,
+            other_ver,
+            valid_evidence,
+            expected_operation_id="op-dataset-delete-01",
+            expected_canonical_payload_hash="abc123canonicalhash",
+        )
+
+    # 3. Operation ID mismatch (e.g. approval for delete presented to retrain)
+    with pytest.raises(
+        DatasetApprovalRequiredError,
+        match="ADR-0003 operation identity mismatch.*operation_id mismatch",
+    ):
+        temp_registry.require_mutation_approval(
+            "dataset.retrain",
+            dataset_id,
+            ver,
+            valid_evidence,
+            expected_operation_id="op-dataset-retrain-99",
+            expected_canonical_payload_hash="abc123canonicalhash",
+        )
+
+    # 4. Canonical payload hash mismatch
+    with pytest.raises(
+        DatasetApprovalRequiredError,
+        match="ADR-0003 operation identity mismatch.*canonical_payload_hash mismatch",
+    ):
+        temp_registry.require_mutation_approval(
+            "dataset.delete",
+            dataset_id,
+            ver,
+            valid_evidence,
+            expected_operation_id="op-dataset-delete-01",
+            expected_canonical_payload_hash="different_payload_hash_value",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1310,7 +1376,7 @@ def test_annotation_geometry_nan_inf_and_polygons() -> None:
             classes,
         )
 
-    # 5. Polygon explicitly marked non-closed
+    # 5a. Polygon explicitly marked non-closed
     with pytest.raises(InvalidGeometryError, match="explicitly marked as non-closed"):
         validate_annotation_geometry(
             _make_manifest(
@@ -1325,23 +1391,50 @@ def test_annotation_geometry_nan_inf_and_polygons() -> None:
             classes,
         )
 
-    # 6. Collinear polygon (zero area)
-    with pytest.raises(InvalidGeometryError, match="zero or degenerate area"):
+    # 5b. Unclosed polygon with omitted closure field fails closed (PM Adversarial Blocker 1)
+    with pytest.raises(InvalidGeometryError, match="polygon is not closed"):
         validate_annotation_geometry(
             _make_manifest(
-                ({"class_name": "person", "polygon": [(10, 10), (20, 20), (30, 30)]},)
+                (
+                    {
+                        "class_name": "person",
+                        "polygon": [(10, 10), (50, 10), (50, 50), (10, 50)],
+                        # closure field omitted, and points[0] != points[-1]
+                    },
+                )
             ),
             classes,
         )
 
-    # 7. Duplicate points polygon (zero area)
+    # 6. Collinear polygon with closed=True (zero area)
+    with pytest.raises(InvalidGeometryError, match="zero or degenerate area"):
+        validate_annotation_geometry(
+            _make_manifest(
+                (
+                    {
+                        "class_name": "person",
+                        "polygon": [(10, 10), (20, 20), (30, 30)],
+                        "closed": True,
+                    },
+                )
+            ),
+            classes,
+        )
+
+    # 7. Duplicate points polygon with closed=True (zero area)
     with pytest.raises(
         InvalidGeometryError,
         match="fewer than 3 distinct vertices|zero or degenerate area",
     ):
         validate_annotation_geometry(
             _make_manifest(
-                ({"class_name": "person", "polygon": [(10, 10), (10, 10), (10, 10)]},)
+                (
+                    {
+                        "class_name": "person",
+                        "polygon": [(10, 10), (10, 10), (10, 10)],
+                        "closed": True,
+                    },
+                )
             ),
             classes,
         )
@@ -1423,12 +1516,27 @@ def test_remote_storage_s3_and_gcs_full_integrity_and_corruption_semantics(
     mock_boto3.client.return_value = mock_s3_client
     # Simulate head_object raising NoSuchKey on first check
     mock_s3_client.head_object.side_effect = Exception("NoSuchKey")
+    mock_s3_client.get_object.return_value = {"Body": io.BytesIO(sample_bytes)}
 
     with patch.dict("sys.modules", {"boto3": mock_boto3}):
-        # Put payload
+        # Put payload - clean upload with verified remote-side integrity
         put_hash = s3_store.put_payload(payload_file)
         assert put_hash == expected_hash
         assert mock_s3_client.upload_file.called
+        assert mock_s3_client.get_object.called
+
+        # Put payload - corrupt remote-side post-upload verification detection (Blocker 2)
+        mock_s3_client.get_object.return_value = {
+            "Body": io.BytesIO(b"corrupted bytes on remote S3")
+        }
+        with pytest.raises(
+            PayloadCorruptionError, match="Payload byte corruption detected"
+        ):
+            s3_store.put_payload(payload_file)
+        assert mock_s3_client.delete_object.called
+
+        # Reset get_object for subsequent get_payload tests
+        mock_s3_client.get_object.return_value = {"Body": io.BytesIO(sample_bytes)}
 
         # Get payload - clean download
         dest_path = tmp_path / "downloaded_s3.bin"
@@ -1474,6 +1582,7 @@ def test_remote_storage_s3_and_gcs_full_integrity_and_corruption_semantics(
     mock_gcs_client.bucket.return_value = mock_bucket
     mock_bucket.blob.return_value = mock_blob
     mock_blob.exists.return_value = False
+    mock_blob.open.return_value.__enter__.return_value = io.BytesIO(sample_bytes)
 
     with patch.dict(
         "sys.modules",
@@ -1483,10 +1592,23 @@ def test_remote_storage_s3_and_gcs_full_integrity_and_corruption_semantics(
             "google.cloud.storage": mock_gcs,
         },
     ):
-        # Put payload
+        # Put payload - clean upload with verified remote-side integrity
         gcs_put_hash = gcs_store.put_payload(payload_file)
         assert gcs_put_hash == expected_hash
         assert mock_blob.upload_from_filename.called
+
+        # Put payload - corrupt remote-side post-upload verification detection (Blocker 2)
+        mock_blob.open.return_value.__enter__.return_value = io.BytesIO(
+            b"corrupted bytes on remote GCS"
+        )
+        with pytest.raises(
+            PayloadCorruptionError, match="Payload byte corruption detected"
+        ):
+            gcs_store.put_payload(payload_file)
+        assert mock_blob.delete.called
+
+        # Reset mock_blob for get_payload tests
+        mock_blob.open.return_value.__enter__.return_value = io.BytesIO(sample_bytes)
 
         # Get payload - clean download
         mock_blob.exists.return_value = True
