@@ -1138,3 +1138,33 @@ Added 8 new regression tests, expanding the Phase 2D contract test suite to 35 t
 **Learned:** Combining collision-free model partition namespaces with crash-safe atomic replacement and bidirectional transactional rollback guarantees store integrity across model evolutions and unexpected process interrupts without compromising evidence immutability.
 
 **Left open:** Phase 2G formally closed. Next Phase 2 milestone or subsystem kickoff awaiting Official PM instruction.
+
+---
+
+## 2026-09-14 — Phase 2H ADR-0007 Skills Architecture & NVIDIA Capability Discovery Implementation (branch: feature/ajmunna/phase-2h-skills-architecture)
+
+**Did:**
+1. Completed pre-implementation architecture review on ADR-0007, identifying and resolving all 4 PM review findings prior to implementation:
+   - **Blocker B1 (ADR-0001 Authority):** Bound all declarative skills strictly and exclusively to registered ADR-0001 capabilities; enforced that declaring unregistered capability IDs fails fast with `UnknownCapabilityError`.
+   - **Blocker B2 (Sole Lifecycle Authority):** Reused authoritative `AvailabilityState` from `cv_agent.domain.contracts`; `SkillResolver` evaluates target compatibility and delegates directly to ADR-0001 availability semantics without duplicating the lifecycle state machine.
+   - **Important I1 (Closed Execution Status & Async Ownership):** Implemented closed `SkillExecutionStatus` (`SUCCESS`, `DISPATCHED`, `EXECUTION_FAILED`, `PREREQUISITE_FAILED`, `POLICY_VIOLATION`, `TIMEOUT`). Asynchronous workloads return `DISPATCHED` accompanied by a mandatory non-null `ActiveJobHandoff`, passing recovery ownership strictly to ADR-0003 Orchestration. Policy violations fail closed before any tool call, guaranteeing empty `tool_results = ()`.
+   - **Important I2 (Semantic Target Validation):** Formalized numeric `(major, minor)` integer tuple comparison for `min_cuda_compute`, an authoritative `HardwareClass` subsumption hierarchy (`ANY`, `CPU`, `NVIDIA_GPU`, `JETSON`, `JETSON_ORIN`, `JETSON_XAVIER`), and C-identifier environment variable validation.
+   - **Gate 5 / D-022:** Implemented hardware-aware `KNOWN_BUT_UNAVAILABLE` enforcement on local macOS workstations with zero silent CPU fallback.
+2. Implemented `cv_agent.skills` subsystem modules:
+   - `cv_agent/skills/contracts.py`: Typed immutable contracts (`SkillDescriptor`, `TargetRequirements`, `HardwareClass`, `SkillResolution`, `SkillExecutionStatus`, `SkillExecutionResult`).
+   - `cv_agent/skills/errors.py`: Normalized failure taxonomy per ADR-0007 §5.
+   - `cv_agent/skills/registry.py`: `DefaultSkillRegistry` enforcing ADR-0001 capability authority and unique `SkillId`, plus ephemeral `DiscoveryCache` isolating runtime-discovered candidates from authoritative registry entries.
+   - `cv_agent/skills/resolver.py`: Deterministic `DefaultSkillResolver` evaluating target compatibility and tool dependencies.
+   - `cv_agent/skills/executor.py`: Procedural `DefaultSkillExecutor` coordinating JSON Schema parameter validation, approval precondition gating, tool dispatch via ADR-0005, and async handoff detection.
+   - `cv_agent/skills/catalog.py`: 10 authoritative declarative NVIDIA skills per ADR-0007 §3.4 and internal baseline skills.
+   - `cv_agent/skills/__init__.py`: Clean public API export.
+3. Authored comprehensive test suite in `tests/test_skills_boundary.py` (32 tests) covering all 11 acceptance gates, negative/adversarial vectors, and deep immutability invariants. Total test suite increased from 314 to **346 passed** (0 warnings).
+4. Verified all local quality gates: Ruff check clean, Ruff format check clean (128 files), Mypy clean on `cv_agent` (66 source files, 0 issues), `git diff --check` clean.
+5. Authored Phase 2H implementation report in `docs/reports/ISSUE-49-PHASE-2H-REPORT.md` and updated `docs/state/STATUS.md`.
+
+**Why:** `[P§15]`, `[P§23]`, `[P§24]`, `[P§29.4]`, `[P§29.9]`, `[P§34]`, and frozen ADR-0007 (`D-025`, `D-040`). Implements the procedural expertise and external vendor discovery layer of the agent architecture, connecting high-level capabilities to discrete executable tools while preventing reasoning prompt bloat and prohibiting silent CPU fallback on unsupported hardware.
+
+**Broke:** Nothing broken. 346 pytest tests pass, 0 warnings. Full backward compatibility preserved.
+
+**Learned:** Anchoring procedural skills directly to authoritative ADR-0001 capabilities and reusing the domain availability state machine preserves clean architectural boundaries, preventing the skills layer from drifting into capability definition or competing lifecycle governance.
+**Left open:** Phase 2H implementation complete on `feature/ajmunna/phase-2h-skills-architecture`. Awaiting Official PM review, PR creation, and CI validation across Python 3.10–3.13.
