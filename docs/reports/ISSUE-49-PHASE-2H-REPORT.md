@@ -1,7 +1,10 @@
 # Issue #49 — Phase 2H Implementation Report
 
 **Issue:** [#49](https://github.com/iam-ajmunna/CV-Agent-Platform/issues/49)
+**PR:** [#50](https://github.com/iam-ajmunna/CV-Agent-Platform/pull/50)
 **Branch:** `feature/ajmunna/phase-2h-skills-architecture`
+**Head Commit:** `e7e29d5`
+**CI Status:** 4/4 Python matrix passed (Python 3.10, 3.11, 3.12, 3.13) in run `34821923132`
 **Status:** Implemented; all 346 tests pass (including 32 Phase 2H boundary and contract tests); all quality gates green.
 
 ## Overview
@@ -62,7 +65,7 @@ $$\text{User Task} \longrightarrow \text{Capability} \longrightarrow \text{Skill
 
 ### Gate 8: Bounded Execution Timeouts & Deprecation Lineage
 - Every `SkillDescriptor` defines `timeout_seconds: int` (must be positive).
-- `SkillExecutor` enforces bounded execution using `asyncio.timeout(skill.timeout_seconds)`, returning `SkillExecutionStatus.TIMEOUT` if execution exceeds duration.
+- `SkillExecutor` enforces bounded execution using `asyncio.wait_for(..., timeout=skill.timeout_seconds)` (compatible across Python 3.10–3.13), returning `SkillExecutionStatus.TIMEOUT` if execution exceeds duration.
 - Deprecated skills declare `deprecated_in_favor_of: SkillId | None` for auditability and migration tracking.
 
 ### Gate 9: Semantic Target Validation (Important I2)
