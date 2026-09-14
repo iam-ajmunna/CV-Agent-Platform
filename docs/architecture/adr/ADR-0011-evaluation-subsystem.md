@@ -140,22 +140,14 @@ ADR-0003 is the sole authority for operation identity, canonical payload hashing
 - `operation_identity: OperationIdentity`
 - `approval_request: ApprovalRequest`
 - `approval_decision: ApprovalDecision`
+- `tool_id: ToolId`
 - `tool_executor: ToolExecutor`
 
 Evaluation may construct only its **functional operation payload** through:
 
 `extract_evaluation_operation_payload(plan: EvaluationPlan) -> Mapping[str, Any]`
 
-The payload is passed to ADR-0003 `compute_payload_hash()`. Evaluation MUST NOT synthesize:
-
-- operation IDs;
-- operation versions;
-- target identities;
-- canonical payload hashes;
-- approval IDs/tokens;
-- approval status;
-- policy versions;
-- lease/fencing state.
+The payload is passed to ADR-0003 `compute_payload_hash()`. Evaluation MUST NOT synthesize operation IDs, operation versions, target identities, canonical payload hashes, approval IDs/tokens, approval status, policy versions, or lease/fencing state.
 
 Before dispatch, the runner verifies that the externally supplied operation identity and approval evidence agree on operation ID, operation version, canonical payload hash, target/resource scope, request identity, and approval decision. Any mismatch fails closed.
 
@@ -196,13 +188,7 @@ If no authorized compatible target exists, execution fails closed. Evaluation ne
 
 Evaluation owns evaluation semantics, not physical transport. All execution is dispatched through ADR-0005 `ToolExecutor` using an authoritative `ToolId` and `TargetId`.
 
-For long-running evaluation jobs, ADR-0005 may return an `ActiveJobHandoff`. The handoff is linked to the authoritative ADR-0003 external-operation identity and job lineage. ADR-0003 owns:
-
-- asynchronous polling;
-- lease renewal and fencing;
-- external-operation state;
-- recovery and reconciliation;
-- terminal workflow transitions.
+For long-running evaluation jobs, ADR-0005 may return an `ActiveJobHandoff`. The handoff is linked to the authoritative ADR-0003 external-operation identity and job lineage. ADR-0003 owns asynchronous polling, lease renewal/fencing, external-operation state, recovery/reconciliation, and terminal workflow transitions.
 
 `ActiveJobHandoff.is_expired()` is a handoff/TTL condition, **not** evidence that the evaluation failed or was never submitted. Evaluation must not create a second UNKNOWN/recovery state machine.
 
@@ -230,7 +216,7 @@ Supported statistical methods are explicitly closed:
 - `BOOTSTRAP_RESAMPLING`
 - `MCNEMAR_TEST`
 
-Method selection is metric/data-type specific and recorded with its version and parameters. The implementation must define deterministic seeds/resampling rules where stochastic resampling is used.
+Method selection is metric/data-type specific and recorded with its version and parameters. The implementation must define deterministic seeds/resampling rules where stochastic resampling is used. Statistical significance requires paired/per-observation evidence appropriate to the selected test; an aggregate scalar alone is insufficient.
 
 For every significance-bearing comparison, the result records:
 
@@ -245,7 +231,7 @@ For every significance-bearing comparison, the result records:
 - comparable baseline/candidate experiment identities
 - the evidence identity used for the comparison.
 
-Invalid, missing, incomplete, or incomparable baseline evidence fails closed. A summary string cannot establish statistical significance.
+`confidence_level` is strictly between 0 and 1 and `p_value` is within `[0, 1]`. Invalid, missing, incomplete, or incomparable baseline evidence fails closed. A summary string cannot establish statistical significance.
 
 ### 3.10 Structured error analysis
 
@@ -284,7 +270,7 @@ All externally produced numeric results are fail-closed:
 - per-class values use the same metric bounds as their metric definition;
 - unsupported metric ranges must be declared explicitly by the metric definition rather than silently accepting arbitrary values.
 
-`MetricResult` validation is metric-definition-aware. Metrics whose mathematical domains differ from `[0,1]` (for example some tracking counts) are validated against their declared domain rather than incorrectly clipped.
+`MetricResult` validation is metric-definition-aware. Metrics whose mathematical domains differ from `[0,1]` are validated against their declared domain rather than incorrectly clipped.
 
 ### 3.13 Systems benchmark validity
 
@@ -327,19 +313,18 @@ It is an empirical result object, not an orchestration record. Authoritative per
 These interfaces are implementation targets only. They are not runtime code and do not authorize implementation before Issue #58 approval.
 
 ```python
-from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from typing import Any, Mapping, NewType, Protocol, Sequence
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from cv_agent.approval.types import ApprovalDecision, ApprovalRequest, OperationIdentity
+from cv_agent.dataset import OperationIdentity
+from cv_agent.orchestration import ApprovalDecision, ApprovalRequest
 from cv_agent.capabilities import CapabilityId, ToolId
 from cv_agent.dataset.types import ContentHash, DatasetId, DatasetVersion
-from cv_agent.tools.types import ExecutionId, TargetId
+from cv_agent.tools import ExecutionId, TargetId, ToolExecutor
 from cv_agent.training.types import CheckpointId, TrainingPrecision
-from cv_agent.tools.executor import ToolExecutor
 
 EvaluationId = NewType("EvaluationId", str)
 MetricId = NewType("MetricId", str)
@@ -461,6 +446,21 @@ class BenchmarkResult(BaseModel):
     target_id: TargetId
 
 
+class ErrorAnalysisRecord(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    total_samples: int = Field(ge=0)
+    failed_samples_count: int = Field(ge=0)
+    false_positive_count: int = Field(ge=0)
+    false_negative_count: int = Field(ge=0)
+    confusion_matrix: tuple[tuple[int, ...], ...] = Field(default_factory=tuple)
+    class_labels: tuple[str, ...] = Field(default_factory=tuple)
+    localization_errors: int = Field(ge=0, default=0)
+    classification_errors: int = Field(ge=0, default=0)
+    slice_performance: Mapping[str, float] = Field(default_factory=dict)
+    representative_failure_hashes: tuple[ContentHash, ...] = Field(default_factory=tuple)
+
+
 class BaselineComparisonResult(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -522,7 +522,7 @@ class EvaluationResult(BaseModel):
     quality_metrics: tuple[MetricResult, ...]
     system_benchmarks: tuple[BenchmarkResult, ...] = Field(default_factory=tuple)
     baseline_comparison: BaselineComparisonResult | None
-    error_analysis: "ErrorAnalysisRecord | None"
+    error_analysis: ErrorAnalysisRecord | None
     environment: EvaluationEnvironmentRecord
     completed_at: datetime
 
@@ -551,7 +551,7 @@ class ErrorAnalyzer(Protocol):
         predictions: Any,
         ground_truth: Any,
         dataset_binding: EvaluationDatasetBinding,
-    ) -> "ErrorAnalysisRecord": ...
+    ) -> ErrorAnalysisRecord: ...
 
 
 class EvaluationRunner(Protocol):
