@@ -1037,3 +1037,30 @@ Added 8 new regression tests, expanding the Phase 2D contract test suite to 35 t
 **Learned:** Combining database-level triggers in SQLite (`BEFORE INSERT/UPDATE/DELETE`) with application-level frozen dataclasses and explicit boundary contracts (`accuracy_metric_requirements`) provides defense-in-depth against data corruption, guaranteeing that even direct SQL queries cannot violate experiment ledger immutability or baseline relational integrity.
 
 **Left open:** Phase 2F formally closed. Phase 2G (ADR-0006 Knowledge & RAG Subsystem) or next dependency unblocked and awaiting Official PM instruction.
+
+---
+
+## 2026-09-14 — Phase 2G (ADR-0006 Knowledge & RAG Subsystem) Implementation (feature/ajmunna/phase-2g-knowledge-rag)
+
+**Did:**
+1. Created short-lived branch `feature/ajmunna/phase-2g-knowledge-rag` from `main` to implement Issue #47.
+2. Implemented `cv_agent/knowledge/`:
+   - `interfaces.py`: Frozen typed contracts (`DocumentId`, `ChunkId` with ADR-0001 §3.1 regex validation, `SourceClass` 8-level evidential hierarchy, `TopicDomain` 6 freshness domains, `Provenance` with mandatory origin anchor, `KnowledgeChunk` with immutable metadata, `KnowledgeDocument`, `ScoredCitation`, `RetrievalRequest`, `RetrievalResponse`, `EmbeddingGateway`, `KnowledgeIngester`, `KnowledgeRetriever`).
+   - `exceptions.py`: Normalized failure taxonomy per ADR-0006 §5 covering ingestion, store, and retrieval failure modes.
+   - `bm25.py`: Deterministic pure-Python Okapi BM25 lexical index with token preservation for model tags (`yolov8n-seg`) and CUDA errors (`cudaErrorMemoryAllocation`), and min-max score normalization to $[0.0, 1.0]$.
+   - `store.py`: `HybridKnowledgeStore` managing single-project workspace containment strictly under `.cv_agent/knowledge/` (`D-013`), atomic persistence of document JSONs, chunk JSONs, BM25 indices, and dense float vectors, cosine similarity computation and normalization ($S_{\text{dense}} = (S_{\text{cos}} + 1)/2$), and embedding model versioning invariant enforcing re-indexing on model change (Gate 10).
+   - `ingester.py`: `DefaultKnowledgeIngester` enforcing Gate 1 mandatory provenance validation (raises `MissingProvenanceError`), Gate 2 local-file anchoring via Git commit SHA or content SHA-256 (rejects `mtime`), secondary sanitization stripping null bytes and escape codes without altering technical source text, and delegation to `EmbeddingGateway`.
+   - `retriever.py`: `DefaultKnowledgeRetriever` implementing Gate 3 normalized hybrid scoring ($S_{\text{hybrid}} = 0.65 S_{\text{dense}} + 0.35 S_{\text{sparse}} \in [0, 1]$), Gate 4 freshness degradation and volatile expired suppression, Gate 5 LinkedIn signal isolation (`PROFESSIONAL_POST` weight $\le 0.2$, `signal_only = True`), and deterministic tie-breaking.
+   - `quarantine.py`: Implements Gate 6 prompt-injection quarantine encapsulating retrieved chunks into passive `<knowledge_citation>` data tags with zero execution, tool invocation, or approval authority.
+   - `__init__.py`: Clean public API export.
+3. Implemented comprehensive test suite in `tests/test_knowledge_rag_boundary.py`: 16 contract and boundary tests covering all 10 non-negotiable acceptance gates, deterministic tie-breaking, BM25 token matching, AST audit proving zero direct LLM provider SDK imports (Gate 8), and memory subsystem isolation (Gate 9).
+4. Verified all quality gates: Ruff check clean, Ruff format check clean, Mypy clean on `cv_agent` (59 source files), `git diff --check` clean. Full test suite stands at **301 passed** (0 warnings).
+5. Created implementation report in `docs/reports/ISSUE-47-PHASE-2G-REPORT.md` and updated `STATUS.md`.
+
+**Why:** `[P§16]`, `[P§17]`, `[P§18]`, `[P§19]`, `[P§20]`, `[P§29.3]`, `[P§29.7]`, `[P§34]`, and frozen ADR-0006 (`D-024`, `D-039`). Fulfills Issue #47 requirements by delivering an evidence-weighted, hybrid-indexed knowledge retrieval layer for computer vision reasoning without layer leakage or prompt injection risks.
+
+**Broke:** Nothing broken. All 301 pytest tests pass across 16 test modules.
+
+**Learned:** Normalizing both dense cosine similarity ($[-1, 1] \rightarrow [0, 1]$) and sparse BM25 scores via min-max scaling before linear fusion eliminates score scale distortion between keyword matching and conceptual semantics while guaranteeing that composite re-ranking remains mathematically bounded.
+
+**Left open:** Commit, push branch `feature/ajmunna/phase-2g-knowledge-rag`, open PR linked to Issue #47, verify CI matrix across Python 3.10–3.13, and request Official PM adversarial review against all 10 gates.
