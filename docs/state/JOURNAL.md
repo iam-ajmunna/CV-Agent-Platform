@@ -1445,3 +1445,99 @@ Remediated the remaining architectural boundary finding from the Official PM thi
 **Learned:** Architectural boundaries between orchestration and dataset subsystems must be absolute: one subsystem must never synthesize or approximate the security identities owned by another.
 
 **Left open:** Pushing remediation commit to `feature/ajmunna/phase-2j-dataset-subsystem` for PR #53 and awaiting final Official PM merge authorization.
+
+---
+
+## 2026-09-14 — Phase 2K ADR-0010 Training Subsystem Implementation (feature/ajmunna/phase-2k-training-subsystem)
+
+**Did:**
+Implemented the complete ADR-0010 Training Subsystem architecture in `cv_agent/training/` under Issue #54 following pre-implementation architecture approval (Issue #55):
+1. **Domain Models and Immutability (`cv_agent/training/contracts.py`, `types.py`, `errors.py`):**
+   - Immutable Pydantic v2 models (`TrainingPlan`, `OptimizerConfig`, `SchedulerConfig`, `LossComponentConfig`, `AugmentationConfig`, `ComputeRequirements`, `CostEstimate`, `TrainingTelemetryRecord`, `CheckpointManifest`, `TrainingEnvironmentRecord`, `TrainingJobRecord`, `RetentionPolicy`, `RetentionDecision`).
+   - Strong typing with `PlanId`, `TrainingJobId`, `CheckpointId`, `ApprovalId`, and closed enums (`TrainingPrecision`, `DistributedStrategy`, `TrainingJobStatus`, `FailureReason`, `CompletionReason`).
+   - Deep defensive immutability using `MappingProxyType` and finite float guards (`math.isfinite`).
+2. **Canonicalization & ADR-0003 Delegation (`cv_agent/training/canonicalization.py`):**
+   - Implemented `extract_training_operation_payload(plan)` and `compute_training_payload_hash(plan)` delegating to ADR-0003 `compute_payload_hash`.
+   - Zero local synthesis of operation versions, target identities, or ad-hoc payload hashes.
+3. **Pure Domain Lifecycle Validation (`cv_agent/training/state_machine.py`):**
+   - Decoupled from orchestration persistence: `validate_training_job_transition()` strictly validates the 11-state transition matrix without persisting state or competing with ADR-0003.
+4. **Deterministic Cost Estimation (`cv_agent/training/estimator.py`):**
+   - `DeterministicTrainingEstimator` computes exact training steps (integer ceiling), wall-clock duration, compute hours, and financial costs using `Decimal` arithmetic.
+5. **Online Telemetry & Divergence Monitoring (`cv_agent/training/monitor.py`):**
+   - `OnlineDivergenceMonitor` detects NaN/Inf loss, loss explosions (>3x baseline), and plateauing with early stopping semantics (`RUNNING -> COMPLETED` with `CompletionReason.EARLY_STOPPING`).
+6. **Logical Checkpoint Retention (`cv_agent/training/retention.py`):**
+   - `CheckpointRetentionManager` computes logical retention decisions preserving best and final checkpoints with deterministic tie-breaking, without performing physical storage deletion.
+7. **Secure Execution Launcher (`cv_agent/training/launcher.py`):**
+   - `DefaultTrainingLauncher` validates complete ADR-0003 approval security tuples (`ApprovalRequest` + `ApprovalDecision`), verifies ADR-0009 dataset manifest split disjointness (calibration split strictly isolated), enforces target ID consistency against approval resource scope, and delegates execution transport exclusively to ADR-0005 `ToolExecutor`.
+8. **Comprehensive Adversarial Boundary Tests (`tests/test_training_boundary.py`):**
+   - 22 passing tests covering all cross-ADR failure surfaces, tamper rejection, invalid state transitions, NaN loss abort, early stopping completion, split disjointness, and target ID consistency.
+   - Verified 455 total passing tests across the entire repository test suite.
+
+**Why:** `[P§10]`, `[P§11]`, `[P§13]`, `[P§15]`, `[P§21]`, `[P§22]`, `[P§24]`, `[P§25]`, `[P§29.2]`, `[P§29.4]`, `[P§29.8]`, `[P§34]`, and frozen ADR-0010. Enforces strict layer decoupling: training specifies and monitors domain execution while delegating orchestration authority to ADR-0003, dataset manifests to ADR-0009, and execution transport to ADR-0005.
+
+**Broke:** Nothing broken. 455 tests pass across 20 test modules; all quality gates, type checks, packaging, and security audits clean.
+
+**Learned:** Subsystem launchers must strictly consume the full security context from authoritative orchestration (ADR-0003) rather than manufacturing synthetic identity components or re-interpreting resource scopes.
+
+**Left open:** PR submission and Official PM adversarial review under Issue #54.
+
+---
+
+## 2026-09-14 — Phase 2K Adversarial Review Remediation (PR #57)
+
+**Did:**
+Remediated the four findings from the Official PM adversarial review on PR #57:
+1. **B1: Implemented ADR-0005 Cancellation Delegation (`cv_agent/training/launcher.py`):**
+   - Implemented `abort_request()` to construct typed `ToolInvocation` with `tool_id="cv.train.cancel"`, `job_id`, and `target_id`.
+   - Dispatched via ADR-0005 `ToolExecutor.execute()`, returning `True` on `SUCCESS` without mutating orchestration state.
+   - Requires explicit `TargetId` and `ToolExecutor`, failing closed if either is missing.
+2. **B2: Eliminated Target Synthesis (`cv_agent/training/launcher.py`):**
+   - Removed `"default"` fallback in `prepare_invocation()` and `launch()`.
+   - Requires an authorized `TargetId` or derives it strictly from the authoritative approval scope (`target:<id>`); fails closed if no authorized target is available.
+3. **B3: Unique Execution Identity Per Launch (`cv_agent/training/launcher.py`):**
+   - Replaced deterministic `job_id = f"train-{plan.plan_id}"` with uniquely generated `TrainingJobId` per execution launch (`f"job-{plan.plan_id}-{uuid.uuid4().hex[:12]}"`).
+   - Retained `plan_id` for lineage while preventing telemetry/checkpoint/job-record collisions across relaunches.
+4. **Important Finding: Fixed Retention Tie-Break Ordering (`cv_agent/training/retention.py`):**
+   - Implemented `_BestRankingKey` and `_RecencyRankingKey` custom comparators ensuring metric descending/ascending, epoch descending, and `checkpoint_id` strictly ascending.
+5. **Adversarial Regression Tests Added (`tests/test_training_boundary.py`):**
+   - Added 4 dedicated tests: `test_abort_request_delegates_to_adr0005`, `test_launch_rejects_missing_target_and_prevents_default_synthesis`, `test_launch_unique_execution_identity_per_run`, and `test_retention_ascending_checkpoint_id_tie_break`.
+   - Verified 459 total passing tests across 20 test modules.
+
+**Why:** `[P§10]`, `[P§15]`, `[P§21]`, `[P§22]`, `[P§24]`, `[P§34]`, ADR-0003, ADR-0005, and frozen ADR-0010. Guarantees true transport cancellation delegation, zero unauthorized target invention, execution identity uniqueness per launch, and exact adherence to documented tie-breaking contracts.
+
+**Broke:** Nothing broken. 459 tests pass across 20 test modules; all quality gates, type checks, packaging, and security audits clean.
+
+**Learned:** Subsystem launchers must avoid local target defaulting just as strictly as identity synthesis, and ranking keys must be explicitly composed when tuple tie-break directions differ across fields.
+
+**Left open:** Pushing remediation commit to `feature/ajmunna/phase-2k-training-subsystem` for PR #57 and awaiting second Official PM review.
+
+---
+
+## 2026-09-14 — Phase 2K Second Adversarial Review Remediation (PR #57)
+
+**Did:**
+Remediated both residual architectural concerns identified in the second Official PM adversarial review of PR #57:
+1. **B4: Mandatory `ToolExecutor` on `launch()` (`cv_agent/training/launcher.py`):**
+   - Updated `TrainingLauncher` protocol and `DefaultTrainingLauncher.launch()` signature to require `tool_executor: ToolExecutor` as a mandatory positional argument.
+   - Added fail-closed check `if tool_executor is None: raise TrainingExecutionError(...)`.
+   - Execution is unconditionally dispatched through ADR-0005: `launch()` cannot advance `LAUNCHING -> RUNNING` or return a `TrainingJobRecord` without actual tool dispatch.
+   - If `tool_executor` returns any non-success status, the launcher transitions `LAUNCHING -> FAILED` and raises `TrainingExecutionError`.
+2. **B5: Mandatory Authoritative `ToolId` on `abort_request()` (`cv_agent/training/launcher.py`):**
+   - Updated `TrainingLauncher` protocol and `DefaultTrainingLauncher.abort_request()` signature to require `tool_id: ToolId` as a mandatory positional argument.
+   - Removed unverified default `ToolId("cv.train.cancel")`.
+   - Added fail-closed check `if tool_id is None or not str(tool_id).strip(): raise TrainingExecutionError(...)`.
+3. **Adversarial Regression Tests Added (`tests/test_training_boundary.py`):**
+   - Updated existing boundary tests to supply mandatory `tool_executor` via `_make_mock_executor()` and explicit `tool_id`.
+   - Added `test_launch_requires_mandatory_tool_executor` asserting fail-closed rejection when `tool_executor=None`.
+   - Added `test_launch_fails_closed_on_failed_tool_execution` asserting transition `LAUNCHING -> FAILED` and exception when dispatch fails.
+   - Added `test_abort_request_requires_authoritative_tool_id` asserting fail-closed rejection when `tool_id=None`.
+   - Expanded test suite to 462 total passing tests.
+
+**Why:** Satisfies ADR-0005, ADR-0010, and PM architectural ruling: execution launchers must never advance to `RUNNING` without dispatching through the transport executor, and cancellation must not manufacture unestablished tool identities.
+
+**Broke:** Nothing broken. All 462 tests pass; Ruff lint/format clean; Mypy clean; package build clean; security audit clean.
+
+**Learned:** Making the transport executor strictly mandatory eliminates "mock-less" execution paths where preparation masquerades as dispatch, ensuring that runtime state transitions strictly reflect physical transport outcomes.
+
+**Left open:** Push remediation commit to `feature/ajmunna/phase-2k-training-subsystem` for PR #57, verify GitHub Actions CI matrix across Python 3.10–3.13, and request final PM review and merge disposition.
+
