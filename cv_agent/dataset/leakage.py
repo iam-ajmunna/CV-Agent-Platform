@@ -78,9 +78,16 @@ class StandardLeakageAuditor:
         meta: dict[str, ItemMetadata],
         now: datetime,
     ) -> LeakageCheckResult:
-        """Evaluate temporal continuity and clip straddling across splits."""
-        is_temporal_policy = any(
-            kw in policy for kw in ("temporal", "time", "sequential", "video")
+        """Evaluate temporal continuity, clip straddling, and timestamp window disjointness."""
+        is_clip_policy = any(kw in policy for kw in ("clip", "video"))
+        is_time_ordered = any(
+            kw in policy
+            for kw in ("time-ordered", "time_ordered", "sequential", "chronological")
+        )
+        is_temporal_policy = (
+            is_clip_policy
+            or is_time_ordered
+            or any(kw in policy for kw in ("temporal", "time", "timestamp"))
         )
 
         all_hashes = [str(h) for h in splits.all_hashes()]
@@ -94,7 +101,44 @@ class StandardLeakageAuditor:
                 auditor_version=AUDITOR_VERSION,
             )
 
-        # Fail-closed check: verify all items have clip_id or capture_timestamp
+        # 1. Fail-closed metadata verification based on declared policy
+        if is_time_ordered:
+            missing_ts = [
+                h
+                for h in all_hashes
+                if h not in meta or meta[h].capture_timestamp is None
+            ]
+            if missing_ts:
+                return LeakageCheckResult(
+                    leakage_type=LeakageType.TEMPORAL,
+                    passed=False,
+                    summary=(
+                        f"Time-ordered split policy requires capture_timestamp on all items: "
+                        f"{len(missing_ts)} items missing capture_timestamp (e.g. {missing_ts[:3]})"
+                    ),
+                    metrics={"missing_metadata_count": float(len(missing_ts))},
+                    timestamp=now,
+                    auditor_version=AUDITOR_VERSION,
+                )
+
+        if is_clip_policy:
+            missing_clips = [
+                h for h in all_hashes if h not in meta or meta[h].clip_id is None
+            ]
+            if missing_clips:
+                return LeakageCheckResult(
+                    leakage_type=LeakageType.TEMPORAL,
+                    passed=False,
+                    summary=(
+                        f"Clip-based split policy requires clip_id on all items: "
+                        f"{len(missing_clips)} items missing clip_id (e.g. {missing_clips[:3]})"
+                    ),
+                    metrics={"missing_metadata_count": float(len(missing_clips))},
+                    timestamp=now,
+                    auditor_version=AUDITOR_VERSION,
+                )
+
+        # General temporal policy: require at least one temporal coordinate per item
         missing_temporal = [
             h
             for h in all_hashes
@@ -106,28 +150,34 @@ class StandardLeakageAuditor:
                 leakage_type=LeakageType.TEMPORAL,
                 passed=False,
                 summary=(
-                    f"Missing temporal metadata for {len(missing_temporal)} items under temporal split policy: "
-                    f"clip_id and capture_timestamp absent (e.g. {missing_temporal[:3]})"
+                    f"Temporal split policy requires temporal metadata (clip_id or capture_timestamp) "
+                    f"on all items: {len(missing_temporal)} items have neither (e.g. {missing_temporal[:3]})"
                 ),
                 metrics={"missing_metadata_count": float(len(missing_temporal))},
                 timestamp=now,
                 auditor_version=AUDITOR_VERSION,
             )
 
-        # Check clip_id disjointness across splits
+        # 2. Check clip_id disjointness across splits
         train_clips = {
-            meta[str(h)].clip_id for h in splits.train_hashes if meta[str(h)].clip_id
+            meta[str(h)].clip_id
+            for h in splits.train_hashes
+            if meta[str(h)].clip_id is not None
         }
         val_clips = {
-            meta[str(h)].clip_id for h in splits.val_hashes if meta[str(h)].clip_id
+            meta[str(h)].clip_id
+            for h in splits.val_hashes
+            if meta[str(h)].clip_id is not None
         }
         test_clips = {
-            meta[str(h)].clip_id for h in splits.test_hashes if meta[str(h)].clip_id
+            meta[str(h)].clip_id
+            for h in splits.test_hashes
+            if meta[str(h)].clip_id is not None
         }
         calib_clips = {
             meta[str(h)].clip_id
             for h in splits.calibration_hashes
-            if meta[str(h)].clip_id
+            if meta[str(h)].clip_id is not None
         }
 
         clip_overlaps = (
@@ -135,9 +185,11 @@ class StandardLeakageAuditor:
             | (train_clips & val_clips)
             | (train_clips & calib_clips)
             | (val_clips & test_clips)
+            | (val_clips & calib_clips)
+            | (test_clips & calib_clips)
         )
         if clip_overlaps:
-            sorted_clips = sorted(str(c) for c in clip_overlaps if c is not None)[:3]
+            sorted_clips = sorted(str(c) for c in clip_overlaps)[:3]
             return LeakageCheckResult(
                 leakage_type=LeakageType.TEMPORAL,
                 passed=False,
@@ -147,10 +199,76 @@ class StandardLeakageAuditor:
                 auditor_version=AUDITOR_VERSION,
             )
 
+        # 3. Check timestamp windows and time-ordered constraints
+        def _get_timestamps(hashes: Sequence[object]) -> list[datetime]:
+            out: list[datetime] = []
+            for h in hashes:
+                item = meta.get(str(h))
+                if item is not None and item.capture_timestamp is not None:
+                    out.append(item.capture_timestamp)
+            return out
+
+        train_ts = _get_timestamps(splits.train_hashes)
+        val_ts = _get_timestamps(splits.val_hashes)
+        test_ts = _get_timestamps(splits.test_hashes)
+        calib_ts = _get_timestamps(splits.calibration_hashes)
+        eval_ts = val_ts + test_ts + calib_ts
+
+        if train_ts and eval_ts:
+            min_train, max_train = min(train_ts), max(train_ts)
+            min_eval, max_eval = min(eval_ts), max(eval_ts)
+
+            # Exact timestamp collision
+            exact_ts_overlap = set(train_ts) & set(eval_ts)
+            if exact_ts_overlap:
+                return LeakageCheckResult(
+                    leakage_type=LeakageType.TEMPORAL,
+                    passed=False,
+                    summary=(
+                        f"Temporal leakage detected: {len(exact_ts_overlap)} exact timestamp collisions "
+                        f"between train and eval splits (e.g. {[t.isoformat() for t in sorted(exact_ts_overlap)[:2]]})"
+                    ),
+                    metrics={"exact_timestamp_overlaps": float(len(exact_ts_overlap))},
+                    timestamp=now,
+                    auditor_version=AUDITOR_VERSION,
+                )
+
+            # Time-ordered policy: train window must strictly precede eval window
+            if is_time_ordered and max_train >= min_eval:
+                return LeakageCheckResult(
+                    leakage_type=LeakageType.TEMPORAL,
+                    passed=False,
+                    summary=(
+                        f"Time-ordered split policy violated: train window "
+                        f"[{min_train.isoformat()}, {max_train.isoformat()}] does not strictly precede "
+                        f"eval window [{min_eval.isoformat()}, {max_eval.isoformat()}]"
+                    ),
+                    metrics={"window_violation": 1.0},
+                    timestamp=now,
+                    auditor_version=AUDITOR_VERSION,
+                )
+
+            # General temporal policy: temporal window straddling check
+            eval_inside_train = [t for t in eval_ts if min_train < t < max_train]
+            train_inside_eval = [t for t in train_ts if min_eval < t < max_eval]
+            if eval_inside_train or train_inside_eval:
+                straddle_count = len(eval_inside_train) + len(train_inside_eval)
+                return LeakageCheckResult(
+                    leakage_type=LeakageType.TEMPORAL,
+                    passed=False,
+                    summary=(
+                        f"Temporal window straddling detected: {len(eval_inside_train)} eval items inside train window "
+                        f"[{min_train.isoformat()}, {max_train.isoformat()}] and {len(train_inside_eval)} train items inside eval window"
+                    ),
+                    metrics={"straddling_items": float(straddle_count)},
+                    timestamp=now,
+                    auditor_version=AUDITOR_VERSION,
+                )
+
         return LeakageCheckResult(
             leakage_type=LeakageType.TEMPORAL,
             passed=True,
-            summary="Zero clip straddling detected across all splits",
+            summary="Zero temporal clip straddling or window overlap detected across splits",
             metrics={"overlapping_clips": 0.0},
             timestamp=now,
             auditor_version=AUDITOR_VERSION,
@@ -163,11 +281,12 @@ class StandardLeakageAuditor:
         meta: dict[str, ItemMetadata],
         now: datetime,
     ) -> LeakageCheckResult:
-        """Evaluate camera and site disjointness between train and eval/calibration splits."""
-        is_camera_policy = any(kw in policy for kw in ("camera", "site", "location"))
+        """Evaluate camera and site disjointness between train and eval splits (decoupled per Gate B3)."""
+        requires_camera = "camera" in policy
+        requires_site = any(kw in policy for kw in ("site", "location"))
 
         all_hashes = [str(h) for h in splits.all_hashes()]
-        if not is_camera_policy:
+        if not requires_camera and not requires_site:
             return LeakageCheckResult(
                 leakage_type=LeakageType.CAMERA_SITE,
                 passed=True,
@@ -177,63 +296,83 @@ class StandardLeakageAuditor:
                 auditor_version=AUDITOR_VERSION,
             )
 
-        # Fail-closed check: camera_id or site_id required on all items
-        missing_cam = [
-            h
-            for h in all_hashes
-            if h not in meta or (meta[h].camera_id is None and meta[h].site_id is None)
-        ]
-        if missing_cam:
-            return LeakageCheckResult(
-                leakage_type=LeakageType.CAMERA_SITE,
-                passed=False,
-                summary=(
-                    f"Camera/site policy requires location metadata: {len(missing_cam)} items "
-                    f"missing camera_id and site_id (e.g. {missing_cam[:3]})"
-                ),
-                metrics={"missing_metadata_count": float(len(missing_cam))},
-                timestamp=now,
-                auditor_version=AUDITOR_VERSION,
-            )
+        # 1. Fail-closed check: camera_id required only when camera disjointness is requested
+        if requires_camera:
+            missing_cam = [
+                h for h in all_hashes if h not in meta or meta[h].camera_id is None
+            ]
+            if missing_cam:
+                return LeakageCheckResult(
+                    leakage_type=LeakageType.CAMERA_SITE,
+                    passed=False,
+                    summary=(
+                        f"Camera-disjoint split policy requires camera_id on all items: "
+                        f"{len(missing_cam)} items missing camera_id (e.g. {missing_cam[:3]})"
+                    ),
+                    metrics={"missing_camera_count": float(len(missing_cam))},
+                    timestamp=now,
+                    auditor_version=AUDITOR_VERSION,
+                )
 
-        # Extract train cameras/sites
-        train_cams = {
-            meta[str(h)].camera_id
-            for h in splits.train_hashes
-            if meta[str(h)].camera_id
-        }
-        train_sites = {
-            meta[str(h)].site_id for h in splits.train_hashes if meta[str(h)].site_id
-        }
+        # 2. Fail-closed check: site_id required only when site disjointness is requested
+        if requires_site:
+            missing_site = [
+                h for h in all_hashes if h not in meta or meta[h].site_id is None
+            ]
+            if missing_site:
+                return LeakageCheckResult(
+                    leakage_type=LeakageType.CAMERA_SITE,
+                    passed=False,
+                    summary=(
+                        f"Site-disjoint split policy requires site_id on all items: "
+                        f"{len(missing_site)} items missing site_id (e.g. {missing_site[:3]})"
+                    ),
+                    metrics={"missing_site_count": float(len(missing_site))},
+                    timestamp=now,
+                    auditor_version=AUDITOR_VERSION,
+                )
 
-        eval_cams = {
-            meta[str(h)].camera_id
-            for h in (
-                splits.val_hashes + splits.test_hashes + splits.calibration_hashes
-            )
-            if meta[str(h)].camera_id
-        }
-        eval_sites = {
-            meta[str(h)].site_id
-            for h in (
-                splits.val_hashes + splits.test_hashes + splits.calibration_hashes
-            )
-            if meta[str(h)].site_id
-        }
+        # 3. Disjointness verification for the declared dimensions
+        eval_hashes = splits.val_hashes + splits.test_hashes + splits.calibration_hashes
+        cam_overlap: set[str] = set()
+        site_overlap: set[str] = set()
 
-        cam_overlap = train_cams & eval_cams
-        site_overlap = train_sites & eval_sites
+        if requires_camera:
+            train_cams = {
+                meta[str(h)].camera_id
+                for h in splits.train_hashes
+                if meta[str(h)].camera_id is not None
+            }
+            eval_cams = {
+                meta[str(h)].camera_id
+                for h in eval_hashes
+                if meta[str(h)].camera_id is not None
+            }
+            cam_overlap = {c for c in (train_cams & eval_cams) if c is not None}
+
+        if requires_site:
+            train_sites = {
+                meta[str(h)].site_id
+                for h in splits.train_hashes
+                if meta[str(h)].site_id is not None
+            }
+            eval_sites = {
+                meta[str(h)].site_id
+                for h in eval_hashes
+                if meta[str(h)].site_id is not None
+            }
+            site_overlap = {s for s in (train_sites & eval_sites) if s is not None}
 
         if cam_overlap or site_overlap:
-            sorted_cams = sorted(str(c) for c in cam_overlap if c is not None)[:3]
-            sorted_sites = sorted(str(s) for s in site_overlap if s is not None)[:3]
+            failure_reasons = []
+            if cam_overlap:
+                failure_reasons.append(f"cameras {sorted(cam_overlap)[:3]}")
+            if site_overlap:
+                failure_reasons.append(f"sites {sorted(site_overlap)[:3]}")
             return LeakageCheckResult(
                 leakage_type=LeakageType.CAMERA_SITE,
                 passed=False,
-                summary=(
-                    f"Camera/site leakage detected: cameras {sorted_cams} "
-                    f"or sites {sorted_sites} present in both train and eval splits"
-                ),
+                summary=f"Camera/site leakage detected: {' and '.join(failure_reasons)} present in both train and eval splits",
                 metrics={
                     "overlapping_cameras": float(len(cam_overlap)),
                     "overlapping_sites": float(len(site_overlap)),
@@ -245,7 +384,7 @@ class StandardLeakageAuditor:
         return LeakageCheckResult(
             leakage_type=LeakageType.CAMERA_SITE,
             passed=True,
-            summary="Zero camera or site overlap detected between train and eval splits",
+            summary="Zero camera or site overlap detected between train and eval splits per declared policy",
             metrics={"overlapping_cameras": 0.0, "overlapping_sites": 0.0},
             timestamp=now,
             auditor_version=AUDITOR_VERSION,
@@ -258,7 +397,53 @@ class StandardLeakageAuditor:
         meta: dict[str, ItemMetadata],
         now: datetime,
     ) -> LeakageCheckResult:
-        """Evaluate perceptual hash collisions (dHash/pHash) across split boundaries."""
+        """Evaluate perceptual hash collisions across split boundaries (fails closed on partial metadata per Gate B3)."""
+        all_hashes = [str(h) for h in splits.all_hashes()]
+        is_duplicate_policy = any(
+            kw in policy
+            for kw in ("duplicate", "dedup", "perceptual", "phash", "dhash")
+        )
+        has_any_phash = any(
+            meta[h].perceptual_hash is not None for h in all_hashes if h in meta
+        )
+
+        # If policy does not mandate near-duplicate checks AND no perceptual hashes were supplied, pass
+        if not is_duplicate_policy and not has_any_phash:
+            return LeakageCheckResult(
+                leakage_type=LeakageType.NEAR_DUPLICATE,
+                passed=True,
+                summary=f"Near-duplicate check not mandated by split_policy '{policy}' and no perceptual hashes supplied",
+                metrics={"duplicate_pairs": 0.0},
+                timestamp=now,
+                auditor_version=AUDITOR_VERSION,
+            )
+
+        # Fail-closed: If near-duplicate check is active (by policy or partial metadata),
+        # every item across all splits must provide a perceptual_hash!
+        missing_phashes = [
+            h for h in all_hashes if h not in meta or meta[h].perceptual_hash is None
+        ]
+        if missing_phashes:
+            reason = (
+                "Near-duplicate policy declared"
+                if is_duplicate_policy
+                else "Partial perceptual metadata provided"
+            )
+            return LeakageCheckResult(
+                leakage_type=LeakageType.NEAR_DUPLICATE,
+                passed=False,
+                summary=(
+                    f"{reason}: {len(missing_phashes)} of {len(all_hashes)} "
+                    f"items missing perceptual_hash metadata (e.g. {missing_phashes[:3]})"
+                ),
+                metrics={
+                    "missing_metadata_count": float(len(missing_phashes)),
+                    "collision_count": 0.0,
+                },
+                timestamp=now,
+                auditor_version=AUDITOR_VERSION,
+            )
+
         train_hashes = [str(h) for h in splits.train_hashes]
         eval_hashes = [
             str(h)
@@ -267,37 +452,8 @@ class StandardLeakageAuditor:
             )
         ]
 
-        # Collect perceptual hashes
-        train_phashes = [
-            (h, meta[h].perceptual_hash)
-            for h in train_hashes
-            if h in meta and meta[h].perceptual_hash is not None
-        ]
-        eval_phashes = [
-            (h, meta[h].perceptual_hash)
-            for h in eval_hashes
-            if h in meta and meta[h].perceptual_hash is not None
-        ]
-
-        if not train_phashes or not eval_phashes:
-            # If policy mandated duplicate check but metadata absent, fail closed
-            if "duplicate" in policy:
-                return LeakageCheckResult(
-                    leakage_type=LeakageType.NEAR_DUPLICATE,
-                    passed=False,
-                    summary="Near-duplicate policy declared but perceptual_hash metadata is missing",
-                    metrics={"missing_phashes": 1.0},
-                    timestamp=now,
-                    auditor_version=AUDITOR_VERSION,
-                )
-            return LeakageCheckResult(
-                leakage_type=LeakageType.NEAR_DUPLICATE,
-                passed=True,
-                summary="Zero perceptual hash collisions (no perceptual hashes supplied; split hashes disjoint)",
-                metrics={"duplicate_pairs": 0.0},
-                timestamp=now,
-                auditor_version=AUDITOR_VERSION,
-            )
+        train_phashes = [(h, meta[h].perceptual_hash) for h in train_hashes]
+        eval_phashes = [(h, meta[h].perceptual_hash) for h in eval_hashes]
 
         collision_count = 0
         min_distance = 64

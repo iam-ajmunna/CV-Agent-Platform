@@ -8,6 +8,7 @@ import uuid
 from pathlib import Path
 
 from cv_agent.dataset.errors import (
+    DatasetError,
     PathTraversalError,
     PayloadCorruptionError,
     PayloadNotFoundError,
@@ -91,8 +92,15 @@ class LocalFSStore:
                 # Enforce write-once immutability via read-only permissions
                 try:
                     os.chmod(dest, 0o444)
-                except OSError:
-                    pass
+                except OSError as err:
+                    try:
+                        os.chmod(dest, 0o644)
+                    except OSError:
+                        pass
+                    dest.unlink(missing_ok=True)
+                    raise DatasetError(
+                        f"Failed to enforce read-only permissions (0o444) on stored payload {dest}: {err}"
+                    ) from err
             else:
                 # Deduplication: already stored with identical content hash
                 tmp_file.unlink(missing_ok=True)
@@ -143,6 +151,17 @@ class LocalFSStore:
                 )
 
             os.replace(tmp_dest, dest)
+            try:
+                os.chmod(dest, 0o444)
+            except OSError as err:
+                try:
+                    os.chmod(dest, 0o644)
+                except OSError:
+                    pass
+                dest.unlink(missing_ok=True)
+                raise DatasetError(
+                    f"Failed to enforce read-only permissions (0o444) on retrieved payload {dest}: {err}"
+                ) from err
             return dest
         except Exception:
             tmp_dest.unlink(missing_ok=True)

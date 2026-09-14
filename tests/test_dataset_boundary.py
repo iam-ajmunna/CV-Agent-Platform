@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
 from pydantic import ValidationError
@@ -20,6 +21,7 @@ from cv_agent.dataset import (
     CollectionConditions,
     ContentHash,
     DatasetApprovalRequiredError,
+    DatasetError,
     DatasetId,
     DatasetLineage,
     DatasetManifest,
@@ -27,6 +29,7 @@ from cv_agent.dataset import (
     DatasetVersion,
     DatasetVersionConflictError,
     FileSystemDatasetRegistry,
+    GCSStore,
     GuidelineRef,
     InvalidGeometryError,
     ItemMetadata,
@@ -404,7 +407,7 @@ def test_leakage_audit_temporal_policy() -> None:
     results = auditor.audit_splits(manifest_temporal, meta_missing)
     r_temporal = next(r for r in results if r.leakage_type == LeakageType.TEMPORAL)
     assert not r_temporal.passed
-    assert "Missing temporal metadata" in r_temporal.summary
+    assert "temporal metadata" in r_temporal.summary.lower()
 
     # 2. Temporal policy with clip straddling fails closed
     meta_overlap = {
@@ -472,7 +475,7 @@ def test_leakage_audit_camera_policy() -> None:
     results = auditor.audit_splits(manifest, {h1: ItemMetadata(content_hash=h1)})
     r_cam = next(r for r in results if r.leakage_type == LeakageType.CAMERA_SITE)
     assert not r_cam.passed
-    assert "Camera/site policy requires location metadata" in r_cam.summary
+    assert "Camera-disjoint split policy requires camera_id" in r_cam.summary
 
     # Camera overlap fails closed
     meta_overlap = {
@@ -1040,3 +1043,477 @@ def test_registry_get_non_existent(temp_registry: FileSystemDatasetRegistry) -> 
     """I2: FileSystemDatasetRegistry.get raises DatasetNotFoundError for unregistered versions."""
     with pytest.raises(DatasetNotFoundError):
         temp_registry.get(DatasetId("cctv.perimeter"), DatasetVersion("v9.9.9"))
+
+
+# ---------------------------------------------------------------------------
+# PM Adversarial Review Remediation Tests (Findings 1–6)
+# ---------------------------------------------------------------------------
+
+
+def test_leakage_audit_partial_perceptual_hash_fails_closed() -> None:
+    """Finding 1 (B3): Partial perceptual metadata cannot silently pass; must fail closed."""
+    auditor = StandardLeakageAuditor()
+    h1, h2, h3 = [_dummy_hash(f"phash_partial_{i}") for i in range(3)]
+    splits = SplitMembership(train_hashes=(h1,), val_hashes=(h2,), test_hashes=(h3,))
+
+    # 1. Random split policy without duplicate check, but partial perceptual hashes provided
+    manifest_unmandated = DatasetManifest(
+        dataset_id=DatasetId("cctv.perimeter"),
+        version=DatasetVersion("v1.0.0"),
+        sources=("site-1",),
+        n_items=3,
+        class_definitions=(_make_class_def(),),
+        class_distribution={"person": 3},
+        split_policy="random-stratified",
+        split_membership=splits,
+        annotation_version=AnnotationVersion("ann-v1.0.0"),
+        annotation_guideline_ref=GuidelineRef("git:guidelines"),
+        lineage=DatasetLineage(),
+        license_and_constraints="Proprietary",
+        collection_conditions=_make_collection_conditions(),
+        payload_root_checksum=compute_payload_root_checksum(splits.all_hashes()),
+        leakage_audit_records=(),
+    )
+
+    # h1 and h2 provide perceptual_hash, but h3 does not: MUST fail closed!
+    meta_partial = {
+        h1: ItemMetadata(content_hash=h1, perceptual_hash="0123456789abcdef"),
+        h2: ItemMetadata(content_hash=h2, perceptual_hash="fedcba9876543210"),
+        h3: ItemMetadata(content_hash=h3, perceptual_hash=None),
+    }
+    results = auditor.audit_splits(manifest_unmandated, meta_partial)
+    r_dup = next(r for r in results if r.leakage_type == LeakageType.NEAR_DUPLICATE)
+    assert not r_dup.passed
+    assert "Partial perceptual metadata provided" in r_dup.summary
+    assert "missing perceptual_hash metadata" in r_dup.summary
+
+    # 2. Policy explicitly mandating duplicate check with missing hash on an item: fails closed
+    manifest_mandated = manifest_unmandated.model_copy(
+        update={"split_policy": "near-duplicate-audited"}
+    )
+    results_mandated = auditor.audit_splits(manifest_mandated, meta_partial)
+    r_dup_mandated = next(
+        r for r in results_mandated if r.leakage_type == LeakageType.NEAR_DUPLICATE
+    )
+    assert not r_dup_mandated.passed
+    assert "Near-duplicate policy declared" in r_dup_mandated.summary
+
+    # 3. Complete perceptual hashes across all items: passes when Hamming distance > threshold
+    meta_complete = {
+        h1: ItemMetadata(content_hash=h1, perceptual_hash="0000000000000000"),
+        h2: ItemMetadata(content_hash=h2, perceptual_hash="ffffffffffffffff"),
+        h3: ItemMetadata(content_hash=h3, perceptual_hash="aaaaaaaaaaaaaaaa"),
+    }
+    results_complete = auditor.audit_splits(manifest_mandated, meta_complete)
+    r_dup_complete = next(
+        r for r in results_complete if r.leakage_type == LeakageType.NEAR_DUPLICATE
+    )
+    assert r_dup_complete.passed
+
+
+def test_leakage_audit_camera_site_decoupling() -> None:
+    """Finding 2 (B3): camera-disjoint requires camera_id; site-disjoint requires site_id; cleanly decoupled."""
+    auditor = StandardLeakageAuditor()
+    h1, h2 = [_dummy_hash(f"decouple_{i}") for i in range(2)]
+    splits = SplitMembership(train_hashes=(h1,), val_hashes=(), test_hashes=(h2,))
+
+    base_manifest = DatasetManifest(
+        dataset_id=DatasetId("cctv.perimeter"),
+        version=DatasetVersion("v1.0.0"),
+        sources=("site-1",),
+        n_items=2,
+        class_definitions=(_make_class_def(),),
+        class_distribution={"person": 2},
+        split_policy="camera-disjoint",
+        split_membership=splits,
+        annotation_version=AnnotationVersion("ann-v1.0.0"),
+        annotation_guideline_ref=GuidelineRef("git:guidelines"),
+        lineage=DatasetLineage(),
+        license_and_constraints="Proprietary",
+        collection_conditions=_make_collection_conditions(),
+        payload_root_checksum=compute_payload_root_checksum(splits.all_hashes()),
+        leakage_audit_records=(),
+    )
+
+    # 1. camera-disjoint: items have camera_id but site_id=None -> PASSES!
+    meta_cam_only = {
+        h1: ItemMetadata(content_hash=h1, camera_id="Cam-1", site_id=None),
+        h2: ItemMetadata(content_hash=h2, camera_id="Cam-2", site_id=None),
+    }
+    res_cam = auditor.audit_splits(base_manifest, meta_cam_only)
+    r_cam = next(r for r in res_cam if r.leakage_type == LeakageType.CAMERA_SITE)
+    assert r_cam.passed
+
+    # 2. camera-disjoint: items have site_id but camera_id=None -> FAILS closed on camera_id!
+    meta_site_only = {
+        h1: ItemMetadata(content_hash=h1, camera_id=None, site_id="Site-1"),
+        h2: ItemMetadata(content_hash=h2, camera_id=None, site_id="Site-2"),
+    }
+    res_cam_fail = auditor.audit_splits(base_manifest, meta_site_only)
+    r_cam_fail = next(
+        r for r in res_cam_fail if r.leakage_type == LeakageType.CAMERA_SITE
+    )
+    assert not r_cam_fail.passed
+    assert "missing camera_id" in r_cam_fail.summary
+
+    # 3. site-disjoint: items have site_id but camera_id=None -> PASSES!
+    manifest_site = base_manifest.model_copy(update={"split_policy": "site-disjoint"})
+    res_site = auditor.audit_splits(manifest_site, meta_site_only)
+    r_site = next(r for r in res_site if r.leakage_type == LeakageType.CAMERA_SITE)
+    assert r_site.passed
+
+    # 4. site-disjoint: items have camera_id but site_id=None -> FAILS closed on site_id!
+    res_site_fail = auditor.audit_splits(manifest_site, meta_cam_only)
+    r_site_fail = next(
+        r for r in res_site_fail if r.leakage_type == LeakageType.CAMERA_SITE
+    )
+    assert not r_site_fail.passed
+    assert "missing site_id" in r_site_fail.summary
+
+
+def test_leakage_audit_temporal_timestamp_and_window_contracts() -> None:
+    """Finding 3 (B3): Time-ordered split policy and temporal window straddling enforcement."""
+    auditor = StandardLeakageAuditor()
+    h1, h2, h3 = [_dummy_hash(f"time_win_{i}") for i in range(3)]
+    splits = SplitMembership(train_hashes=(h1,), val_hashes=(h2,), test_hashes=(h3,))
+
+    manifest_time_ordered = DatasetManifest(
+        dataset_id=DatasetId("cctv.perimeter"),
+        version=DatasetVersion("v1.0.0"),
+        sources=("site-1",),
+        n_items=3,
+        class_definitions=(_make_class_def(),),
+        class_distribution={"person": 3},
+        split_policy="time-ordered",
+        split_membership=splits,
+        annotation_version=AnnotationVersion("ann-v1.0.0"),
+        annotation_guideline_ref=GuidelineRef("git:guidelines"),
+        lineage=DatasetLineage(),
+        license_and_constraints="Proprietary",
+        collection_conditions=_make_collection_conditions(),
+        payload_root_checksum=compute_payload_root_checksum(splits.all_hashes()),
+        leakage_audit_records=(),
+    )
+
+    t1 = datetime(2026, 1, 1, 10, 0, 0, tzinfo=timezone.utc)
+    t2 = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+    t3 = datetime(2026, 1, 1, 14, 0, 0, tzinfo=timezone.utc)
+
+    # 1. Time-ordered missing capture_timestamp fails closed
+    meta_missing_ts = {
+        h1: ItemMetadata(content_hash=h1, capture_timestamp=t1),
+        h2: ItemMetadata(content_hash=h2, capture_timestamp=None),  # Missing!
+        h3: ItemMetadata(content_hash=h3, capture_timestamp=t3),
+    }
+    res_missing = auditor.audit_splits(manifest_time_ordered, meta_missing_ts)
+    r_ts_missing = next(
+        r for r in res_missing if r.leakage_type == LeakageType.TEMPORAL
+    )
+    assert not r_ts_missing.passed
+    assert "requires capture_timestamp on all items" in r_ts_missing.summary
+
+    # 2. Time-ordered where eval precedes train fails closed
+    meta_inverted = {
+        h1: ItemMetadata(content_hash=h1, capture_timestamp=t3),  # Train is latest!
+        h2: ItemMetadata(content_hash=h2, capture_timestamp=t2),
+        h3: ItemMetadata(content_hash=h3, capture_timestamp=t1),  # Test is earliest!
+    }
+    res_inv = auditor.audit_splits(manifest_time_ordered, meta_inverted)
+    r_inv = next(r for r in res_inv if r.leakage_type == LeakageType.TEMPORAL)
+    assert not r_inv.passed
+    assert "Time-ordered split policy violated" in r_inv.summary
+
+    # 3. Clean time-ordered (t1 < t2 < t3) passes
+    meta_ordered = {
+        h1: ItemMetadata(content_hash=h1, capture_timestamp=t1),
+        h2: ItemMetadata(content_hash=h2, capture_timestamp=t2),
+        h3: ItemMetadata(content_hash=h3, capture_timestamp=t3),
+    }
+    res_ordered = auditor.audit_splits(manifest_time_ordered, meta_ordered)
+    r_ordered = next(r for r in res_ordered if r.leakage_type == LeakageType.TEMPORAL)
+    assert r_ordered.passed
+
+    # 4. General temporal policy: temporal window straddling check
+    # Train has t1 and t3; Eval has t2 which is strictly inside [t1, t3]!
+    splits_straddle = SplitMembership(
+        train_hashes=(h1, h3), val_hashes=(), test_hashes=(h2,)
+    )
+    manifest_straddle = manifest_time_ordered.model_copy(
+        update={
+            "split_policy": "temporal-disjoint",
+            "split_membership": splits_straddle,
+        }
+    )
+    res_straddle = auditor.audit_splits(manifest_straddle, meta_ordered)
+    r_straddle = next(r for r in res_straddle if r.leakage_type == LeakageType.TEMPORAL)
+    assert not r_straddle.passed
+    assert "Temporal window straddling detected" in r_straddle.summary
+
+
+def test_annotation_geometry_nan_inf_and_polygons() -> None:
+    """Finding 4 (AC #8): Rejection of NaN/Inf coordinates, non-closed polygons, and zero-area polygons."""
+    h1 = _dummy_hash("geom_adv_item")
+    classes = [_make_class_def("person")]
+
+    def _make_manifest(primitives: tuple[dict[str, object], ...]) -> AnnotationManifest:
+        return AnnotationManifest(
+            annotation_version=AnnotationVersion("ann-v1.0.0"),
+            dataset_id=DatasetId("cctv.perimeter"),
+            guideline_ref=GuidelineRef("git:guide"),
+            annotation_format="yolo_v8",
+            payload_annotations={h1: primitives},
+        )
+
+    # 1. Bbox with NaN coordinate
+    with pytest.raises(InvalidGeometryError, match="must be finite"):
+        validate_annotation_geometry(
+            _make_manifest(
+                ({"class_name": "person", "bbox": [float("nan"), 10, 50, 50]},)
+            ),
+            classes,
+        )
+
+    # 2. Bbox with Inf coordinate
+    with pytest.raises(InvalidGeometryError, match="must be finite"):
+        validate_annotation_geometry(
+            _make_manifest(
+                ({"class_name": "person", "bbox": [10, 10, float("inf"), 50]},)
+            ),
+            classes,
+        )
+
+    # 3. Polygon with NaN coordinate
+    with pytest.raises(InvalidGeometryError, match="must be finite"):
+        validate_annotation_geometry(
+            _make_manifest(
+                (
+                    {
+                        "class_name": "person",
+                        "polygon": [(float("nan"), 10), (50, 10), (50, 50)],
+                    },
+                )
+            ),
+            classes,
+        )
+
+    # 4. Polygon with Inf coordinate
+    with pytest.raises(InvalidGeometryError, match="must be finite"):
+        validate_annotation_geometry(
+            _make_manifest(
+                (
+                    {
+                        "class_name": "person",
+                        "polygon": [(10, 10), (float("-inf"), 10), (50, 50)],
+                    },
+                )
+            ),
+            classes,
+        )
+
+    # 5. Polygon explicitly marked non-closed
+    with pytest.raises(InvalidGeometryError, match="explicitly marked as non-closed"):
+        validate_annotation_geometry(
+            _make_manifest(
+                (
+                    {
+                        "class_name": "person",
+                        "polygon": [(10, 10), (50, 10), (50, 50)],
+                        "closed": False,
+                    },
+                )
+            ),
+            classes,
+        )
+
+    # 6. Collinear polygon (zero area)
+    with pytest.raises(InvalidGeometryError, match="zero or degenerate area"):
+        validate_annotation_geometry(
+            _make_manifest(
+                ({"class_name": "person", "polygon": [(10, 10), (20, 20), (30, 30)]},)
+            ),
+            classes,
+        )
+
+    # 7. Duplicate points polygon (zero area)
+    with pytest.raises(
+        InvalidGeometryError,
+        match="fewer than 3 distinct vertices|zero or degenerate area",
+    ):
+        validate_annotation_geometry(
+            _make_manifest(
+                ({"class_name": "person", "polygon": [(10, 10), (10, 10), (10, 10)]},)
+            ),
+            classes,
+        )
+
+    # 8. Valid closed ring polygon with positive area passes
+    valid_ring_manifest = _make_manifest(
+        (
+            {
+                "class_name": "person",
+                "polygon": [(10, 10), (50, 10), (50, 50), (10, 50), (10, 10)],
+            },
+        )
+    )
+    validate_annotation_geometry(valid_ring_manifest, classes)  # Should not raise!
+
+
+def test_publication_chmod_failure_fails_closed(
+    temp_store: LocalFSStore,
+    temp_registry: FileSystemDatasetRegistry,
+    tmp_path: Path,
+) -> None:
+    """Finding 5 (I2): chmod(0o444) failure is not swallowed; publication fails closed with DatasetError."""
+    # 1. Test LocalFSStore.put_payload fails closed on chmod failure
+    payload_file = tmp_path / "test_payload.bin"
+    payload_file.write_bytes(b"content to store")
+
+    with (
+        patch("os.chmod", side_effect=OSError("Read-only file system")),
+        pytest.raises(DatasetError, match="Failed to enforce read-only permissions"),
+    ):
+        temp_store.put_payload(payload_file)
+
+    # 2. Test FileSystemDatasetRegistry.register_dataset fails closed on chmod failure
+    h1 = temp_store.put_payload(payload_file)
+    splits = SplitMembership(train_hashes=(h1,), val_hashes=(), test_hashes=())
+    manifest = DatasetManifest(
+        dataset_id=DatasetId("cctv.perimeter"),
+        version=DatasetVersion("v1.0.0"),
+        sources=("site-1",),
+        n_items=1,
+        class_definitions=(_make_class_def(),),
+        class_distribution={"person": 1},
+        split_policy="single-site",
+        split_membership=splits,
+        annotation_version=AnnotationVersion("ann-v1.0.0"),
+        annotation_guideline_ref=GuidelineRef("git:guide"),
+        lineage=DatasetLineage(),
+        license_and_constraints="Proprietary",
+        collection_conditions=_make_collection_conditions(),
+        payload_root_checksum=compute_payload_root_checksum(splits.all_hashes()),
+        leakage_audit_records=_make_passed_audits(),
+    )
+
+    with (
+        patch("os.chmod", side_effect=OSError("Operation not permitted")),
+        pytest.raises(DatasetError, match="Failed to enforce read-only permissions"),
+    ):
+        temp_registry.register(manifest, store=temp_store)
+
+    # Verify target manifest was cleaned up and does not exist
+    target_manifest_path = temp_registry._base_dir / "cctv.perimeter" / "v1.0.0.json"
+    assert not target_manifest_path.exists()
+
+
+def test_remote_storage_s3_and_gcs_full_integrity_and_corruption_semantics(
+    tmp_path: Path,
+) -> None:
+    """Finding 6 (B4): Full remote storage put/get lifecycle, streaming SHA-256 verification, and corruption detection."""
+    # 1. S3Store tests with mocked boto3
+    s3_store = S3Store(bucket="cv-agent-data", prefix="blobs")
+
+    payload_file = tmp_path / "s3_sample.bin"
+    sample_bytes = b"sample s3 data payload"
+    payload_file.write_bytes(sample_bytes)
+    expected_hash = ContentHash(hashlib.sha256(sample_bytes).hexdigest())
+
+    mock_boto3 = MagicMock()
+    mock_s3_client = MagicMock()
+    mock_boto3.client.return_value = mock_s3_client
+    # Simulate head_object raising NoSuchKey on first check
+    mock_s3_client.head_object.side_effect = Exception("NoSuchKey")
+
+    with patch.dict("sys.modules", {"boto3": mock_boto3}):
+        # Put payload
+        put_hash = s3_store.put_payload(payload_file)
+        assert put_hash == expected_hash
+        assert mock_s3_client.upload_file.called
+
+        # Get payload - clean download
+        dest_path = tmp_path / "downloaded_s3.bin"
+
+        def _mock_download(bucket: str, key: str, filename: str) -> None:
+            Path(filename).write_bytes(sample_bytes)
+
+        mock_s3_client.download_file.side_effect = _mock_download
+        retrieved_path = s3_store.get_payload(expected_hash, dest_path)
+        assert retrieved_path == dest_path
+        assert dest_path.read_bytes() == sample_bytes
+
+        # Get payload - corrupt download detection
+        dest_corrupt = tmp_path / "downloaded_s3_corrupt.bin"
+
+        def _mock_corrupt_download(bucket: str, key: str, filename: str) -> None:
+            Path(filename).write_bytes(b"corrupted bytes from s3 wire")
+
+        mock_s3_client.download_file.side_effect = _mock_corrupt_download
+        with pytest.raises(
+            PayloadCorruptionError, match="Payload byte corruption detected"
+        ):
+            s3_store.get_payload(expected_hash, dest_corrupt)
+        assert not dest_corrupt.exists()
+
+        # Get payload - 404 not found
+        dest_missing = tmp_path / "downloaded_s3_missing.bin"
+        mock_s3_client.download_file.side_effect = Exception("404 Not Found")
+        with pytest.raises(PayloadNotFoundError, match="not found"):
+            s3_store.get_payload(expected_hash, dest_missing)
+
+    # 2. GCSStore tests with mocked google.cloud.storage
+    gcs_store = GCSStore(bucket="cv-agent-gcs-data", prefix="blobs")
+    mock_google = MagicMock()
+    mock_google_cloud = MagicMock()
+    mock_gcs = MagicMock()
+    mock_google_cloud.storage = mock_gcs
+    mock_google.cloud = mock_google_cloud
+    mock_gcs_client = MagicMock()
+    mock_gcs.Client.return_value = mock_gcs_client
+    mock_bucket = MagicMock()
+    mock_blob = MagicMock()
+    mock_gcs_client.bucket.return_value = mock_bucket
+    mock_bucket.blob.return_value = mock_blob
+    mock_blob.exists.return_value = False
+
+    with patch.dict(
+        "sys.modules",
+        {
+            "google": mock_google,
+            "google.cloud": mock_google_cloud,
+            "google.cloud.storage": mock_gcs,
+        },
+    ):
+        # Put payload
+        gcs_put_hash = gcs_store.put_payload(payload_file)
+        assert gcs_put_hash == expected_hash
+        assert mock_blob.upload_from_filename.called
+
+        # Get payload - clean download
+        mock_blob.exists.return_value = True
+
+        def _mock_gcs_download(filename: str) -> None:
+            Path(filename).write_bytes(sample_bytes)
+
+        mock_blob.download_to_filename.side_effect = _mock_gcs_download
+        gcs_dest = tmp_path / "downloaded_gcs.bin"
+        retrieved_gcs = gcs_store.get_payload(expected_hash, gcs_dest)
+        assert retrieved_gcs == gcs_dest
+        assert gcs_dest.read_bytes() == sample_bytes
+
+        # Get payload - corruption detection
+        def _mock_gcs_corrupt_download(filename: str) -> None:
+            Path(filename).write_bytes(b"tampered gcs bytes")
+
+        mock_blob.download_to_filename.side_effect = _mock_gcs_corrupt_download
+        gcs_corrupt_dest = tmp_path / "downloaded_gcs_corrupt.bin"
+        with pytest.raises(
+            PayloadCorruptionError, match="Payload byte corruption detected"
+        ):
+            gcs_store.get_payload(expected_hash, gcs_corrupt_dest)
+        assert not gcs_corrupt_dest.exists()
+
+        # Get payload - not found
+        mock_blob.exists.return_value = False
+        gcs_missing_dest = tmp_path / "downloaded_gcs_missing.bin"
+        with pytest.raises(PayloadNotFoundError, match="not found"):
+            gcs_store.get_payload(expected_hash, gcs_missing_dest)

@@ -12,6 +12,7 @@ from typing import Any, Protocol
 from cv_agent.dataset.contracts import DatasetManifest
 from cv_agent.dataset.errors import (
     DatasetApprovalRequiredError,
+    DatasetError,
     DatasetNotFoundError,
     DatasetVersionConflictError,
     PayloadNotFoundError,
@@ -133,11 +134,24 @@ class FileSystemDatasetRegistry:
             os.replace(tmp_file, target_path)
             try:
                 os.chmod(target_path, 0o444)
-            except OSError:
-                pass
+            except OSError as err:
+                try:
+                    os.chmod(target_path, 0o644)
+                except OSError:
+                    pass
+                target_path.unlink(missing_ok=True)
+                raise DatasetError(
+                    f"Failed to enforce read-only permissions (0o444) on published manifest {target_path}: {err}"
+                ) from err
             return target_path
         except Exception:
             tmp_file.unlink(missing_ok=True)
+            if target_path.exists():
+                try:
+                    os.chmod(target_path, 0o644)
+                except OSError:
+                    pass
+                target_path.unlink(missing_ok=True)
             raise
 
     def get(self, dataset_id: DatasetId, version: DatasetVersion) -> DatasetManifest:

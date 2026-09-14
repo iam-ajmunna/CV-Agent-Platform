@@ -1346,4 +1346,35 @@ Remediated all 3 architectural blockers (B1, B2, B3) and 5 secondary findings id
 
 **Learned:** Interpreting leakage dimensions strictly from `manifest.split_policy` while enforcing fail-closed behavior on missing metadata achieves the ideal balance: datasets with specific requirements (temporal/camera/subject disjointness) cannot silently omit required metadata, while datasets with other policies (e.g. static image detection) are not artificially constrained.
 
-**Left open:** Opening PR on `feature/ajmunna/phase-2j-dataset-subsystem`, running CI matrix across Python 3.10–3.13, and requesting Official PM adversarial review.
+**Left open:** PR #53 opened, awaiting Official PM adversarial review.
+
+---
+
+## 2026-09-14 — Phase 2J Adversarial Review Remediation (PR #53)
+
+**Did:**
+Remediated all 6 blocking findings from the Official PM adversarial review on PR #53:
+1. **Finding 1 (B3) — Partial perceptual metadata fail-closed:**
+   Enforced fail-closed behavior in `StandardLeakageAuditor._audit_duplicate()` when `perceptual_hash` is present on some items but missing on others across splits. Emits `LeakageCheckResult(passed=False)` with descriptive summary identifying hashes missing perceptual metadata.
+2. **Finding 2 (B3) — Camera/site split policy decoupling:**
+   Decoupled `camera-disjoint` and `site-disjoint` policies in `StandardLeakageAuditor._audit_camera_site()`. `camera-disjoint` requires exclusively `camera_id` (not `site_id`); `site-disjoint` requires exclusively `site_id` (not `camera_id`). If both policies are declared, both IDs are required.
+3. **Finding 3 (B3) — Temporal auditing completion:**
+   Completed `StandardLeakageAuditor._audit_temporal()`: enforced `capture_timestamp` requirement on `time-ordered` split policy, verified that train timestamp window strictly precedes eval window ($\max(train) < \min(eval)$), checked for exact timestamp collisions, and audited temporal window straddling.
+4. **Finding 4 (AC #8) — Geometry enforcement hardening:**
+   Hardened `validate_annotation_geometry()`: rejected `NaN` and `Inf` coordinates in bboxes and polygon vertices using `math.isfinite()`; rejected non-closed polygons (`closed=False`); implemented Shoelace formula to reject zero-area ($A \le 10^{-7}$) or degenerate collinear polygons and polygons with $<3$ distinct vertices.
+5. **Finding 5 (I2) — Fail-closed read-only permissions:**
+   Replaced swallowed `OSError` on `chmod(0o444)` in `FileSystemDatasetRegistry.register()` and `LocalFSStore.put_payload()` / `get_payload()` with fail-closed cleanup (unlinking the newly written payload/manifest) and raising `DatasetError`.
+6. **Finding 6 (B4) — Remote storage adapters implementation:**
+   Implemented full streaming SHA-256 byte-integrity verification, atomic temporary file staging, permission enforcement (`0o444`), corruption detection (`PayloadCorruptionError`), missing object semantics (`PayloadNotFoundError`), and network/adapter failure handling (`DatasetError`) for both `S3Store` and `GCSStore` in `cv_agent/dataset/storage/remote.py`.
+7. **Adversarial Regression Tests:**
+   Added 6 targeted adversarial regression tests to `tests/test_dataset_boundary.py` (total 36 tests, 433 repository total), explicitly exercising all 6 findings.
+8. **Quality Gates Verified:**
+   Pytest (433 passed, 0 failed), Ruff check (clean), Ruff format --check (148 files formatted), Mypy (clean across 83 source files in `cv_agent`), `git diff --check` (clean), `python -m build` (clean sdist + wheel), `pip-audit` (clean, 0 vulnerabilities).
+
+**Why:** `[P§7]`, `[P§25]`, `[P§26]`, `[P§27]`, `[P§29.5]`, `[P§34]`, and frozen ADR-0009. Remediates all adversarial findings to satisfy the zero-leakage, fail-closed, and content-addressed storage contracts.
+
+**Broke:** Nothing broken. 433 tests pass across 19 test modules, all quality gates green.
+
+**Learned:** Silent fallbacks (such as ignoring missing hashes or catching chmod failures) undermine immutable engineering contracts. Every contract requirement must fail closed immediately with a descriptive exception or failed audit result.
+
+**Left open:** Pushing remediation commit to `feature/ajmunna/phase-2j-dataset-subsystem` for PR #53 and awaiting Official PM second adversarial review.

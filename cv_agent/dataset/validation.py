@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
@@ -29,13 +30,13 @@ def compute_payload_root_checksum(hashes: Iterable[ContentHash | str]) -> str:
     3. Serialize as newline-terminated ASCII string (empty string if 0 items).
     4. Return lowercase 64-hex SHA-256 digest.
     """
-    unique_hashes = {str(validate_content_hash(str(h))) for h in hashes}
-    if not unique_hashes:
+    cleaned = {str(validate_content_hash(str(h))) for h in hashes}
+    if not cleaned:
         return EMPTY_PAYLOAD_ROOT_CHECKSUM
 
-    sorted_hashes = sorted(unique_hashes)
-    preimage = "\n".join(sorted_hashes) + "\n"
-    return hashlib.sha256(preimage.encode("utf-8")).hexdigest()
+    sorted_hashes = sorted(cleaned)
+    payload_str = "\n".join(sorted_hashes) + "\n"
+    return hashlib.sha256(payload_str.encode("ascii")).hexdigest()
 
 
 def verify_payload_root_checksum(manifest: DatasetManifest) -> None:
@@ -57,10 +58,12 @@ def validate_annotation_geometry(
     """Validate geometric validity of all annotation primitives in an AnnotationManifest (AC #8 / D-047).
 
     Mandatory invariants:
+    - Finite coordinates: NaN and Inf are strictly rejected.
     - Bounding boxes: x_min >= 0, y_min >= 0, x_min < x_max, y_min < y_max.
     - Extent containment: coordinates cannot exceed declared image resolution (width, height).
     - Class membership: referenced class names must resolve to declared ClassDefinition names.
-    - Polygons: at least 3 points, non-negative, within extent bounds.
+    - Polygons: >= 3 distinct vertices, closed loop, strictly positive area (Shoelace formula > 0),
+      non-negative coordinates, within extent bounds.
 
     Raises:
         InvalidGeometryError: if any annotation primitive fails verification.
@@ -135,6 +138,21 @@ def validate_annotation_geometry(
                         details={"content_hash": ch_str, "bbox": bbox},
                     ) from None
 
+                # Disallow NaN and +/-Inf
+                if not (
+                    math.isfinite(x_min)
+                    and math.isfinite(y_min)
+                    and math.isfinite(x_max)
+                    and math.isfinite(y_max)
+                ):
+                    raise InvalidGeometryError(
+                        f"Item '{ch_str}' primitive #{idx} bbox coordinates must be finite (got NaN or Inf)",
+                        details={
+                            "content_hash": ch_str,
+                            "bbox": (x_min, y_min, x_max, y_max),
+                        },
+                    )
+
                 if x_min < 0 or y_min < 0:
                     raise InvalidGeometryError(
                         f"Item '{ch_str}' primitive #{idx} bbox has negative coordinates: ({x_min}, {y_min})",
@@ -190,13 +208,36 @@ def validate_annotation_geometry(
                         f"Item '{ch_str}' primitive #{idx} polygon must have >= 3 vertices",
                         details={"content_hash": ch_str, "polygon": polygon},
                     )
+
+                # Reject explicitly non-closed polygons
+                if prim.get("closed") is False or prim.get("is_closed") is False:
+                    raise InvalidGeometryError(
+                        f"Item '{ch_str}' primitive #{idx} polygon is explicitly marked as non-closed",
+                        details={"content_hash": ch_str, "primitive": dict(prim)},
+                    )
+
+                parsed_pts: list[tuple[float, float]] = []
                 for pt_idx, pt in enumerate(polygon):
                     if not isinstance(pt, (list, tuple)) or len(pt) != 2:
                         raise InvalidGeometryError(
                             f"Item '{ch_str}' primitive #{idx} polygon vertex #{pt_idx} must be (x, y) pair",
                             details={"content_hash": ch_str, "vertex": pt},
                         )
-                    px, py = float(pt[0]), float(pt[1])
+                    try:
+                        px, py = float(pt[0]), float(pt[1])
+                    except (ValueError, TypeError):
+                        raise InvalidGeometryError(
+                            f"Item '{ch_str}' primitive #{idx} polygon vertex #{pt_idx} coordinates must be numeric",
+                            details={"content_hash": ch_str, "vertex": pt},
+                        ) from None
+
+                    # Reject NaN and +/-Inf coordinates
+                    if not (math.isfinite(px) and math.isfinite(py)):
+                        raise InvalidGeometryError(
+                            f"Item '{ch_str}' primitive #{idx} polygon vertex #{pt_idx} coordinates must be finite (got NaN or Inf)",
+                            details={"content_hash": ch_str, "vertex": (px, py)},
+                        )
+
                     if px < 0 or py < 0:
                         raise InvalidGeometryError(
                             f"Item '{ch_str}' primitive #{idx} polygon vertex #{pt_idx} has negative coords: ({px}, {py})",
@@ -220,3 +261,35 @@ def validate_annotation_geometry(
                                 "height": height,
                             },
                         )
+                    parsed_pts.append((px, py))
+
+                # Normalize polygon ring: if first and last point match, exclude duplicate trailing point for ring vertices
+                if parsed_pts[0] == parsed_pts[-1]:
+                    ring = parsed_pts[:-1]
+                else:
+                    ring = parsed_pts
+
+                if len(ring) < 3:
+                    raise InvalidGeometryError(
+                        f"Item '{ch_str}' primitive #{idx} polygon has fewer than 3 distinct vertices",
+                        details={"content_hash": ch_str, "vertices": parsed_pts},
+                    )
+
+                # Compute Shoelace area to reject degenerate or zero-area polygons
+                n = len(ring)
+                area_twice = 0.0
+                for i in range(n):
+                    x1, y1 = ring[i]
+                    x2, y2 = ring[(i + 1) % n]
+                    area_twice += (x1 * y2) - (x2 * y1)
+                area = abs(area_twice) / 2.0
+
+                if area <= 1e-7:
+                    raise InvalidGeometryError(
+                        f"Item '{ch_str}' primitive #{idx} polygon has zero or degenerate area ({area})",
+                        details={
+                            "content_hash": ch_str,
+                            "area": area,
+                            "vertices": ring,
+                        },
+                    )
