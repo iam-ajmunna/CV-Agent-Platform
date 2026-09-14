@@ -34,12 +34,56 @@ from cv_agent.tools.contracts import (
     ToolResult,
 )
 
+UNSUPPORTED_SCHEMA_CONSTRUCTS: tuple[str, ...] = (
+    "oneOf",
+    "anyOf",
+    "allOf",
+    "not",
+    "$ref",
+    "$schema",
+    "$id",
+    "$defs",
+    "definitions",
+)
+SUPPORTED_SCHEMA_TYPES: tuple[str, ...] = (
+    "string",
+    "integer",
+    "number",
+    "boolean",
+    "array",
+    "object",
+    "null",
+)
+
+
+def _check_unsupported_schema_constructs(schema: Mapping[str, Any], path: str) -> None:
+    """Fail closed when unsupported JSON Schema constructs are encountered."""
+    for construct in UNSUPPORTED_SCHEMA_CONSTRUCTS:
+        if construct in schema:
+            prop_path = f" at {path!r}" if path else ""
+            raise ParameterValidationError(
+                f"Schema construct {construct!r}{prop_path} is unsupported. "
+                "Only the bounded supported JSON Schema subset is permitted."
+            )
+
 
 def validate_parameters_against_schema(
     parameters: Mapping[str, Any],
     schema: Mapping[str, Any],
 ) -> None:
-    """Validate parameter dictionary against comprehensive JSON schema requirements (I4)."""
+    """Validate parameter dictionary against a bounded supported JSON Schema subset, failing closed for unsupported constructs (I4).
+
+    Supported subset:
+    - Types: 'object', 'string', 'integer', 'number', 'boolean', 'array', 'null'.
+    - Object: 'properties', 'required', 'additionalProperties' (rejects unexpected keys if False).
+    - Number/Integer: 'minimum', 'maximum', 'exclusiveMinimum', 'exclusiveMaximum'.
+    - String: 'minLength', 'maxLength', 'pattern' (regex).
+    - Array: 'items' (recursive value schema), 'minItems', 'maxItems'.
+    - Enum: 'enum' allowed value validation.
+
+    Any unsupported constructs ('oneOf', 'anyOf', 'allOf', 'not', '$ref', '$schema',
+    unrecognized types) fail closed with ParameterValidationError.
+    """
     if not schema:
         return
 
@@ -56,6 +100,7 @@ def _validate_object_against_schema(
     schema: Mapping[str, Any],
     path: str,
 ) -> None:
+    _check_unsupported_schema_constructs(schema, path)
     expected_type = schema.get("type")
     if expected_type and expected_type != "object":
         prefix = f"Parameter at {path!r}: " if path else ""
@@ -94,7 +139,15 @@ def _validate_value_against_schema(
     schema: Mapping[str, Any],
     path: str,
 ) -> None:
+    _check_unsupported_schema_constructs(schema, path)
     expected_type = schema.get("type")
+
+    if expected_type is not None and expected_type not in SUPPORTED_SCHEMA_TYPES:
+        prefix = f"Parameter at {path!r}: " if path else ""
+        raise ParameterValidationError(
+            f"{prefix}Schema specifies unsupported type {expected_type!r}. "
+            f"Supported types are: {SUPPORTED_SCHEMA_TYPES}"
+        )
 
     # Type check
     if expected_type == "string":
@@ -164,6 +217,12 @@ def _validate_value_against_schema(
                 f"Parameter {path!r} must be object (mapping), got {type(val).__name__}"
             )
         _validate_object_against_schema(val, schema, path)
+
+    elif expected_type == "null":
+        if val is not None:
+            raise ParameterValidationError(
+                f"Parameter {path!r} must be null (None), got {type(val).__name__}"
+            )
 
     # Enum check
     if "enum" in schema:
@@ -260,7 +319,7 @@ class DefaultSkillExecutor:
                 duration_ms=int((time.monotonic() - start_time) * 1000),
             )
 
-        # 3. Declarative Prerequisites Verification (Important I3)
+        # 3. Declarative Prerequisites Verification (Important I3 - Fail Closed)
         if skill.prerequisites:
             target_prereqs = target.target_metadata.get("prerequisites")
             target_features = target.target_metadata.get("features")
@@ -270,22 +329,20 @@ class DefaultSkillExecutor:
             if isinstance(target_features, (list, tuple, set, frozenset)):
                 provided.update(str(f).lower() for f in target_features)
 
-            if (
-                "prerequisites" in target.target_metadata
-                or "features" in target.target_metadata
-            ):
-                missing = [p for p in skill.prerequisites if p.lower() not in provided]
-                if missing:
-                    return SkillExecutionResult(
-                        skill_id=skill.skill_id,
-                        execution_id=exec_id,
-                        status=SkillExecutionStatus.PREREQUISITE_FAILED,
-                        error_message=(
-                            f"Skill execution failed declarative prerequisites verification on target "
-                            f"{str(target.target_id)!r}: {missing}"
-                        ),
-                        duration_ms=int((time.monotonic() - start_time) * 1000),
-                    )
+            missing = [p for p in skill.prerequisites if p.lower() not in provided]
+            if missing:
+                return SkillExecutionResult(
+                    skill_id=skill.skill_id,
+                    execution_id=exec_id,
+                    status=SkillExecutionStatus.PREREQUISITE_FAILED,
+                    tool_results=(),
+                    active_job_ref=None,
+                    error_message=(
+                        f"Skill execution failed declarative prerequisites verification on target "
+                        f"{str(target.target_id)!r}: missing {missing}"
+                    ),
+                    duration_ms=int((time.monotonic() - start_time) * 1000),
+                )
 
         # 4. Target type validation
         if target.target_type not in skill.target_requirements.allowed_targets:

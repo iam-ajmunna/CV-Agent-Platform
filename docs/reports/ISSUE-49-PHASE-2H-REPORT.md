@@ -102,27 +102,29 @@ Following the Official PM adversarial review of PR #50, all 2 Blockers and 7 Imp
    - When a skill requires tools, `tool_registry` is checked. If `tool_registry` is missing, or if any required `ToolId` is not registered in the tool registry or incompatible with the target type, the resolution fails closed to `AvailabilityState.UNAVAILABLE` with `unverified_tool:<tool_id>` or `missing_tool:<tool_id>` and `is_executable = False`.
    - Eliminates false-positive `EXECUTABLE` resolutions.
 
-### Important Findings
+### Important Findings & Residual Defect Remediations
 
-- **I3 — Declarative Prerequisites Evaluation:**
-   - `SkillResolver` now evaluates `skill.prerequisites` against `target.metadata["prerequisites"]` (or installed system tools). Missing prerequisites result in `AvailabilityState.UNAVAILABLE` with `missing_prerequisite:<prereq>` and `is_executable = False`.
-   - `SkillExecutor` enforces prerequisites prior to invocation, failing fast with `SkillExecutionStatus.PREREQUISITE_FAILED` and `tool_results = ()` if any prerequisite is unsatisfied.
-- **I4 — Comprehensive Recursive JSON Schema Validation:**
-   - Replaced ad-hoc top-level schema validation in `SkillExecutor` with a full recursive JSON Schema validator supporting:
-     - `type`: `object`, `string`, `integer`, `number`, `boolean`, `array`, `null`.
-     - `properties`, `required`, and `additionalProperties` (rejects undeclared properties when `additionalProperties: false`).
+- **I3 — Declarative Prerequisites Evaluation (Fail Closed on Absent Metadata):**
+   - `SkillResolver` evaluates `skill.prerequisites` against `target.metadata["prerequisites"]` and `target.metadata["features"]`. If prerequisite metadata is absent or missing required prerequisites, resolution fails closed to `AvailabilityState.UNAVAILABLE` with `missing_prerequisite:<prereq>` and `is_executable = False`.
+   - `SkillExecutor` verifies prerequisites prior to invocation, failing fast with `SkillExecutionStatus.PREREQUISITE_FAILED`, empty `tool_results = ()`, and `active_job_ref = None` whenever prerequisite metadata is absent or unsatisfied.
+- **I4 — Bounded Supported JSON Schema Subset (Fail-Closed for Unsupported Constructs):**
+   - Implemented parameter validation strictly defining and enforcing the bounded supported JSON Schema subset:
+     - Supported types: `object`, `string`, `integer`, `number`, `boolean`, `array`, `null`.
+     - Object constraints: `properties`, `required`, and `additionalProperties: false` (rejects undeclared properties).
      - Numeric constraints: `minimum`, `maximum`, `exclusiveMinimum`, `exclusiveMaximum`.
      - String constraints: `minLength`, `maxLength`, `pattern` (regex).
      - Array constraints: `items` (recursive schema validation), `minItems`, `maxItems`.
      - `enum` validation.
-   - Any validation failure exits immediately with `SkillExecutionStatus.PREREQUISITE_FAILED` before any tools are called.
-- **I5 — Order-Independent Candidate & Target Selection:**
-   - Removed input-order dependency from `SkillResolver.resolve()`.
-   - Candidates and targets are sorted deterministically using a three-tier bucketed ranking:
-     1. Target matches and tool/prereq checks pass (`EXECUTABLE` bucket).
-     2. Target matches hardware/type but missing tool/prereq (`UNAVAILABLE` bucket).
-     3. Target is offline or incompatible (`KNOWN_BUT_UNAVAILABLE` / `UNAVAILABLE` bucket).
-   - Within each bucket, candidates are sorted deterministically by `(hardware_specificity, skill_id, target_id)`. An offline target cannot eclipse an available target.
+   - Any unsupported schema constructs (`oneOf`, `anyOf`, `allOf`, `not`, `$ref`, `$schema`, `$id`, `$defs`, `definitions`) and unsupported types fail closed immediately with `ParameterValidationError`.
+- **I5 — Fully Deterministic Order-Independent Candidate & Target Selection:**
+   - Removed all input-order dependencies from `SkillResolver.resolve()`.
+   - Defined a total, deterministic ordering key `_candidate_target_key(candidate, target)`:
+     `(-cand_hw_rank, -target_hw_rank, (-target_compute[0], -target_compute[1]), str(cand.skill_id), str(target.target_id))`.
+   - All three resolution buckets are explicitly sorted:
+     1. `cat1` (`EXECUTABLE`): sorted by `_candidate_target_key`.
+     2. `cat2` (`UNAVAILABLE` missing tools/prereqs): sorted by `(len(missing), _candidate_target_key)`.
+     3. `cat3` (`UNAVAILABLE` offline target): sorted by `(len(missing), _candidate_target_key)`.
+   - `all_candidates` is sorted by `(-cand_hw_rank, str(cand.skill_id))` for deterministic fallback selection.
 - **I6 — Discovery Capability Index Integrity on Re-registration:**
    - In `DiscoveryCache.register_discovered()`, when a skill candidate is re-registered with new capabilities, prior capability index entries pointing to that candidate are explicitly pruned, preventing stale references or index corruption.
 - **I7 — Strict Canonical Regex Enforcement without `.strip()`:**

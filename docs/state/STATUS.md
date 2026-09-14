@@ -11,9 +11,9 @@ Phase 2H (ADR-0007 Skills Architecture & NVIDIA Capability Discovery, Issue #49)
 - Remediated all PM review findings (2 Blockers, 7 Important findings):
   - B3: ADR-0001 capability registry is mandatory and fail-closed by default.
   - B4: Mandatory tool dependency verification in `SkillResolver` (fails closed to `UNAVAILABLE` if tools unverified).
-  - I3: Declarative prerequisites evaluated in resolver and executor.
-  - I4: Comprehensive recursive JSON Schema validator in `SkillExecutor`.
-  - I5: Order-independent bucketed candidate and target selection in resolver.
+  - I3: Declarative prerequisites evaluated in resolver and executor, failing closed if prerequisite metadata is absent or unsatisfied.
+  - I4: Bounded supported JSON Schema subset validator in `SkillExecutor`, failing closed on unsupported constructs.
+  - I5: Fully deterministic, order-independent bucketed candidate and target selection with total order tie-breaking in resolver.
   - I6: Discovery capability index cleanup on re-registration.
   - I7: Strict canonical regex enforcement without `.strip()`.
   - I8: DeepStream and TAO catalog targets declare proper hardware class and prerequisites.

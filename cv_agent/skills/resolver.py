@@ -44,6 +44,51 @@ class SkillResolver(Protocol):
         ...
 
 
+def _hardware_specificity(hw: HardwareClass) -> int:
+    """Numerical hardware specificity ranking (higher = more specific/demanding)."""
+    ranks = {
+        HardwareClass.JETSON_ORIN: 5,
+        HardwareClass.JETSON_XAVIER: 5,
+        HardwareClass.JETSON: 4,
+        HardwareClass.NVIDIA_GPU: 3,
+        HardwareClass.CPU: 2,
+        HardwareClass.ANY: 1,
+    }
+    return ranks.get(hw, 0)
+
+
+def _candidate_target_key(
+    cand: SkillDescriptor, target: ExecutionTargetDescriptor
+) -> tuple[int, int, tuple[int, int], str, str]:
+    """Deterministic total order key for (candidate, target) pairs (I5)."""
+    cand_hw_rank = _hardware_specificity(cand.target_requirements.required_hardware)
+
+    # Target hardware specificity
+    target_hw_str = str(target.target_metadata.get("hardware", "")).lower()
+    target_hw = None
+    try:
+        target_hw = HardwareClass(target_hw_str)
+    except ValueError:
+        pass
+    target_hw_rank = _hardware_specificity(target_hw) if target_hw else 0
+
+    target_compute = (0, 0)
+    target_compute_val = target.target_metadata.get("cuda_compute")
+    if target_compute_val:
+        try:
+            target_compute = parse_cuda_compute(str(target_compute_val))
+        except ValueError:
+            target_compute = (0, 0)
+
+    return (
+        -cand_hw_rank,
+        -target_hw_rank,
+        (-target_compute[0], -target_compute[1]),
+        str(cand.skill_id),
+        str(target.target_id),
+    )
+
+
 class DefaultSkillResolver:
     """Deterministic skill resolver delegating to ADR-0001 availability semantics."""
 
@@ -98,7 +143,15 @@ class DefaultSkillResolver:
                 self._discovery_cache.list_candidates_for_capability(capability_id)
             )
 
-        all_candidates = authoritative_candidates + discovered_candidates
+        all_candidates = tuple(
+            sorted(
+                authoritative_candidates + discovered_candidates,
+                key=lambda c: (
+                    -_hardware_specificity(c.target_requirements.required_hardware),
+                    str(c.skill_id),
+                ),
+            )
+        )
 
         # 3. Handle zero satisfying skills
         if not all_candidates:
@@ -132,8 +185,7 @@ class DefaultSkillResolver:
                 unavailability_reason="Zero execution targets configured",
             )
 
-        # 5. Evaluate candidates against targets
-        # Check for host-local macOS constraint (D-022, Gate 5)
+        # 5. Target Compatibility Evaluation
         requires_nvidia = any(
             c.target_requirements.required_hardware
             in (
@@ -143,7 +195,6 @@ class DefaultSkillResolver:
                 HardwareClass.JETSON_XAVIER,
             )
             or c.target_requirements.min_cuda_compute is not None
-            or TargetType.LOCAL not in c.target_requirements.allowed_targets
             for c in all_candidates
         )
 
@@ -183,8 +234,9 @@ class DefaultSkillResolver:
                 else:
                     cat3.append((candidate, target, missing))
 
-        # Order-independent priority selection (I5):
+        # Order-independent priority selection (I5 - fully deterministically sorted buckets):
         if cat1:
+            cat1.sort(key=lambda item: _candidate_target_key(item[0], item[1]))
             best_cand, best_target = cat1[0]
             return SkillResolution(
                 capability_id=capability_id,
@@ -195,8 +247,14 @@ class DefaultSkillResolver:
             )
 
         if cat2:
-            # Pick candidate/target with fewest missing items
-            best_cand, best_target, missing = min(cat2, key=lambda x: len(x[2]))
+            # Sort by fewest missing items, then deterministic candidate/target tie-break
+            cat2.sort(
+                key=lambda item: (
+                    len(item[2]),
+                    _candidate_target_key(item[0], item[1]),
+                )
+            )
+            best_cand, best_target, missing = cat2[0]
             return SkillResolution(
                 capability_id=capability_id,
                 candidate_skills=all_candidates,
@@ -211,6 +269,13 @@ class DefaultSkillResolver:
             )
 
         if cat3:
+            # Sort by fewest missing items, then deterministic candidate/target tie-break
+            cat3.sort(
+                key=lambda item: (
+                    len(item[2]),
+                    _candidate_target_key(item[0], item[1]),
+                )
+            )
             best_cand, best_target, missing = cat3[0]
             return SkillResolution(
                 capability_id=capability_id,
@@ -307,7 +372,7 @@ class DefaultSkillResolver:
                         if not avail.is_available:
                             missing_tools.append(str(tool_id))
 
-        # 6. Declarative prerequisites evaluation (Important I3)
+        # 6. Declarative prerequisites evaluation (Important I3 - Fail Closed)
         missing_prereqs: list[str] = []
         if candidate.prerequisites:
             target_prereqs = target.target_metadata.get("prerequisites")
@@ -318,12 +383,10 @@ class DefaultSkillResolver:
             if isinstance(target_features, (list, tuple, set, frozenset)):
                 provided.update(str(f).lower() for f in target_features)
 
-            if (
-                "prerequisites" in target.target_metadata
-                or "features" in target.target_metadata
-            ):
-                for req_p in candidate.prerequisites:
-                    if req_p.lower() not in provided:
-                        missing_prereqs.append(req_p)
+            # Fail closed: if prerequisite metadata is absent or missing required items,
+            # each unsatisfied prerequisite is unconditionally added to missing_prereqs.
+            for req_p in candidate.prerequisites:
+                if req_p.lower() not in provided:
+                    missing_prereqs.append(req_p)
 
         return tuple(missing_tools) + tuple(missing_prereqs)

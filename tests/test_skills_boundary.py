@@ -1138,7 +1138,7 @@ class TestPMReviewRemediations:
             async def execute(self, inv: Any) -> Any:
                 raise AssertionError("Should not be called")
 
-        exec_res = asyncio.run(
+        exec_res_partial = asyncio.run(
             executor.execute(
                 prereq_skill,
                 parameters={},
@@ -1146,13 +1146,41 @@ class TestPMReviewRemediations:
                 tool_executor=NoopToolExecutor(),  # type: ignore[arg-type]
             )
         )
-        assert exec_res.status == SkillExecutionStatus.PREREQUISITE_FAILED
-        assert "failed declarative prerequisites verification" in (
-            exec_res.error_message or ""
+        assert exec_res_partial.status == SkillExecutionStatus.PREREQUISITE_FAILED
+        assert exec_res_partial.tool_results == ()
+
+        # Target with NO prerequisite metadata at all (must fail closed per I3)
+        target_no_prereqs_metadata = ExecutionTargetDescriptor(
+            target_id=TargetId("target.no.prereqs.metadata"),
+            target_type=TargetType.REMOTE,
+            is_available=True,
+            target_metadata={"hardware": "nvidia_gpu"},
         )
 
-    def test_i4_comprehensive_json_schema_validation(self) -> None:
-        # I4: Comprehensive parameter validation supporting nested objects, arrays, enums, numbers
+        res_none = resolver.resolve(
+            CapabilityId("cv.dataset.audit"),
+            available_targets=(target_no_prereqs_metadata,),
+        )
+        assert res_none.availability_state == AvailabilityState.UNAVAILABLE
+        assert "docker" in res_none.missing_prerequisites
+        assert "nvidia-container-toolkit" in res_none.missing_prerequisites
+
+        exec_res_none = asyncio.run(
+            executor.execute(
+                prereq_skill,
+                parameters={},
+                target=target_no_prereqs_metadata,
+                tool_executor=NoopToolExecutor(),  # type: ignore[arg-type]
+            )
+        )
+        assert exec_res_none.status == SkillExecutionStatus.PREREQUISITE_FAILED
+        assert exec_res_none.tool_results == ()
+        assert "missing ['docker', 'nvidia-container-toolkit']" in (
+            exec_res_none.error_message or ""
+        )
+
+    def test_i4_bounded_json_schema_validation_and_unsupported_rejection(self) -> None:
+        # I4: Bounded supported JSON Schema validation with fail-closed rejection of unsupported constructs
         schema = {
             "type": "object",
             "required": ["model_config", "metrics", "batch_size"],
@@ -1250,12 +1278,41 @@ class TestPMReviewRemediations:
             )
         assert "must be integer, got bool" in str(exc.value)
 
+        # Null type support
+        null_schema = {
+            "type": "object",
+            "properties": {"tag": {"type": "null"}},
+        }
+        validate_parameters_against_schema({"tag": None}, null_schema)
+        with pytest.raises(ParameterValidationError) as exc:
+            validate_parameters_against_schema({"tag": "non-null"}, null_schema)
+        assert "must be null" in str(exc.value)
+
+        # Fail-closed on unsupported schema keywords
+        for keyword in ("oneOf", "anyOf", "allOf", "not", "$ref", "$schema"):
+            bad_schema = {"type": "object", keyword: [{"type": "string"}]}
+            with pytest.raises(ParameterValidationError) as exc:
+                validate_parameters_against_schema({}, bad_schema)
+            assert f"Schema construct {keyword!r}" in str(exc.value)
+            assert "is unsupported" in str(exc.value)
+
+        # Fail-closed on unsupported type
+        unsupported_type_schema = {
+            "type": "object",
+            "properties": {"created": {"type": "date-time"}},
+        }
+        with pytest.raises(ParameterValidationError) as exc:
+            validate_parameters_against_schema(
+                {"created": "2026-09-14"}, unsupported_type_schema
+            )
+        assert "Schema specifies unsupported type 'date-time'" in str(exc.value)
+
     def test_i5_resolver_selection_is_order_independent(
         self,
         populated_skill_registry: DefaultSkillRegistry,
         populated_tool_registry: DefaultToolRegistry,
     ) -> None:
-        # I5: Resolver must select an online, available target regardless of input order
+        # I5: Resolver must select deterministically across permutations of targets in all buckets
         offline_target = ExecutionTargetDescriptor(
             target_id=TargetId("target.offline.gpu"),
             target_type=TargetType.REMOTE,
@@ -1266,8 +1323,8 @@ class TestPMReviewRemediations:
                 "env_vars": {"CUDA_HOME": "/usr/local/cuda", "TRT_PATH": "/opt/trt"},
             },
         )
-        online_target = ExecutionTargetDescriptor(
-            target_id=TargetId("target.online.gpu"),
+        online_target_a = ExecutionTargetDescriptor(
+            target_id=TargetId("target.online.gpu.a"),
             target_type=TargetType.REMOTE,
             is_available=True,
             target_metadata={
@@ -1276,28 +1333,136 @@ class TestPMReviewRemediations:
                 "env_vars": {"CUDA_HOME": "/usr/local/cuda", "TRT_PATH": "/opt/trt"},
             },
         )
-        populated_tool_registry.register_target(offline_target)
-        populated_tool_registry.register_target(online_target)
+        online_target_b = ExecutionTargetDescriptor(
+            target_id=TargetId("target.online.gpu.b"),
+            target_type=TargetType.REMOTE,
+            is_available=True,
+            target_metadata={
+                "hardware": "nvidia_gpu",
+                "cuda_compute": "8.0",
+                "env_vars": {"CUDA_HOME": "/usr/local/cuda", "TRT_PATH": "/opt/trt"},
+            },
+        )
+        online_target_orin = ExecutionTargetDescriptor(
+            target_id=TargetId("target.online.jetson.orin"),
+            target_type=TargetType.REMOTE,
+            is_available=True,
+            target_metadata={
+                "hardware": "jetson_orin",
+                "cuda_compute": "8.7",
+                "env_vars": {"CUDA_HOME": "/usr/local/cuda", "TRT_PATH": "/opt/trt"},
+            },
+        )
+        for t in (
+            offline_target,
+            online_target_a,
+            online_target_b,
+            online_target_orin,
+        ):
+            populated_tool_registry.register_target(t)
 
         resolver = DefaultSkillResolver(
             populated_skill_registry, tool_registry=populated_tool_registry
         )
 
-        # Order 1: Offline target first
+        # 1. Cat1 vs Cat3: Online vs Offline regardless of order
         res1 = resolver.resolve(
             CapabilityId("cv.deployment.optimization"),
-            available_targets=(offline_target, online_target),
+            available_targets=(offline_target, online_target_a),
         )
-        assert res1.availability_state == AvailabilityState.EXECUTABLE
-        assert res1.target_descriptor == online_target
-
-        # Order 2: Online target first
         res2 = resolver.resolve(
             CapabilityId("cv.deployment.optimization"),
-            available_targets=(online_target, offline_target),
+            available_targets=(online_target_a, offline_target),
         )
+        assert res1.availability_state == AvailabilityState.EXECUTABLE
         assert res2.availability_state == AvailabilityState.EXECUTABLE
-        assert res2.target_descriptor == online_target
+        assert res1.target_descriptor == online_target_a
+        assert res2.target_descriptor == online_target_a
+
+        # 2. Cat1 Deterministic Tie-Break by target_id when specificity matches
+        res_ab = resolver.resolve(
+            CapabilityId("cv.deployment.optimization"),
+            available_targets=(online_target_b, online_target_a),
+        )
+        res_ba = resolver.resolve(
+            CapabilityId("cv.deployment.optimization"),
+            available_targets=(online_target_a, online_target_b),
+        )
+        assert res_ab.target_descriptor == online_target_a
+        assert res_ba.target_descriptor == online_target_a
+
+        # 3. Cat1 Hardware Specificity: Jetson Orin preferred over generic GPU
+        res_orin = resolver.resolve(
+            CapabilityId("cv.deployment.optimization"),
+            available_targets=(online_target_a, online_target_orin),
+        )
+        res_orin_rev = resolver.resolve(
+            CapabilityId("cv.deployment.optimization"),
+            available_targets=(online_target_orin, online_target_a),
+        )
+        assert res_orin.target_descriptor == online_target_orin
+        assert res_orin_rev.target_descriptor == online_target_orin
+
+        # 4. Cat3 Deterministic Tie-Break: when all targets offline
+        offline_target_b = ExecutionTargetDescriptor(
+            target_id=TargetId("target.offline.gpu.b"),
+            target_type=TargetType.REMOTE,
+            is_available=False,
+            target_metadata={
+                "hardware": "nvidia_gpu",
+                "cuda_compute": "8.0",
+                "env_vars": {"CUDA_HOME": "/usr/local/cuda", "TRT_PATH": "/opt/trt"},
+            },
+        )
+        populated_tool_registry.register_target(offline_target_b)
+
+        res_off_1 = resolver.resolve(
+            CapabilityId("cv.deployment.optimization"),
+            available_targets=(offline_target_b, offline_target),
+        )
+        res_off_2 = resolver.resolve(
+            CapabilityId("cv.deployment.optimization"),
+            available_targets=(offline_target, offline_target_b),
+        )
+        assert res_off_1.availability_state == AvailabilityState.UNAVAILABLE
+        assert res_off_2.availability_state == AvailabilityState.UNAVAILABLE
+        assert res_off_1.target_descriptor == offline_target
+        assert res_off_2.target_descriptor == offline_target
+
+        # 5. Cat2 Deterministic Tie-Break: when multiple available targets miss the same number of tools/prereqs
+        missing_target_a = ExecutionTargetDescriptor(
+            target_id=TargetId("target.missing.gpu.a"),
+            target_type=TargetType.REMOTE,
+            is_available=True,
+            target_metadata={
+                "hardware": "nvidia_gpu",
+                "cuda_compute": "8.0",
+                "env_vars": {"CUDA_HOME": "/usr/local/cuda", "TRT_PATH": "/opt/trt"},
+            },
+        )
+        missing_target_b = ExecutionTargetDescriptor(
+            target_id=TargetId("target.missing.gpu.b"),
+            target_type=TargetType.REMOTE,
+            is_available=True,
+            target_metadata={
+                "hardware": "nvidia_gpu",
+                "cuda_compute": "8.0",
+                "env_vars": {"CUDA_HOME": "/usr/local/cuda", "TRT_PATH": "/opt/trt"},
+            },
+        )
+        # Not registered in tool registry, so required tools are missing on both
+        res_missing_1 = resolver.resolve(
+            CapabilityId("cv.deployment.optimization"),
+            available_targets=(missing_target_b, missing_target_a),
+        )
+        res_missing_2 = resolver.resolve(
+            CapabilityId("cv.deployment.optimization"),
+            available_targets=(missing_target_a, missing_target_b),
+        )
+        assert res_missing_1.availability_state == AvailabilityState.UNAVAILABLE
+        assert res_missing_2.availability_state == AvailabilityState.UNAVAILABLE
+        assert res_missing_1.target_descriptor == missing_target_a
+        assert res_missing_2.target_descriptor == missing_target_a
 
     def test_i6_re_registering_discovered_skill_cleans_up_index(self) -> None:
         # I6: Re-registering discovered candidate with different capability cleans up old index
