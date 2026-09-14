@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import uuid
@@ -10,7 +9,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, Protocol
 
-from cv_agent.dataset.contracts import DatasetManifest
+from cv_agent.dataset.contracts import DatasetManifest, OperationIdentity
 from cv_agent.dataset.errors import (
     DatasetApprovalRequiredError,
     DatasetError,
@@ -198,18 +197,25 @@ class FileSystemDatasetRegistry:
         version: DatasetVersion,
         approval_evidence: Mapping[str, Any] | None = None,
         *,
-        expected_operation_id: str | None = None,
-        expected_operation_version: str | None = None,
-        expected_canonical_payload_hash: str | None = None,
-        expected_target_identity: str | None = None,
+        expected_operation_identity: OperationIdentity | None = None,
     ) -> None:
         """Enforce ADR-0003 4-tuple operation identity binding for gated dataset actions (Gate I4).
 
         Required Operation Identity:
         (operation_id, operation_version, canonical_payload_hash, target_identity)
         """
+        # 1. Approval evidence must be provided
         if not approval_evidence:
             raise DatasetApprovalRequiredError(action, str(dataset_id), str(version))
+
+        # 2. Authoritative expected operation identity is required (no local synthesis or ad-hoc fallback)
+        if expected_operation_identity is None:
+            raise DatasetApprovalRequiredError(
+                f"{action} (authoritative ADR-0003 expected operation identity is required; "
+                f"local synthesis or ad-hoc fallback prohibited)",
+                str(dataset_id),
+                str(version),
+            )
 
         required_keys = {
             "operation_id",
@@ -230,43 +236,31 @@ class FileSystemDatasetRegistry:
                 str(version),
             )
 
-        # Derive expected 4-tuple operation identity
-        exp_target = expected_target_identity or f"{dataset_id}:{version}"
-        exp_op_id = expected_operation_id or action
-        exp_op_ver = expected_operation_version or "1.0.0"
-
-        if expected_canonical_payload_hash is not None:
-            exp_payload_hash = expected_canonical_payload_hash
-        else:
-            exp_payload_hash = hashlib.sha256(
-                f"{exp_op_id}:{exp_op_ver}:{exp_target}".encode()
-            ).hexdigest()
-
-        expected_identity = (exp_op_id, exp_op_ver, exp_payload_hash, exp_target)
-        actual_identity = (
+        expected_tuple = expected_operation_identity.as_tuple()
+        actual_tuple = (
             str(approval_evidence.get("operation_id")),
             str(approval_evidence.get("operation_version")),
             str(approval_evidence.get("canonical_payload_hash")),
             str(approval_evidence.get("target_identity")),
         )
 
-        if actual_identity != expected_identity:
+        if actual_tuple != expected_tuple:
             mismatches: list[str] = []
-            if actual_identity[0] != expected_identity[0]:
+            if actual_tuple[0] != expected_tuple[0]:
                 mismatches.append(
-                    f"operation_id mismatch: expected '{expected_identity[0]}', got '{actual_identity[0]}'"
+                    f"operation_id mismatch: expected '{expected_tuple[0]}', got '{actual_tuple[0]}'"
                 )
-            if actual_identity[1] != expected_identity[1]:
+            if actual_tuple[1] != expected_tuple[1]:
                 mismatches.append(
-                    f"operation_version mismatch: expected '{expected_identity[1]}', got '{actual_identity[1]}'"
+                    f"operation_version mismatch: expected '{expected_tuple[1]}', got '{actual_tuple[1]}'"
                 )
-            if actual_identity[2] != expected_identity[2]:
+            if actual_tuple[2] != expected_tuple[2]:
                 mismatches.append(
-                    f"canonical_payload_hash mismatch: expected '{expected_identity[2]}', got '{actual_identity[2]}'"
+                    f"canonical_payload_hash mismatch: expected '{expected_tuple[2]}', got '{actual_tuple[2]}'"
                 )
-            if actual_identity[3] != expected_identity[3]:
+            if actual_tuple[3] != expected_tuple[3]:
                 mismatches.append(
-                    f"target_identity mismatch: expected '{expected_identity[3]}', got '{actual_identity[3]}'"
+                    f"target_identity mismatch: expected '{expected_tuple[3]}', got '{actual_tuple[3]}'"
                 )
 
             raise DatasetApprovalRequiredError(

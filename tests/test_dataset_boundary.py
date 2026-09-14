@@ -37,6 +37,7 @@ from cv_agent.dataset import (
     LeakageCheckResult,
     LeakageType,
     LocalFSStore,
+    OperationIdentity,
     PathTraversalError,
     PayloadCorruptionError,
     PayloadIntegrityError,
@@ -806,9 +807,22 @@ def test_mutation_approval_enforces_adr0003_4tuple_identity(
     dataset_id = DatasetId("cctv.perimeter")
     ver = DatasetVersion("v1.0.0")
 
+    expected_identity = OperationIdentity(
+        operation_id="op-dataset-delete-01",
+        operation_version="1.0.0",
+        canonical_payload_hash="abc123canonicalhash",
+        target_identity="cctv.perimeter:v1.0.0",
+    )
+
     # Missing approval evidence completely
     with pytest.raises(DatasetApprovalRequiredError, match="requires human approval"):
-        temp_registry.require_mutation_approval("dataset.delete", dataset_id, ver, None)
+        temp_registry.require_mutation_approval(
+            "dataset.delete",
+            dataset_id,
+            ver,
+            None,
+            expected_operation_identity=expected_identity,
+        )
 
     # Incomplete 4-tuple identity (missing canonical_payload_hash)
     incomplete_evidence = {
@@ -821,7 +835,11 @@ def test_mutation_approval_enforces_adr0003_4tuple_identity(
         DatasetApprovalRequiredError, match="incomplete 4-tuple operation identity"
     ):
         temp_registry.require_mutation_approval(
-            "dataset.delete", dataset_id, ver, incomplete_evidence
+            "dataset.delete",
+            dataset_id,
+            ver,
+            incomplete_evidence,
+            expected_operation_identity=expected_identity,
         )
 
     # Rejected approval evidence
@@ -832,22 +850,39 @@ def test_mutation_approval_enforces_adr0003_4tuple_identity(
         DatasetApprovalRequiredError, match="approval rejected or not granted"
     ):
         temp_registry.require_mutation_approval(
-            "dataset.delete", dataset_id, ver, rejected_evidence
+            "dataset.delete",
+            dataset_id,
+            ver,
+            rejected_evidence,
+            expected_operation_identity=expected_identity,
+        )
+
+    valid_evidence = dict(rejected_evidence)
+    valid_evidence["approved"] = True
+
+    # Regression test for Round 3 Blocker: Failure when expected identity is absent (no ad-hoc fallback)
+    with pytest.raises(
+        DatasetApprovalRequiredError,
+        match="authoritative ADR-0003 expected operation identity is required",
+    ):
+        temp_registry.require_mutation_approval(
+            "dataset.delete",
+            dataset_id,
+            ver,
+            valid_evidence,
+            expected_operation_identity=None,
         )
 
     # Valid complete 4-tuple approval passes when bound to exact operation identity
-    valid_evidence = dict(rejected_evidence)
-    valid_evidence["approved"] = True
     temp_registry.require_mutation_approval(
         "dataset.delete",
         dataset_id,
         ver,
         valid_evidence,
-        expected_operation_id="op-dataset-delete-01",
-        expected_canonical_payload_hash="abc123canonicalhash",
+        expected_operation_identity=expected_identity,
     )
 
-    # PM Adversarial Review Blocker 3: Approval for Operation A presented to Operation B fails closed
+    # PM Adversarial Review Blocker: Approval for Operation A presented to Operation B fails closed
     # 1. Target dataset identity mismatch
     other_dataset = DatasetId("traffic.cam")
     with pytest.raises(
@@ -859,8 +894,12 @@ def test_mutation_approval_enforces_adr0003_4tuple_identity(
             other_dataset,
             ver,
             valid_evidence,
-            expected_operation_id="op-dataset-delete-01",
-            expected_canonical_payload_hash="abc123canonicalhash",
+            expected_operation_identity=OperationIdentity(
+                operation_id="op-dataset-delete-01",
+                operation_version="1.0.0",
+                canonical_payload_hash="abc123canonicalhash",
+                target_identity="traffic.cam:v1.0.0",
+            ),
         )
 
     # 2. Target version identity mismatch
@@ -874,8 +913,12 @@ def test_mutation_approval_enforces_adr0003_4tuple_identity(
             dataset_id,
             other_ver,
             valid_evidence,
-            expected_operation_id="op-dataset-delete-01",
-            expected_canonical_payload_hash="abc123canonicalhash",
+            expected_operation_identity=OperationIdentity(
+                operation_id="op-dataset-delete-01",
+                operation_version="1.0.0",
+                canonical_payload_hash="abc123canonicalhash",
+                target_identity="cctv.perimeter:v2.0.0",
+            ),
         )
 
     # 3. Operation ID mismatch (e.g. approval for delete presented to retrain)
@@ -888,8 +931,12 @@ def test_mutation_approval_enforces_adr0003_4tuple_identity(
             dataset_id,
             ver,
             valid_evidence,
-            expected_operation_id="op-dataset-retrain-99",
-            expected_canonical_payload_hash="abc123canonicalhash",
+            expected_operation_identity=OperationIdentity(
+                operation_id="op-dataset-retrain-99",
+                operation_version="1.0.0",
+                canonical_payload_hash="abc123canonicalhash",
+                target_identity="cctv.perimeter:v1.0.0",
+            ),
         )
 
     # 4. Canonical payload hash mismatch
@@ -902,8 +949,12 @@ def test_mutation_approval_enforces_adr0003_4tuple_identity(
             dataset_id,
             ver,
             valid_evidence,
-            expected_operation_id="op-dataset-delete-01",
-            expected_canonical_payload_hash="different_payload_hash_value",
+            expected_operation_identity=OperationIdentity(
+                operation_id="op-dataset-delete-01",
+                operation_version="1.0.0",
+                canonical_payload_hash="different_payload_hash_value",
+                target_identity="cctv.perimeter:v1.0.0",
+            ),
         )
 
 

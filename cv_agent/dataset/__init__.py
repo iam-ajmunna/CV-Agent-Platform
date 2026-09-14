@@ -14,6 +14,7 @@ from cv_agent.dataset.contracts import (
     DatasetManifest,
     ItemMetadata,
     LeakageCheckResult,
+    OperationIdentity,
     SplitMembership,
 )
 from cv_agent.dataset.errors import (
@@ -91,6 +92,7 @@ __all__ = [
     "LeakageType",
     "LocalFSStore",
     "MinioStore",
+    "OperationIdentity",
     "PathTraversalError",
     "PayloadCorruptionError",
     "PayloadIntegrityError",

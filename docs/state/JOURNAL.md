@@ -1413,4 +1413,35 @@ Remediated all 3 remaining contract-level blocking findings from the Official PM
 
 **Learned:** Security and integrity checks must never be presence-only; every validation must bind evidence strictly to the exact target operation identity and cryptographic hash.
 
-**Left open:** Pushing remediation commit to `feature/ajmunna/phase-2j-dataset-subsystem` for PR #53 and awaiting final Official PM adversarial review.
+**Left open:** PR #53 updated, awaiting Official PM review.
+
+---
+
+## 2026-09-14 — Phase 2J Third Adversarial Review Remediation (PR #53)
+
+**Did:**
+Remediated the remaining architectural boundary finding from the Official PM third adversarial review on PR #53:
+1. **Typed Authoritative Operation Identity (Gate I4):**
+   - Defined `OperationIdentity` frozen Pydantic v2 contract in `cv_agent/dataset/contracts.py` representing the authoritative ADR-0003 4-tuple: `(operation_id, operation_version, canonical_payload_hash, target_identity)`. Exported in `cv_agent/dataset/__init__.py`.
+2. **Eliminated Local Synthesis and Ad-hoc Fallbacks:**
+   - In `FileSystemDatasetRegistry.require_mutation_approval()`, removed the `"1.0.0"` fallback, removed the ad-hoc local SHA-256 payload hash synthesis, and removed local operation identity manufacturing.
+   - Preserved ADR-0003 as the sole authority for operation identity, versioning, and canonicalization.
+   - Made `expected_operation_identity: OperationIdentity` mandatory; when absent or `None`, the registry immediately fails closed with `DatasetApprovalRequiredError`.
+3. **Regression Test Added:**
+   - Added dedicated regression test in `tests/test_dataset_boundary.py` proving that mutation approval fails closed when expected operation identity is absent (`expected_operation_identity=None`) rather than falling back to synthetic values.
+4. **Quality Gates Verified:**
+   - Pytest: 433 passed, 0 failures across 20 test modules.
+   - Ruff check: clean (0 warnings).
+   - Ruff format check: 148 files formatted.
+   - Mypy: clean across 83 source files in `cv_agent`.
+   - Git diff check: clean.
+   - Python -m build: clean sdist and wheel built.
+   - Pip-audit: clean (0 known vulnerabilities).
+
+**Why:** `[P§19]`, `[P§20]`, `[P§24]`, `[P§34]`, ADR-0003, and frozen ADR-0009. Prohibits layer leakage where the dataset layer invents or synthesizes orchestration operation identities, guaranteeing strict architectural boundary separation.
+
+**Broke:** Nothing broken. 433 tests pass across 19 test modules, all quality gates green.
+
+**Learned:** Architectural boundaries between orchestration and dataset subsystems must be absolute: one subsystem must never synthesize or approximate the security identities owned by another.
+
+**Left open:** Pushing remediation commit to `feature/ajmunna/phase-2j-dataset-subsystem` for PR #53 and awaiting final Official PM merge authorization.

@@ -387,3 +387,31 @@ class DatasetManifest(BaseModel):
                 f"n_items ({self.n_items}) does not equal count of unique split hashes ({len(unique_hashes)})"
             )
         return self
+
+
+class OperationIdentity(BaseModel):
+    """Authoritative ADR-0003 4-tuple operation identity for gated mutations (Gate I4).
+
+    Identifies:
+    (operation_id, operation_version, canonical_payload_hash, target_identity)
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    operation_id: str = Field(min_length=1)
+    operation_version: str = Field(min_length=1)
+    canonical_payload_hash: str = Field(min_length=1)
+    target_identity: str = Field(min_length=1)
+
+    @field_validator("operation_version", mode="before")
+    @classmethod
+    def _coerce_version(cls, v: Any) -> str:
+        return str(v)
+
+    def as_tuple(self) -> tuple[str, str, str, str]:
+        return (
+            self.operation_id,
+            self.operation_version,
+            self.canonical_payload_hash,
+            self.target_identity,
+        )
