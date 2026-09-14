@@ -156,50 +156,63 @@ class DefaultSkillExecutor:
         collected_results: list[ToolResult] = []
         merged_outputs: dict[str, Any] = {}
 
-        try:
-            # Wrap execution in declared skill timeout
-            async with asyncio.timeout(skill.timeout_seconds):
-                for tool_id in skill.required_tools:
-                    tool_inv_id = ExecutionId(f"tool-{uuid.uuid4().hex[:12]}")
-                    invocation = ToolInvocation(
-                        tool_id=tool_id,
-                        parameters=parameters,
-                        target_id=target.target_id,
-                        execution_id=tool_inv_id,
-                        timeout_seconds=skill.timeout_seconds,
-                        approval_authorized=approval_authorized,
+        async def _run_tool_pipeline() -> SkillExecutionResult:
+            for tool_id in skill.required_tools:
+                tool_inv_id = ExecutionId(f"tool-{uuid.uuid4().hex[:12]}")
+                invocation = ToolInvocation(
+                    tool_id=tool_id,
+                    parameters=parameters,
+                    target_id=target.target_id,
+                    execution_id=tool_inv_id,
+                    timeout_seconds=skill.timeout_seconds,
+                    approval_authorized=approval_authorized,
+                )
+
+                result = await tool_executor.execute(invocation)
+                collected_results.append(result)
+
+                # If tool execution failed, stop and return failed result
+                if result.status != ToolExecutionStatus.SUCCESS:
+                    return SkillExecutionResult(
+                        skill_id=skill.skill_id,
+                        execution_id=exec_id,
+                        status=SkillExecutionStatus.EXECUTION_FAILED,
+                        outputs=result.structured_output,
+                        tool_results=tuple(collected_results),
+                        error_message=result.error_message
+                        or f"Tool {str(tool_id)!r} failed with status {result.status.value}",
+                        duration_ms=int((time.monotonic() - start_time) * 1000),
                     )
 
-                    result = await tool_executor.execute(invocation)
-                    collected_results.append(result)
+                # Asynchronous handoff detection (Invariant I1)
+                if result.active_job_ref is not None:
+                    return SkillExecutionResult(
+                        skill_id=skill.skill_id,
+                        execution_id=exec_id,
+                        status=SkillExecutionStatus.DISPATCHED,
+                        outputs=result.structured_output,
+                        tool_results=tuple(collected_results),
+                        active_job_ref=result.active_job_ref,
+                        duration_ms=int((time.monotonic() - start_time) * 1000),
+                    )
 
-                    # If tool execution failed, stop and return failed result
-                    if result.status != ToolExecutionStatus.SUCCESS:
-                        return SkillExecutionResult(
-                            skill_id=skill.skill_id,
-                            execution_id=exec_id,
-                            status=SkillExecutionStatus.EXECUTION_FAILED,
-                            outputs=result.structured_output,
-                            tool_results=tuple(collected_results),
-                            error_message=result.error_message
-                            or f"Tool {str(tool_id)!r} failed with status {result.status.value}",
-                            duration_ms=int((time.monotonic() - start_time) * 1000),
-                        )
+                merged_outputs.update(result.structured_output)
 
-                    # Asynchronous handoff detection (Invariant I1)
-                    if result.active_job_ref is not None:
-                        return SkillExecutionResult(
-                            skill_id=skill.skill_id,
-                            execution_id=exec_id,
-                            status=SkillExecutionStatus.DISPATCHED,
-                            outputs=result.structured_output,
-                            tool_results=tuple(collected_results),
-                            active_job_ref=result.active_job_ref,
-                            duration_ms=int((time.monotonic() - start_time) * 1000),
-                        )
+            duration_ms = int((time.monotonic() - start_time) * 1000)
+            return SkillExecutionResult(
+                skill_id=skill.skill_id,
+                execution_id=exec_id,
+                status=SkillExecutionStatus.SUCCESS,
+                outputs=merged_outputs,
+                tool_results=tuple(collected_results),
+                duration_ms=duration_ms,
+            )
 
-                    merged_outputs.update(result.structured_output)
-
+        try:
+            return await asyncio.wait_for(
+                _run_tool_pipeline(),
+                timeout=float(skill.timeout_seconds),
+            )
         except (asyncio.TimeoutError, TimeoutError):
             return SkillExecutionResult(
                 skill_id=skill.skill_id,
@@ -209,13 +222,3 @@ class DefaultSkillExecutor:
                 error_message=f"Skill execution exceeded declared timeout of {skill.timeout_seconds}s",
                 duration_ms=int((time.monotonic() - start_time) * 1000),
             )
-
-        duration_ms = int((time.monotonic() - start_time) * 1000)
-        return SkillExecutionResult(
-            skill_id=skill.skill_id,
-            execution_id=exec_id,
-            status=SkillExecutionStatus.SUCCESS,
-            outputs=merged_outputs,
-            tool_results=tuple(collected_results),
-            duration_ms=duration_ms,
-        )
