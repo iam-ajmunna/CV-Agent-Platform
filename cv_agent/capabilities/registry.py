@@ -748,3 +748,12 @@ class CapabilityRegistry:
         """Declared registry specification version."""
         self._ensure_loaded()
         return self._version
+
+
+def load_default_capability_registry() -> CapabilityRegistry:
+    """Load and return the authoritative ADR-0001 CapabilityRegistry from default path."""
+    from cv_agent.config.settings import _default_registry_path
+
+    reg = CapabilityRegistry(_default_registry_path())
+    reg.load()
+    return reg

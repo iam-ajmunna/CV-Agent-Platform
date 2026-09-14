@@ -1138,3 +1138,61 @@ Added 8 new regression tests, expanding the Phase 2D contract test suite to 35 t
 **Learned:** Combining collision-free model partition namespaces with crash-safe atomic replacement and bidirectional transactional rollback guarantees store integrity across model evolutions and unexpected process interrupts without compromising evidence immutability.
 
 **Left open:** Phase 2G formally closed. Next Phase 2 milestone or subsystem kickoff awaiting Official PM instruction.
+
+---
+
+## 2026-09-14 — Phase 2H ADR-0007 Skills Architecture & NVIDIA Capability Discovery Implementation (branch: feature/ajmunna/phase-2h-skills-architecture)
+
+**Did:**
+1. Completed pre-implementation architecture review on ADR-0007, identifying and resolving all 4 PM review findings prior to implementation:
+   - **Blocker B1 (ADR-0001 Authority):** Bound all declarative skills strictly and exclusively to registered ADR-0001 capabilities; enforced that declaring unregistered capability IDs fails fast with `UnknownCapabilityError`.
+   - **Blocker B2 (Sole Lifecycle Authority):** Reused authoritative `AvailabilityState` from `cv_agent.domain.contracts`; `SkillResolver` evaluates target compatibility and delegates directly to ADR-0001 availability semantics without duplicating the lifecycle state machine.
+   - **Important I1 (Closed Execution Status & Async Ownership):** Implemented closed `SkillExecutionStatus` (`SUCCESS`, `DISPATCHED`, `EXECUTION_FAILED`, `PREREQUISITE_FAILED`, `POLICY_VIOLATION`, `TIMEOUT`). Asynchronous workloads return `DISPATCHED` accompanied by a mandatory non-null `ActiveJobHandoff`, passing recovery ownership strictly to ADR-0003 Orchestration. Policy violations fail closed before any tool call, guaranteeing empty `tool_results = ()`.
+   - **Important I2 (Semantic Target Validation):** Formalized numeric `(major, minor)` integer tuple comparison for `min_cuda_compute`, an authoritative `HardwareClass` subsumption hierarchy (`ANY`, `CPU`, `NVIDIA_GPU`, `JETSON`, `JETSON_ORIN`, `JETSON_XAVIER`), and C-identifier environment variable validation.
+   - **Gate 5 / D-022:** Implemented hardware-aware `KNOWN_BUT_UNAVAILABLE` enforcement on local macOS workstations with zero silent CPU fallback.
+2. Implemented `cv_agent.skills` subsystem modules:
+   - `cv_agent/skills/contracts.py`: Typed immutable contracts (`SkillDescriptor`, `TargetRequirements`, `HardwareClass`, `SkillResolution`, `SkillExecutionStatus`, `SkillExecutionResult`).
+   - `cv_agent/skills/errors.py`: Normalized failure taxonomy per ADR-0007 §5.
+   - `cv_agent/skills/registry.py`: `DefaultSkillRegistry` enforcing ADR-0001 capability authority and unique `SkillId`, plus ephemeral `DiscoveryCache` isolating runtime-discovered candidates from authoritative registry entries.
+   - `cv_agent/skills/resolver.py`: `DefaultSkillResolver` evaluating target compatibility and tool dependencies.
+   - `cv_agent/skills/executor.py`: Procedural `DefaultSkillExecutor` coordinating JSON Schema parameter validation, approval precondition gating, tool dispatch via ADR-0005, and async handoff detection.
+   - `cv_agent/skills/catalog.py`: 10 authoritative declarative NVIDIA skills per ADR-0007 §3.4 and internal baseline skills.
+   - `cv_agent/skills/__init__.py`: Clean public API export.
+3. Authored comprehensive test suite in `tests/test_skills_boundary.py` (32 tests) covering all 11 acceptance gates, negative/adversarial vectors, and deep immutability invariants. Total test suite increased from 314 to **346 passed** (0 warnings).
+4. Verified all local quality gates: Ruff check clean, Ruff format clean (128 files), Mypy clean on `cv_agent` (66 source files, 0 issues), `git diff --check` clean.
+5. Authored Phase 2H implementation report in `docs/reports/ISSUE-49-PHASE-2H-REPORT.md` and updated `docs/state/STATUS.md`.
+
+**Why:** `[P§15]`, `[P§23]`, `[P§24]`, `[P§29.4]`, `[P§29.9]`, `[P§34]`, and frozen ADR-0007 (`D-025`, `D-040`). Implements the procedural expertise and external vendor discovery layer of the agent architecture, connecting high-level capabilities to discrete executable tools while preventing reasoning prompt bloat and prohibiting silent CPU fallback on unsupported hardware.
+
+**Broke:** Python 3.10 CI initially failed on `asyncio.timeout` in `cv_agent/skills/executor.py` (`asyncio.timeout` was added in Python 3.11). Corrected via `asyncio.wait_for(...)` standard across Python 3.10–3.13, committed as `e7e29d5`.
+
+**Learned:** Anchoring procedural skills directly to authoritative ADR-0001 capabilities and reusing the domain availability state machine preserves clean architectural boundaries, preventing the skills layer from drifting into capability definition or competing lifecycle governance. `asyncio.wait_for` remains the reliable cross-version timeout mechanism across Python 3.10–3.13.
+
+**Left open:** PR #50 open and green across all matrix jobs (Python 3.10, 3.11, 3.12, 3.13). Awaiting Official PM adversarial review and squash merge to `main`.
+
+---
+
+## 2026-09-14 — Phase 2H PM Adversarial Review Remediation (PR #50 / branch: feature/ajmunna/phase-2h-skills-architecture)
+
+**Did:**
+1. Remediated all 2 Blockers and 7 Important findings identified in Official PM review of PR #50:
+   - **B3 (Capability Authority Mandatory):** Made `capability_registry` mandatory in `DefaultSkillRegistry` and `DiscoveryCache`, defaulting automatically to `load_default_capability_registry()`. Removed fallback that treated unverified `CapabilityId` strings as valid; unknown capabilities fail closed with `UnknownCapabilityError`.
+   - **B4 (Tool Dependency Verification Mandatory):** Added `tool_registry` support to `SkillResolver`. If `tool_registry` is missing, or required tools are missing/unverified/incompatible, resolution deterministically fails closed to `AvailabilityState.UNAVAILABLE` with `unverified_tool:<id>` or `missing_tool:<id>` and `is_executable = False`.
+   - **I3 (Declarative Prerequisites Evaluation & Fail-Closed Absent Metadata):** `SkillResolver` evaluates `skill.prerequisites` against `target.metadata["prerequisites"]` and `features`. If metadata is absent or missing, prerequisites fail closed to `UNAVAILABLE` (`missing_prerequisite:<prereq>`). `SkillExecutor` enforces prerequisites prior to execution, failing fast with `SkillExecutionStatus.PREREQUISITE_FAILED`, empty `tool_results = ()`, and `active_job_ref = None` if target metadata is absent or unsatisfied.
+   - **I4 (Bounded Supported JSON Schema Subset):** Upgraded `SkillExecutor` parameter validation to strictly enforce a bounded supported JSON Schema subset (`object`, `properties`, `required`, `additionalProperties: false`, numeric bounds, string length/regex pattern, array item schema validation, `enum`, and `null`), while failing closed with `ParameterValidationError` for unsupported constructs (`oneOf`, `anyOf`, `allOf`, `not`, `$ref`, `$schema`) or unsupported types.
+   - **I5 (Total Order-Independent Candidate/Target Selection):** Implemented three-tier bucketed priority ranking in `SkillResolver` (`cat1` EXECUTABLE, `cat2` UNAVAILABLE missing tools/prereqs, `cat3` UNAVAILABLE offline targets). Each bucket is deterministically sorted by a composite total ordering key: `(-cand_hw_rank, -target_hw_rank, (-target_compute[0], -target_compute[1]), str(cand.skill_id), str(target.target_id))` to guarantee identical selection regardless of input permutation.
+   - **I6 (Discovery Capability Index Cleanup):** `DiscoveryCache.register_discovered()` explicitly purges prior capability index mappings when re-registering an updated candidate, preventing stale references or index corruption.
+   - **I7 (Canonical Regex Strictness):** Removed `.strip()` from `parse_cuda_compute` and `validate_env_var_name`; whitespace fails canonical regex validation immediately.
+   - **I8 (DeepStream & TAO Target Prerequisites):** Updated `DEEPSTREAM_PIPELINE_SKILL` to `HardwareClass.NVIDIA_GPU` with prerequisites `("gstreamer", "deepstream_sdk")`; updated `TAO_TRANSFER_LEARNING_SKILL` with prerequisites `("docker", "nvidia-container-toolkit")`.
+   - **I9 (Immutability Hardening):** Added immutability tests and frozen mapping enforcement across `SkillResolution` and descriptors.
+2. Added `TestPMReviewRemediations` test class in `tests/test_skills_boundary.py` covering B3, B4, I3–I9, absent prerequisite metadata fail-closed behavior, unsupported schema construct rejection, null support, and deterministic tie-breaking. Total test suite stands at **356 passed** (42 skills tests).
+3. Re-verified all quality gates: Ruff check (0 issues), Ruff format (129 files formatted), Mypy (`cv_agent` 66 source files, 0 issues), `git diff --check` (clean).
+4. Updated `docs/reports/ISSUE-49-PHASE-2H-REPORT.md` and `docs/state/STATUS.md`.
+
+**Why:** `[P§15]`, `[P§23]`, `[P§24]`, `[P§29.4]`, `[P§29.9]`, `[P§34]`, and frozen ADR-0007. Eliminates false-positive `EXECUTABLE` states, enforces authoritative ADR-0001 capability integrity, guarantees fail-closed tool/prerequisite validation, and ensures deterministic, order-independent candidate selection.
+
+**Broke:** Discovered that calling `cache.register_discovered()` twice for the same candidate without capability cleanup left stale entries in the reverse capability index. Also identified that absent target metadata was previously bypassing prerequisite checks, and tie-breaking across targets in the same bucket lacked total ordering.
+
+**Learned:** Total ordering across resolution candidates must incorporate both candidate requirement specificity and target capability/compute specificity in addition to lexicographical identifiers to guarantee deterministic, permutation-invariant resolution. Missing metadata must unconditionally fail closed when requirements are declared.
+
+**Left open:** Ready for final PM adversarial re-review on PR #50 and squash-merge authorization.
