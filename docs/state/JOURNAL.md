@@ -1305,3 +1305,17 @@ Remediated all 3 architectural blockers (B1, B2, B3) and 5 secondary findings id
 **Learned:** When normalizing Unicode mapping keys to NFC in canonical representations, verifying that the normalized key has not already been seen guarantees that distinct Unicode representations cannot overwrite each other and alter the semantic contents of a canonical context preimage without error.
 
 **Left open:** Pushing remediation commit to branch `feature/ajmunna/phase-2i-reasoning-subsystem` for PR #52, verifying full CI matrix, and awaiting second PM review.
+
+---
+
+## 2026-09-14 — Phase 2I Milestone Closure (PR #52, Issue #51)
+
+**Did:** Formally closed Phase 2I (Reasoning Subsystem Architecture / ADR-0008). PR #52 squash-merged to `main` at `b380800` following remediation of blockers B1–B3 and secondary findings. Deleted feature branch `feature/ajmunna/phase-2i-reasoning-subsystem` locally and remotely. Verified `main` CI green across Python 3.10–3.13 matrix (run `34837175274`). Confirmed Issue #51 closed. Synchronized `STATUS.md` and `walkthrough.md`.
+
+**Why:** `[P§4]`, `[P§5]`, `[P§6]`, `[P§19]`, `[P§20]`, `[P§23]`, `[P§24]`, `[P§29.1]`–`[P§29.4]`, `[P§34]`, and frozen ADR-0008 (`D-026`, `D-041`, `D-054`). Delivers verified cognitive reasoning layer to the authoritative trunk.
+
+**Broke:** Nothing broken. 397 tests pass across 18 test modules, full CI green.
+
+**Learned:** Rigorous adversarial testing at architectural boundaries caught semantic type leakage, Unicode canonical collision failure modes, and context reference spoofing that standard schema validators and typecheckers alone had allowed through.
+
+**Left open:** Phase 2I is complete and accepted. Awaiting Official PM instruction and milestone sequencing for Phase 2J (Dataset Subsystem Architecture / ADR-0009).
