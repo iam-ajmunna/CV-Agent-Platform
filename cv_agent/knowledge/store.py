@@ -10,10 +10,13 @@ Enforces:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import math
+import os
 import re
+import tempfile
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict
 from datetime import datetime, timezone
@@ -39,6 +42,25 @@ from cv_agent.knowledge.interfaces import (
 )
 
 
+def _atomic_write_text(target_path: Path, content: str) -> None:
+    """Write text crash-safely using a temp-file, fsync, and atomic replace [I11]."""
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_path_str = tempfile.mkstemp(
+        dir=str(target_path.parent),
+        prefix=f".tmp_{target_path.name}_",
+    )
+    tmp_path = Path(tmp_path_str)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(content)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, target_path)
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        raise
+
+
 def _compute_cosine_similarity(v1: Sequence[float], v2: Sequence[float]) -> float:
     """Compute cosine similarity between two float vectors in [-1.0, 1.0]."""
     if len(v1) != len(v2) or not v1:
@@ -54,8 +76,12 @@ def _compute_cosine_similarity(v1: Sequence[float], v2: Sequence[float]) -> floa
 
 
 def _sanitize_partition_id(model_id: str) -> str:
-    """Derive a safe filesystem partition ID from embedding_model_id."""
-    return re.sub(r"[^a-zA-Z0-9_.-]", "_", model_id)
+    """Derive a collision-free canonical filesystem partition ID from model_id [B5]."""
+    clean_prefix = re.sub(r"[^a-zA-Z0-9_.-]", "_", model_id)[:32].strip("._-")
+    if not clean_prefix:
+        clean_prefix = "model"
+    digest = hashlib.sha256(model_id.encode("utf-8")).hexdigest()
+    return f"{clean_prefix}_{digest}"
 
 
 class HybridKnowledgeStore:
@@ -98,13 +124,13 @@ class HybridKnowledgeStore:
                 "total_documents": 0,
                 "total_chunks": 0,
             }
-            self.metadata_file.write_text(
-                json.dumps(default_metadata, indent=2), encoding="utf-8"
+            _atomic_write_text(
+                self.metadata_file, json.dumps(default_metadata, indent=2)
             )
 
         if not self.bm25_file.exists():
-            self.bm25_file.write_text(
-                json.dumps(BM25Index().to_dict(), indent=2), encoding="utf-8"
+            _atomic_write_text(
+                self.bm25_file, json.dumps(BM25Index().to_dict(), indent=2)
             )
 
     def get_metadata(self) -> dict[str, Any]:
@@ -119,7 +145,7 @@ class HybridKnowledgeStore:
         meta = self.get_metadata()
         meta.update(updates)
         meta["updated_at"] = datetime.now(timezone.utc).isoformat()
-        self.metadata_file.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+        _atomic_write_text(self.metadata_file, json.dumps(meta, indent=2))
 
     # ==========================================================================
     # Partition Management (Blocker 3 / Gate 10)
@@ -143,11 +169,10 @@ class HybridKnowledgeStore:
                         partitions.append(
                             json.loads(manifest_file.read_text(encoding="utf-8"))
                         )
-                    except (json.JSONDecodeError, OSError):
-                        logger.warning(
-                            "Corrupted partition manifest encountered in %s", p_dir
-                        )
-                        continue
+                    except Exception as exc:
+                        raise StoreCorruptedError(
+                            f"Corrupted partition manifest encountered in {p_dir}: {exc}"
+                        ) from exc
         return tuple(partitions)
 
     def get_partition_manifest(self, model_id: str) -> dict[str, Any] | None:
@@ -160,7 +185,7 @@ class HybridKnowledgeStore:
             return json.loads(manifest_file.read_text(encoding="utf-8"))
         except Exception as exc:
             raise StoreCorruptedError(
-                f"Failed to read partition manifest: {exc}"
+                f"Failed to read partition manifest for '{model_id}': {exc}"
             ) from exc
 
     def mark_partition_invalid(self, model_id: str) -> None:
@@ -171,7 +196,7 @@ class HybridKnowledgeStore:
             data = json.loads(manifest_file.read_text(encoding="utf-8"))
             data["status"] = "reindex_required"
             data["updated_at"] = datetime.now(timezone.utc).isoformat()
-            manifest_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
+            _atomic_write_text(manifest_file, json.dumps(data, indent=2))
 
     def validate_embedding_model(self, active_model_id: str) -> None:
         """Validate embedding model compatibility per Gate 10 and Blocker 3."""
@@ -220,11 +245,37 @@ class HybridKnowledgeStore:
         manifest_file = p_dir / "manifest.json"
         vectors_file = p_dir / "vectors.json"
 
-        # Update vectors
-        serializable = {k: list(v) for k, v in vectors.items()}
-        vectors_file.write_text(json.dumps(serializable, indent=2), encoding="utf-8")
+        # I9: Enforce immutable vector dimension per model partition unless explicitly reindexed
+        if manifest_file.exists():
+            try:
+                old_m = json.loads(manifest_file.read_text(encoding="utf-8"))
+            except Exception as exc:
+                raise StoreCorruptedError(
+                    f"Corrupted partition manifest for model '{model_id}': {exc}"
+                ) from exc
+            existing_dim = old_m.get("vector_dimension")
+            status = old_m.get("status")
+            if (
+                existing_dim is not None
+                and existing_dim != dimension
+                and status == "valid"
+            ):
+                raise EmbeddingModelMismatchError(
+                    f"Cannot alter immutable vector dimension for partition '{model_id}' "
+                    f"from {existing_dim} to {dimension} without explicit re-indexing."
+                )
 
-        # Update partition manifest
+        for k, v in vectors.items():
+            if len(v) != dimension:
+                raise ValueError(
+                    f"Vector for chunk '{k}' has dimension {len(v)}, expected {dimension}."
+                )
+
+        # Update vectors atomically [I11]
+        serializable = {k: list(v) for k, v in vectors.items()}
+        _atomic_write_text(vectors_file, json.dumps(serializable, indent=2))
+
+        # Update partition manifest atomically [I11]
         manifest_data = {
             "partition_id": _sanitize_partition_id(model_id),
             "embedding_model_id": model_id,
@@ -244,7 +295,7 @@ class HybridKnowledgeStore:
             except (json.JSONDecodeError, OSError):
                 manifest_data["created_at"] = manifest_data["updated_at"]
 
-        manifest_file.write_text(json.dumps(manifest_data, indent=2), encoding="utf-8")
+        _atomic_write_text(manifest_file, json.dumps(manifest_data, indent=2))
 
     # ==========================================================================
     # Lexical BM25 & Documents
@@ -259,13 +310,11 @@ class HybridKnowledgeStore:
             raise StoreCorruptedError(f"Failed to load BM25 index: {exc}") from exc
 
     def save_bm25_index(self, index: BM25Index) -> None:
-        """Save BM25 lexical index to disk."""
-        self.bm25_file.write_text(
-            json.dumps(index.to_dict(), indent=2), encoding="utf-8"
-        )
+        """Save BM25 lexical index to disk atomically [I11]."""
+        _atomic_write_text(self.bm25_file, json.dumps(index.to_dict(), indent=2))
 
     # ==========================================================================
-    # Atomic Multi-File Persistence with Rollback (Blocker 2)
+    # Atomic Multi-File Persistence with Rollback (Blocker 2, Blocker 4)
     # ==========================================================================
 
     def store_document_and_chunks(
@@ -278,7 +327,7 @@ class HybridKnowledgeStore:
         """Store document, chunks, BM25 postings, and partition vectors atomically.
 
         Enforces full rollback if any failure occurs midway, guaranteeing no partially
-        committed index state [Blocker 2].
+        committed index state and restoring both overwritten and newly created files [B2, B4].
         """
         if len(chunks) != len(vectors):
             raise ValueError("Chunks and vectors counts must match.")
@@ -320,10 +369,23 @@ class HybridKnowledgeStore:
             else None
         )
 
+        # B4: Track newly created files AND backup existing files that will be overwritten
         created_files: list[Path] = []
+        overwritten_backups: dict[Path, str] = {}
+
+        if doc_file.exists():
+            overwritten_backups[doc_file] = doc_file.read_text(encoding="utf-8")
+        else:
+            created_files.append(doc_file)
+
+        for c_file in chunk_files:
+            if c_file.exists():
+                overwritten_backups[c_file] = c_file.read_text(encoding="utf-8")
+            else:
+                created_files.append(c_file)
 
         try:
-            # Step A: Write document JSON
+            # Step A: Write document JSON atomically [I11]
             doc_dict = {
                 "document_id": str(document.document_id),
                 "title": document.title,
@@ -332,11 +394,9 @@ class HybridKnowledgeStore:
                 "provenance": asdict(document.provenance),
                 "chunk_ids": [str(c.chunk_id) for c in chunks],
             }
-            if not doc_file.exists():
-                created_files.append(doc_file)
-            doc_file.write_text(json.dumps(doc_dict, indent=2), encoding="utf-8")
+            _atomic_write_text(doc_file, json.dumps(doc_dict, indent=2))
 
-            # Step B: Write chunk JSON files
+            # Step B: Write chunk JSON files atomically [I11]
             for chunk, c_file in zip(chunks, chunk_files):
                 chunk_dict = {
                     "chunk_id": str(chunk.chunk_id),
@@ -347,9 +407,7 @@ class HybridKnowledgeStore:
                     "provenance": asdict(chunk.provenance),
                     "metadata": dict(chunk.metadata),
                 }
-                if not c_file.exists():
-                    created_files.append(c_file)
-                c_file.write_text(json.dumps(chunk_dict, indent=2), encoding="utf-8")
+                _atomic_write_text(c_file, json.dumps(chunk_dict, indent=2))
 
             # Step C: Update BM25 index
             bm25_index = self.load_bm25_index()
@@ -381,17 +439,20 @@ class HybridKnowledgeStore:
             # Rollback: delete newly created files
             for f in created_files:
                 f.unlink(missing_ok=True)
+            # Rollback: restore overwritten existing document/chunk files [B4]
+            for f, old_content in overwritten_backups.items():
+                _atomic_write_text(f, old_content)
             # Restore backups of modified index files
             if bm25_backup is not None:
-                self.bm25_file.write_text(bm25_backup, encoding="utf-8")
+                _atomic_write_text(self.bm25_file, bm25_backup)
             if meta_backup is not None:
-                self.metadata_file.write_text(meta_backup, encoding="utf-8")
+                _atomic_write_text(self.metadata_file, meta_backup)
             if p_manifest_backup is not None:
-                p_manifest_file.write_text(p_manifest_backup, encoding="utf-8")
+                _atomic_write_text(p_manifest_file, p_manifest_backup)
             else:
                 p_manifest_file.unlink(missing_ok=True)
             if p_vectors_backup is not None:
-                p_vectors_file.write_text(p_vectors_backup, encoding="utf-8")
+                _atomic_write_text(p_vectors_file, p_vectors_backup)
             else:
                 p_vectors_file.unlink(missing_ok=True)
 

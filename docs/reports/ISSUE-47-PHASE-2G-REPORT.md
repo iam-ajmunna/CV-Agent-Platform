@@ -138,11 +138,44 @@ In response to the Official PM's adversarial review on PR #48 (3 Blockers + 5 Im
 
 ---
 
+## Second Adversarial Review Remediations (Third Review Pass)
+
+In response to the Official PM's second adversarial review on PR #48 (2 Blockers + 3 Important Findings), the following persistence and isolation hardening were implemented:
+
+### Blockers Resolved
+1. **Restoration of Overwritten Existing Documents/Chunks on Rollback (Blocker 4):**
+   - In `cv_agent/knowledge/store.py`, `store_document_and_chunks()` now tracks `overwritten_backups: dict[Path, str]` in addition to `created_files: list[Path]`.
+   - When a pre-existing document or chunk is updated, its prior content is backed up in memory. If a mid-transaction failure occurs, all newly created files are deleted AND all overwritten existing files are restored to their exact pre-transaction state using crash-safe atomic writes.
+   - Verified by dedicated negative test `test_rollback_restores_overwritten_existing_files`.
+
+2. **Collision-Free Canonical Partition Identity (Blocker 5):**
+   - In `cv_agent/knowledge/store.py`, `_sanitize_partition_id()` computes a cryptographic SHA-256 hash of the exact `model_id`:
+     `f"{clean_prefix}_{hashlib.sha256(model_id.encode('utf-8')).hexdigest()}"`.
+   - Distinct model identifiers that previously collapsed under lossy regex replacement (such as `model/a` vs `model_a`, or `cv-model:v1` vs `cv-model/v1`) now map to provably disjoint, collision-free partition directories on disk.
+   - Verified by dedicated test `test_collision_free_canonical_partition_identity`.
+
+### Important Findings Resolved
+3. **Partition Vector Dimension Immutability (Important 9):**
+   - In `cv_agent/knowledge/store.py`, `save_partition_vectors()` checks the existing partition manifest. If a valid partition exists, attempting to save vectors with a mismatched dimension raises `EmbeddingModelMismatchError`. Vector dimensionality is immutable unless explicitly re-indexed.
+   - Validates that every individual vector in the batch strictly matches the declared dimension (`ValueError` on mismatch).
+   - Verified by dedicated test `test_partition_vector_dimension_immutability`.
+
+4. **Corrupted Partition Manifests Treated as Store Corruption (Important 10):**
+   - In `cv_agent/knowledge/store.py`, both `list_partitions()` and `get_partition_manifest()` strictly raise `StoreCorruptedError` upon encountering unparseable or corrupted partition manifests, eliminating silent skipping.
+   - Verified by dedicated test `test_corrupted_partition_manifest_raises_store_corrupted_error`.
+
+5. **Crash-Safe Atomic Write Semantics (Important 11):**
+   - Implemented `_atomic_write_text()` in `cv_agent/knowledge/store.py`, enforcing temp-file creation in the target directory, `f.flush()`, physical disk sync via `os.fsync(f.fileno())`, and POSIX atomic replacement via `os.replace()`.
+   - Replaced all direct `write_text()` calls in `store.py` with `_atomic_write_text()`.
+   - Verified by dedicated test `test_crash_safe_atomic_write_replacement`.
+
+---
+
 ## Verification Results
 
 1. **Pytest Suite:**
-   - `tests/test_knowledge_rag_boundary.py`: **24 passed** in 0.12s (16 baseline + 8 review regression tests).
-   - Entire test suite: **309 passed** (0 warnings) across 16 test modules in 3.55s.
+   - `tests/test_knowledge_rag_boundary.py`: **29 passed** in 0.16s (16 baseline + 8 first review + 5 second review regression tests).
+   - Entire test suite: **314 passed** (0 warnings) across 16 test modules in 3.64s.
 2. **Static Analysis & Linters:**
    - `ruff check .`: All checks passed.
    - `ruff format --check . ...`: 120 files already formatted (clean).

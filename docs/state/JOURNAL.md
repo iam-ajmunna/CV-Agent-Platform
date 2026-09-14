@@ -1091,4 +1091,27 @@ Added 8 new regression tests, expanding the Phase 2D contract test suite to 35 t
 
 **Learned:** Defense-in-depth in RAG systems requires escaping passive boundary tags to eliminate prompt boundary confusion, and organizing vector indexes into discrete, model-versioned filesystem partitions so model transitions cannot query stale or incompatible embedding dimensions.
 
-**Left open:** Commit, push to `origin feature/ajmunna/phase-2g-knowledge-rag`, monitor GitHub Actions CI matrix across Python 3.10–3.13, and submit remediation report to Official PM for second adversarial review.
+**Left open:** PR #48 second review completed with 2 blockers + 3 important findings; proceeding to second-pass hardening.
+
+---
+
+## 2026-09-14 — Phase 2G Second Adversarial Review Hardening (feature/ajmunna/phase-2g-knowledge-rag)
+
+**Did:**
+1. Addressed all 5 findings (2 Blockers + 3 Important Findings) from the Official PM's second adversarial review of PR #48:
+   - **Blocker 4 (Overwritten files rollback):** In `cv_agent/knowledge/store.py`, `store_document_and_chunks()` now tracks `overwritten_backups: dict[Path, str]` to capture existing document and chunk JSON contents before writing. On any mid-operation failure, newly created files are deleted and overwritten files are restored to their exact pre-transaction state.
+   - **Blocker 5 (Collision-free canonical partition ID):** Updated `_sanitize_partition_id()` to compute `f"{clean_prefix}_{hashlib.sha256(model_id.encode('utf-8')).hexdigest()}"`. Model IDs with distinct punctuation (e.g. `model/a` vs `model_a`) now map to provably disjoint filesystem directories.
+   - **Important 9 (Immutable vector dimension per partition):** In `save_partition_vectors()`, strictly enforced that existing valid partitions cannot have their `vector_dimension` altered without explicit re-indexing, raising `EmbeddingModelMismatchError`. Validated all batch vectors match declared dimension.
+   - **Important 10 (Corrupted partition manifest handling):** In `list_partitions()` and `get_partition_manifest()`, unparseable/corrupted `manifest.json` files strictly raise `StoreCorruptedError` rather than being silently skipped.
+   - **Important 11 (Crash-safe atomic writes):** Implemented `_atomic_write_text()` utilizing `tempfile.mkstemp(dir=target.parent)`, `f.flush()`, `os.fsync(f.fileno())`, and `os.replace()` for atomic, crash-resilient file replacement. Replaced all direct `write_text()` calls in `store.py`.
+2. Added 5 dedicated negative regression tests in `tests/test_knowledge_rag_boundary.py`, bringing Phase 2G boundary tests to 29 and the entire test suite to **314 passed** (0 warnings).
+3. Verified all local quality gates: Ruff check clean, Ruff format check clean, Mypy clean on `cv_agent` (59 source files), `git diff --check` clean.
+4. Updated `docs/reports/ISSUE-47-PHASE-2G-REPORT.md` and `docs/state/STATUS.md`.
+
+**Why:** ADR-0006 §3.4, §3.6, §5.B, `[P§18]`, `[P§20]`, `[P§29.3]`, `[P§34]`. Guarantees crash-safe POSIX atomic replacement, full transactional rollback for pre-existing documents, collision-free partition namespaces, partition dimensionality immutability, and fail-closed store integrity verification.
+
+**Broke:** Nothing broken. 314 pytest tests pass, 0 warnings.
+
+**Learned:** True transactional filesystem storage requires pairing atomic write-and-replace (`mkstemp` + `fsync` + `rename`) with bidirectional rollback tracking (tracking both newly created unlinks and pre-existing content restorations) to ensure no state mutation survives an aborted transaction.
+
+**Left open:** Commit, push to `origin feature/ajmunna/phase-2g-knowledge-rag`, monitor GitHub Actions CI matrix across Python 3.10–3.13, and submit remediation report to Official PM for final acceptance.

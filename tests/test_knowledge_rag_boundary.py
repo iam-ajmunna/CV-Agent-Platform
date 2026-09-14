@@ -28,6 +28,7 @@ from cv_agent.knowledge.bm25 import BM25Index, tokenize
 from cv_agent.knowledge.exceptions import (
     EmbeddingModelMismatchError,
     MissingProvenanceError,
+    StoreCorruptedError,
     WorkspaceContainmentBreachError,
 )
 from cv_agent.knowledge.ingester import DefaultKnowledgeIngester, sanitize_content
@@ -1126,3 +1127,228 @@ def test_raw_absolute_posix_path_rejected(ingester: DefaultKnowledgeIngester) ->
             topic_domain=TopicDomain.FRAMEWORK_API,
         )
         ingester.ingest(doc)
+
+
+# ==============================================================================
+# Second PM Adversarial Review Regression Tests (B4, B5, I9, I10, I11)
+# ==============================================================================
+
+
+def test_rollback_restores_overwritten_existing_files(
+    store: HybridKnowledgeStore,
+    gateway: MockEmbeddingGateway,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PM Blocker 4: Rollback must restore overwritten existing document/chunk files."""
+    import json
+
+    ingester = DefaultKnowledgeIngester(store=store, embedding_gateway=gateway)
+    doc_id = DocumentId("doc-overwritten-test")
+
+    # 1. Ingest original document version 1
+    doc_v1 = KnowledgeDocument(
+        document_id=doc_id,
+        title="Version 1",
+        raw_content="Original content before update.",
+        provenance=Provenance(
+            source_uri="https://docs.example.com/v1",
+            source_class=SourceClass.OFFICIAL_DOCUMENTATION,
+            author_or_organization="Org",
+            published_date="2026-01-01",
+            retrieved_date="2026-01-02",
+            origin_anchor="anchor-v1",
+        ),
+        topic_domain=TopicDomain.CV_ALGORITHM,
+    )
+    chunk_ids_v1 = ingester.ingest(doc_v1)
+    doc_file = store.docs_dir / f"{doc_id}.json"
+    chunk_file = store.docs_dir / f"chunk_{chunk_ids_v1[0]}.json"
+    assert doc_file.exists()
+    assert chunk_file.exists()
+    assert (
+        "Original content"
+        in json.loads(doc_file.read_text(encoding="utf-8"))["raw_content"]
+    )
+    assert (
+        "Original content"
+        in json.loads(chunk_file.read_text(encoding="utf-8"))["content"]
+    )
+
+    # 2. Attempt to update the document, simulating mid-transaction failure at vector save step
+    def mock_save_vectors_fail(*args: Any, **kwargs: Any) -> None:
+        raise OSError("Simulated mid-operation crash during vector commit")
+
+    monkeypatch.setattr(store, "save_partition_vectors", mock_save_vectors_fail)
+
+    doc_v2 = KnowledgeDocument(
+        document_id=doc_id,
+        title="Version 2",
+        raw_content="Overwritten content that should be reverted.",
+        provenance=Provenance(
+            source_uri="https://docs.example.com/v2",
+            source_class=SourceClass.OFFICIAL_DOCUMENTATION,
+            author_or_organization="Org",
+            published_date="2026-01-01",
+            retrieved_date="2026-01-02",
+            origin_anchor="anchor-v2",
+        ),
+        topic_domain=TopicDomain.CV_ALGORITHM,
+    )
+
+    with pytest.raises(OSError, match="Simulated mid-operation crash"):
+        ingester.ingest(doc_v2)
+
+    # 3. Assert pre-transaction state is fully restored: original content remains intact
+    assert doc_file.exists()
+    assert chunk_file.exists()
+    restored_doc = json.loads(doc_file.read_text(encoding="utf-8"))
+    restored_chunk = json.loads(chunk_file.read_text(encoding="utf-8"))
+    assert restored_doc["raw_content"] == "Original content before update."
+    assert restored_doc["title"] == "Version 1"
+    assert restored_chunk["content"] == "Original content before update."
+
+
+def test_collision_free_canonical_partition_identity(
+    store: HybridKnowledgeStore,
+) -> None:
+    """PM Blocker 5: _sanitize_partition_id produces collision-free canonical partitions."""
+    from cv_agent.knowledge.store import _sanitize_partition_id
+
+    # Model IDs that would previously collapse under lossy regex replacement
+    model_1 = "cv-model/detector"
+    model_2 = "cv-model_detector"
+    model_3 = "cv-model.detector"
+
+    part_1 = _sanitize_partition_id(model_1)
+    part_2 = _sanitize_partition_id(model_2)
+    part_3 = _sanitize_partition_id(model_3)
+
+    assert part_1 != part_2
+    assert part_1 != part_3
+    assert part_2 != part_3
+
+    # Ingest into store for both models and verify separate filesystem directories
+    gw_1 = MockEmbeddingGateway(model_id=model_1, dimension=8)
+    gw_2 = MockEmbeddingGateway(model_id=model_2, dimension=8)
+    ingester_1 = DefaultKnowledgeIngester(store=store, embedding_gateway=gw_1)
+    ingester_2 = DefaultKnowledgeIngester(store=store, embedding_gateway=gw_2)
+
+    doc_1 = KnowledgeDocument(
+        document_id=DocumentId("doc-model-1"),
+        title="Doc 1",
+        raw_content="Content for model 1.",
+        provenance=Provenance(
+            source_uri="https://docs.example.com/1",
+            source_class=SourceClass.OFFICIAL_DOCUMENTATION,
+            author_or_organization="Org",
+            published_date="2026-01-01",
+            retrieved_date="2026-01-02",
+            origin_anchor="anchor-1",
+        ),
+        topic_domain=TopicDomain.CORE_PRINCIPLES,
+    )
+    doc_2 = KnowledgeDocument(
+        document_id=DocumentId("doc-model-2"),
+        title="Doc 2",
+        raw_content="Content for model 2.",
+        provenance=Provenance(
+            source_uri="https://docs.example.com/2",
+            source_class=SourceClass.OFFICIAL_DOCUMENTATION,
+            author_or_organization="Org",
+            published_date="2026-01-01",
+            retrieved_date="2026-01-02",
+            origin_anchor="anchor-2",
+        ),
+        topic_domain=TopicDomain.CORE_PRINCIPLES,
+    )
+    ingester_1.ingest(doc_1)
+    ingester_2.ingest(doc_2)
+
+    dir_1 = store.get_partition_dir(model_1)
+    dir_2 = store.get_partition_dir(model_2)
+    assert dir_1 != dir_2
+    assert dir_1.exists()
+    assert dir_2.exists()
+
+    partitions = store.list_partitions()
+    partition_models = {p["embedding_model_id"] for p in partitions}
+    assert model_1 in partition_models
+    assert model_2 in partition_models
+
+
+def test_partition_vector_dimension_immutability(
+    store: HybridKnowledgeStore,
+    gateway: MockEmbeddingGateway,
+) -> None:
+    """PM Important 9: Vector dimension per model partition is immutable unless reindexed."""
+    ingester = DefaultKnowledgeIngester(store=store, embedding_gateway=gateway)
+    doc = KnowledgeDocument(
+        document_id=DocumentId("doc-dim-test"),
+        title="Dim Test",
+        raw_content="Document for dimension immutability test.",
+        provenance=Provenance(
+            source_uri="https://docs.example.com/dim",
+            source_class=SourceClass.OFFICIAL_DOCUMENTATION,
+            author_or_organization="Org",
+            published_date="2026-01-01",
+            retrieved_date="2026-01-02",
+            origin_anchor="anchor-dim",
+        ),
+        topic_domain=TopicDomain.CV_ALGORITHM,
+    )
+    ingester.ingest(doc)
+
+    manifest = store.get_partition_manifest(gateway.embedding_model_id)
+    assert manifest is not None
+    original_dim = manifest["vector_dimension"]
+
+    # Attempting to save vectors with different dimension must raise EmbeddingModelMismatchError
+    mismatched_vectors = {"test_chunk": [0.1] * (original_dim + 4)}
+    with pytest.raises(
+        EmbeddingModelMismatchError,
+        match="Cannot alter immutable vector dimension for partition",
+    ):
+        store.save_partition_vectors(
+            gateway.embedding_model_id,
+            mismatched_vectors,
+            dimension=original_dim + 4,
+        )
+
+
+def test_corrupted_partition_manifest_raises_store_corrupted_error(
+    store: HybridKnowledgeStore,
+) -> None:
+    """PM Important 10: Corrupted partition manifests are treated as store corruption, not skipped."""
+    corrupt_model_id = "model-whose-manifest-is-corrupt"
+    corrupt_dir = store.get_partition_dir(corrupt_model_id)
+    corrupt_dir.mkdir(parents=True, exist_ok=True)
+    manifest_file = corrupt_dir / "manifest.json"
+    manifest_file.write_text("{ unparseable invalid json }", encoding="utf-8")
+
+    # list_partitions must fail closed with StoreCorruptedError
+    with pytest.raises(
+        StoreCorruptedError, match="Corrupted partition manifest encountered"
+    ):
+        store.list_partitions()
+
+    # get_partition_manifest must also fail closed
+    with pytest.raises(StoreCorruptedError, match="Failed to read partition manifest"):
+        store.get_partition_manifest(corrupt_model_id)
+
+
+def test_crash_safe_atomic_write_replacement(tmp_path: Path) -> None:
+    """PM Important 11: _atomic_write_text enforces crash-safe temp-file + fsync + replace."""
+    from cv_agent.knowledge.store import _atomic_write_text
+
+    target_file = tmp_path / "atomic_target.json"
+    _atomic_write_text(target_file, '{"state": "v1"}')
+    assert target_file.read_text(encoding="utf-8") == '{"state": "v1"}'
+
+    # Verify no temp files left behind
+    temp_files = list(tmp_path.glob(".tmp_*"))
+    assert len(temp_files) == 0
+
+    # Overwrite with v2 atomically
+    _atomic_write_text(target_file, '{"state": "v2"}')
+    assert target_file.read_text(encoding="utf-8") == '{"state": "v2"}'
+    assert len(list(tmp_path.glob(".tmp_*"))) == 0
