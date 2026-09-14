@@ -1229,3 +1229,79 @@ Added 8 new regression tests, expanding the Phase 2D contract test suite to 35 t
 **Learned:** Rigorous adversarial testing of candidate resolution must explicitly test input order permutations across all priority buckets and absent metadata conditions to ensure true fail-closed deterministic semantics.
 
 **Left open:** Phase 2H formally accepted and closed. Next architectural milestone is Phase 2I, subject to pre-implementation architecture review before runtime implementation.
+
+---
+
+## 2026-09-14 — Phase 2I Architecture Gate: Authorization & Branch Creation (`feature/ajmunna/phase-2i-reasoning-subsystem`)
+
+**Did:**
+1. Completed pre-implementation architecture review with Official PM across two gates, successfully resolving all findings:
+   - **B1:** Confirmed Reasoning consumes frozen ADR-0002 contracts (`LLMRequest`, `LLMResponse`, `LLMGateway.complete()`) with zero parallel abstractions (`CompletionRequest`).
+   - **B2:** Formulated project-specific `cv_agent.canonical_v1` specification; strictly excluded `context_ref` from preimage calculation to eliminate circularity.
+   - **B3:** Differentiated JSON formatting whitespace normalization from strict semantic string whitespace preservation.
+   - **I1:** Standardized 128-bit `DecisionId` (`dec-<32-hex>`) with content-derived deterministic replay identity.
+   - **I2:** Formalized closed `EmpiricalComparator` enum (`EQ`, `LT`, `LTE`, `GT`, `GTE`) with explicit boundary truth semantics against evidence intervals.
+   - **I3:** Formalized recursive, self-referential `JsonValue` domain (Python 3.10 compatible) paired with strict runtime type sanitization and deep freezing.
+   - **I4:** Preserved ADR-0003 ownership of workflow hop counter; Reasoning validates budget and fails closed.
+   - **I5:** Decoupled non-authoritative `ApprovalRecommendation` from `APPROVALS.md` enforcement authority.
+   - **Hardening:** Added cross-version numeric portability test requirement with pinned golden vectors across Python 3.10–3.13.
+2. Official PM formally authorized Phase 2I implementation.
+3. Created GitHub Issue #51 (`Phase 2I — Reasoning Subsystem Architecture (ADR-0008)`).
+4. Created short-lived work branch `feature/ajmunna/phase-2i-reasoning-subsystem` cut from `main` (`fdbd09f`).
+5. Synchronized `STATUS.md` and `implementation_plan.md`.
+
+**Why:** `[P§4]`, `[P§5]`, `[P§6]`, `[P§19]`, `[P§20]`, `[P§23]`, `[P§24]`, `[P§29.1]`–`[P§29.4]`, `[P§34]`, and frozen ADR-0008 (`D-026`, `D-041`). Establishes a stateless cognitive reasoning layer between Orchestration, Knowledge, Capability Intent, and LLM Gateway without layer leakage.
+
+**Broke:** Nothing broken. 356 baseline tests pass.
+
+**Learned:** Explicitly defining cryptographic hash preimages to exclude the hash field itself eliminates circular definition traps, and separating formatting whitespace from semantic value whitespace prevents subtle audit hash corruption.
+
+**Left open:** Phase 2I implemented and verified locally; preparing PR for Official PM review and CI matrix execution.
+
+---
+
+## 2026-09-14 — Phase 2I Implementation & Adversarial Verification (`feature/ajmunna/phase-2i-reasoning-subsystem`, Issue #51)
+
+**Did:**
+1. Implemented complete `cv_agent/reasoning/` subsystem per frozen ADR-0008 and pre-implementation gates:
+   - `contracts.py`: 128-bit `DecisionId` (`dec-<32-hex>`) with deterministic replay derivation (`generate_replay_decision_id`); enums (`NodeType`, `RiskLevel`, `Reversibility`, `EmpiricalComparator`); closed recursive `JsonValue` domain (Python 3.10 compatible); `EvidenceRef`, `CitationRef`, `EmpiricalClaim`, `Hypothesis`, `CapabilityIntent`, `ApprovalRecommendation`; domain payload models (`ProblemCharacterization`, `BaselineSpec`, `DiagnosticReport`, `StrategyRecommendation`); immutable `ReasoningContext` and `ReasoningOutput`; and project-specific `cv_agent.canonical_v1` context canonicalization strictly excluding `context_ref` from preimage.
+   - `errors.py`: Normalized `ReasoningError` hierarchy (`CognitiveBudgetExceededError`, `SchemaRepairExhaustedError`, `UnanchoredCitationError`, `UncitedEmpiricalClaimError`, `EvidenceContradictionError`, `UnsupportedSpeculationError`, `ReasoningTransportError`).
+   - `grounding.py`: Purely algorithmic, non-generative `GroundingValidator` enforcing citation URI matching against quarantined evidence, zero-citation empirical claim prohibition, formal boundary truth evaluation for `EmpiricalComparator` (`LTE`, `LT`, `GTE`, `GT`, `EQ`), and speculation threshold gating.
+   - `prompts.py`: Formal system prompts and JSON schemas (`SCHEMAS_BY_NODE_TYPE`) for all four nodes, plus structured `create_repair_prompt`.
+   - `nodes.py`: Stateless cognitive nodes (`ProblemFramingNode`, `BaselineSelectionNode`, `DiagnosisNode`, `StrategyNode`) executing strictly through `LLMGateway.complete(LLMRequest)` with bounded schema-repair loop (1 initial + $\le 2$ repairs = 3 logical completions max), immediate abort on gateway transport errors, and non-authoritative `ApprovalRecommendation` emission.
+   - `__init__.py`: Clean public API export with sorted `__all__`.
+2. Authored 28 adversarial boundary tests in `tests/test_reasoning_boundary.py` verifying all 12 architectural gates, cross-version numeric portability, circularity elimination, whitespace preservation, deep immutability, hop budget exhaustion, and AST provider isolation.
+3. Verified local quality gates: full repository test suite passes at 384 items (356 baseline + 28 new Phase 2I tests, 0 warnings); Ruff check clean; Ruff format clean; Mypy clean on `cv_agent` (72 source files) and tests; `git diff --check` clean.
+4. Recorded decision `D-054` in `docs/state/DECISIONS.md`.
+
+**Why:** `[P§4]`, `[P§5]`, `[P§6]`, `[P§19]`, `[P§20]`, `[P§23]`, `[P§24]`, `[P§29.1]`–`[P§29.4]`, `[P§34]`, and frozen ADR-0008 (`D-026`, `D-041`, `D-054`). Delivers the cognitive reasoning substrate with mathematically grounded evidence consumption, provider-isolated model access, and zero layer leakage.
+
+**Broke:** Nothing broken. 384 tests pass across 18 test modules, all quality gates green.
+
+**Learned:** Binding schema recovery retries directly to the LLM Gateway's structured output validator while immediately propagating transport-level errors ensures that cognitive repair loops never mask low-level network or quota failures.
+
+**Left open:** Open PR for Issue #51, verify GitHub Actions CI matrix across Python 3.10–3.13, and request Official PM adversarial review before squash-merge.
+
+---
+
+## 2026-09-14 — Phase 2I Adversarial Review Remediation (PR #52, Issue #51)
+
+**Did:**
+Remediated all 3 architectural blockers (B1, B2, B3) and 5 secondary findings identified in the Official PM review of PR #52:
+1. **B1 Closed Output Payload:** Restored `ReasoningOutputPayload` union (`ProblemCharacterization | BaselineSpec | DiagnosticReport | StrategyRecommendation`) on `ReasoningOutput.payload` with runtime type validation in `__post_init__`, and narrowed `ReasoningNode._parse_payload()` return types across all cognitive nodes.
+2. **B2 NFC Key Collision Fail-Closed:** Added collision detection on NFC normalization in `validate_and_freeze_json_domain()`, `_to_canonical_json_value()`, and `EvidenceRef.bounds` to detect distinct keys that collapse to identical NFC code points and raise `ValueError` rather than silently mutating state.
+3. **B3 Context Identity Content Binding:** Enforced invariant `ReasoningContext.context_ref == compute_context_ref(self)` in `__post_init__`, rejecting forged context refs or parameter tampering. Implemented canonical factory `ReasoningContext.create(...)` and `compute_context_ref_from_fields()`.
+4. **Secondary 1:** Enforced evidence bounds interval validation in `EvidenceRef.__post_init__`, rejecting `min > max`.
+5. **Secondary 2:** Bound `CitationRef.sha256` to referenced `EvidenceRef.sha256` in `GroundingValidator.validate()`, raising `UnanchoredCitationError` on hash mismatch.
+6. **Secondary 3:** Enforced explicit `ReasoningContext.schema_version == "1.0.0"` validation in `ReasoningContext.__post_init__`.
+7. **Secondary 4:** Added explicit rejection of non-finite floats (`NaN`, `±inf`) in `Hypothesis.confidence` via `_normalize_float`.
+8. **Secondary 5:** Reverted `.gitignore` to remove `uv.lock`, keeping lockfile policy ungoverned by Phase 2I.
+9. **Adversarial Testing:** Added comprehensive adversarial tests across B1, B2, B3, and all secondary items in `tests/test_reasoning_boundary.py`, increasing total passing tests to 397 (39 in reasoning boundary suite).
+
+**Why:** `[P§19]`, `[P§20]`, `[P§25]`, `[P§29.3]`, `[P§29.5]`, `[P§34]`, and frozen ADR-0008. Closes semantic boundary leakage between Reasoning and Orchestration, prevents Unicode canonical-collapse data integrity failures, guarantees content-addressed reproducible context identity, and strongly binds cited evidence.
+
+**Broke:** Nothing broken. 397 tests pass across 18 test modules, all quality gates green.
+
+**Learned:** When normalizing Unicode mapping keys to NFC in canonical representations, verifying that the normalized key has not already been seen guarantees that distinct Unicode representations cannot overwrite each other and alter the semantic contents of a canonical context preimage without error.
+
+**Left open:** Pushing remediation commit to branch `feature/ajmunna/phase-2i-reasoning-subsystem` for PR #52, verifying full CI matrix, and awaiting second PM review.
