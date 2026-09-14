@@ -1319,3 +1319,129 @@ Remediated all 3 architectural blockers (B1, B2, B3) and 5 secondary findings id
 **Learned:** Rigorous adversarial testing at architectural boundaries caught semantic type leakage, Unicode canonical collision failure modes, and context reference spoofing that standard schema validators and typecheckers alone had allowed through.
 
 **Left open:** Phase 2I is complete and accepted. Awaiting Official PM instruction and milestone sequencing for Phase 2J (Dataset Subsystem Architecture / ADR-0009).
+
+---
+
+## 2026-09-14 — Phase 2J Dataset Subsystem Implementation (`feature/ajmunna/phase-2j-dataset-subsystem`)
+
+**Did:**
+1. Completed pre-implementation architecture gate review with Official PM; resolved blockers B1–B4 and adopted mandatory corrections on ADR-0003 4-tuple operation identity (I4) and policy-interpreted leakage auditing (B3).
+2. Added approved Pydantic v2 dependency (`pydantic>=2.0,<3`) to `pyproject.toml` per frozen ADR-0009 specification.
+3. Created short-lived work branch `feature/ajmunna/phase-2j-dataset-subsystem` cut from `main`.
+4. Implemented complete `cv_agent/dataset/` subsystem satisfying ADR-0009, `docs/DATA.md`, and all pre-implementation gates:
+   - `types.py`: Authoritative identifier types (`DatasetId`, `DatasetVersion`, `ContentHash`, `AnnotationVersion`, `GuidelineRef`) with validation functions enforcing strict canonical SemVer 2.0.0 (`^v...`, B1) and ADR-0001 §3.1 regex; enums (`StorageBackendType`, `SplitName`, `LeakageType`).
+   - `errors.py`: Normalized exception hierarchy (`DatasetError`, `DatasetNotFoundError`, `DatasetVersionConflictError`, `SplitContaminationError`, `SplitLeakageError`, `PayloadNotFoundError`, `PayloadCorruptionError`, `PayloadIntegrityError`, `InvalidGeometryError`, `PathTraversalError`, `DatasetApprovalRequiredError`).
+   - `contracts.py`: Immutable Pydantic v2 models (`ClassDefinition`, `CollectionConditions`, `LeakageCheckResult`, `DatasetLineage`, `SplitMembership`, `ItemMetadata`, `AnnotationManifest`, `DatasetManifest`) with `ConfigDict(frozen=True)`, split disjointness validation, cardinality enforcement, and custom serializers.
+   - `storage/`: `DatasetStore` Protocol, `LocalFSStore` content-addressed storage layout (`blobs/ab/cd/<hash>`) with streaming SHA-256 byte-integrity verification on put/get, atomic rename publication, read-only permissions (`0o444`), corruption detection, and path containment protection (B4, I6); lazy-import remote storage adapters (`S3Store`, `GCSStore`, `MinioStore`).
+   - `validation.py`: Deterministic canonical SHA-256 `payload_root_checksum` calculation (B2) and verification; annotation geometry validation gate (`validate_annotation_geometry`) enforcing non-negative coordinates, positive areas, image extent containment, class ID resolution, and polygon consistency (AC #8 / D-047).
+   - `leakage.py`: `StandardLeakageAuditor` evaluating all 5 leakage dimensions (`TEMPORAL`, `CAMERA_SITE`, `NEAR_DUPLICATE`, `SUBJECT_IDENTITY`, `ANNOTATION_ROUND`) dynamically interpreted from `split_policy` with `ItemMetadata` input model and fail-closed metadata checks (B3).
+   - `registry.py`: `FileSystemDatasetRegistry` implementing atomic publication pipeline (`validate -> verify root checksum -> verify store payloads -> verify 5-point audit -> atomic write to temp -> fsync -> rename -> chmod 0o444`, I2), write-once immutability, and ADR-0003 4-tuple operation identity enforcement for gated mutations (I4).
+   - `__init__.py`: Clean public API exports with sorted `__all__`.
+5. Authored comprehensive adversarial test suite in `tests/test_dataset_boundary.py` (30 tests) verifying all 12 architectural gates, B1–B4, I1–I6, geometry gates, disjointness, immutability, corruption detection, and atomic publication.
+6. Verified quality gates: full repository test suite passes at 427 items (397 baseline + 30 Phase 2J tests, 0 failures); Ruff check clean; Ruff format clean; Mypy clean on `cv_agent` across 83 source files; `git diff --check` clean. Recorded decision `D-055` in `docs/state/DECISIONS.md`.
+
+**Why:** `[P§7]`, `[P§25]`, `[P§26]`, `[P§27]`, `[P§29.5]`, `[P§34]`, and frozen ADR-0009 (`D-028`, `D-029`, `D-042`, `D-047`, `D-055`). Establishes data as an immutable, content-addressed, leakage-audited engineering artifact rather than an unversioned input file.
+
+**Broke:** Nothing broken. 427 tests pass across 19 test modules, all quality gates green.
+
+**Learned:** Interpreting leakage dimensions strictly from `manifest.split_policy` while enforcing fail-closed behavior on missing metadata achieves the ideal balance: datasets with specific requirements (temporal/camera/subject disjointness) cannot silently omit required metadata, while datasets with other policies (e.g. static image detection) are not artificially constrained.
+
+**Left open:** PR #53 opened, awaiting Official PM adversarial review.
+
+---
+
+## 2026-09-14 — Phase 2J Adversarial Review Remediation (PR #53)
+
+**Did:**
+Remediated all 6 blocking findings from the Official PM adversarial review on PR #53:
+1. **Finding 1 (B3) — Partial perceptual metadata fail-closed:**
+   Enforced fail-closed behavior in `StandardLeakageAuditor._audit_duplicate()` when `perceptual_hash` is present on some items but missing on others across splits. Emits `LeakageCheckResult(passed=False)` with descriptive summary identifying hashes missing perceptual metadata.
+2. **Finding 2 (B3) — Camera/site split policy decoupling:**
+   Decoupled `camera-disjoint` and `site-disjoint` policies in `StandardLeakageAuditor._audit_camera_site()`. `camera-disjoint` requires exclusively `camera_id` (not `site_id`); `site-disjoint` requires exclusively `site_id` (not `camera_id`). If both policies are declared, both IDs are required.
+3. **Finding 3 (B3) — Temporal auditing completion:**
+   Completed `StandardLeakageAuditor._audit_temporal()`: enforced `capture_timestamp` requirement on `time-ordered` split policy, verified that train timestamp window strictly precedes eval window ($\max(train) < \min(eval)$), checked for exact timestamp collisions, and audited temporal window straddling.
+4. **Finding 4 (AC #8) — Geometry enforcement hardening:**
+   Hardened `validate_annotation_geometry()`: rejected `NaN` and `Inf` coordinates in bboxes and polygon vertices using `math.isfinite()`; rejected non-closed polygons (`closed=False`); implemented Shoelace formula to reject zero-area ($A \le 10^{-7}$) or degenerate collinear polygons and polygons with $<3$ distinct vertices.
+5. **Finding 5 (I2) — Fail-closed read-only permissions:**
+   Replaced swallowed `OSError` on `chmod(0o444)` in `FileSystemDatasetRegistry.register()` and `LocalFSStore.put_payload()` / `get_payload()` with fail-closed cleanup (unlinking the newly written payload/manifest) and raising `DatasetError`.
+6. **Finding 6 (B4) — Remote storage adapters implementation:**
+   Implemented full streaming SHA-256 byte-integrity verification, atomic temporary file staging, permission enforcement (`0o444`), corruption detection (`PayloadCorruptionError`), missing object semantics (`PayloadNotFoundError`), and network/adapter failure handling (`DatasetError`) for both `S3Store` and `GCSStore` in `cv_agent/dataset/storage/remote.py`.
+7. **Adversarial Regression Tests:**
+   Added 6 targeted adversarial regression tests to `tests/test_dataset_boundary.py` (total 36 tests, 433 repository total), explicitly exercising all 6 findings.
+8. **Quality Gates Verified:**
+   Pytest (433 passed, 0 failed), Ruff check (clean), Ruff format --check (148 files formatted), Mypy (clean across 83 source files in `cv_agent`), `git diff --check` (clean), `python -m build` (clean sdist + wheel), `pip-audit` (clean, 0 vulnerabilities).
+
+**Why:** `[P§7]`, `[P§25]`, `[P§26]`, `[P§27]`, `[P§29.5]`, `[P§34]`, and frozen ADR-0009. Remediates all adversarial findings to satisfy the zero-leakage, fail-closed, and content-addressed storage contracts.
+
+**Broke:** Nothing broken. 433 tests pass across 19 test modules, all quality gates green.
+
+**Learned:** Silent fallbacks (such as ignoring missing hashes or catching chmod failures) undermine immutable engineering contracts. Every contract requirement must fail closed immediately with a descriptive exception or failed audit result.
+
+**Left open:** PR #53 updated, awaiting Official PM second adversarial review.
+
+---
+
+## 2026-09-14 — Phase 2J Second Adversarial Review Remediation (PR #53)
+
+**Did:**
+Remediated all 3 remaining contract-level blocking findings from the Official PM second adversarial review on PR #53:
+1. **Blocker 1 — Polygon Closure Enforcement Hardening:**
+   - Updated `validate_annotation_geometry()` in `cv_agent/dataset/validation.py` to enforce canonical polygon closure fail-closed.
+   - An annotation with an unclosed polygon where the closure field (`closed` / `is_closed`) is omitted and start/end vertices differ (`points[0] != points[-1]`) is now strictly rejected with `InvalidGeometryError` ("polygon is not closed: canonical ADR-0009 closure requires explicit closure declaration ('closed': True) or identical first and last vertices").
+   - Added regression test in `tests/test_dataset_boundary.py` verifying that an unclosed polygon with omitted closure declaration raises `InvalidGeometryError`.
+2. **Blocker 2 — Remote Storage Post-Upload Integrity Verification:**
+   - Implemented post-upload remote streaming SHA-256 byte verification in `S3Store.put_payload()` and `GCSStore.put_payload()` in `cv_agent/dataset/storage/remote.py`.
+   - After uploading the payload, the adapter streams the bytes persisted remotely (`s3.get_object` body / `blob.open`), computes their SHA-256 digest, and verifies it matches `content_hash`.
+   - If a mismatch occurs, the remote object is deleted and `PayloadCorruptionError` is raised fail-closed.
+   - Enhanced `test_remote_storage_s3_and_gcs_full_integrity_and_corruption_semantics` to test verified post-upload integrity as well as corrupt remote post-upload detection and cleanup for both S3 and GCS.
+3. **Blocker 3 — ADR-0003 4-Tuple Operation Identity Binding:**
+   - Enhanced `FileSystemDatasetRegistry.require_mutation_approval()` in `cv_agent/dataset/registry.py` to strictly bind and compare the approval evidence against the expected 4-tuple operation identity: `(operation_id, operation_version, canonical_payload_hash, target_identity)`.
+   - Prevents presentation of approval evidence from Operation A to authorize Operation B.
+   - Added exhaustive tests in `tests/test_dataset_boundary.py` verifying that presenting approval evidence with target identity mismatch, version mismatch, operation ID mismatch, or canonical payload hash mismatch fails closed with `DatasetApprovalRequiredError`.
+4. **Quality Gates Verified:**
+   - Pytest: 433 passed, 0 failures across 20 test modules.
+   - Ruff check: clean (no errors or warnings).
+   - Ruff format check: 148 files formatted.
+   - Mypy: clean across 83 source files in `cv_agent`.
+   - Git diff check: clean.
+   - Python -m build: clean sdist and wheel built.
+   - Pip-audit: clean (0 known vulnerabilities).
+
+**Why:** `[P§7]`, `[P§25]`, `[P§26]`, `[P§27]`, `[P§29.5]`, `[P§34]`, ADR-0003, and frozen ADR-0009. Guarantees that polygon geometries cannot bypass closure validation, remote uploads are cryptographically verified on the remote persistence layer before return, and approval evidence cannot be replayed across distinct operation identities.
+
+**Broke:** Nothing broken. 433 tests pass across 19 test modules, all quality gates green.
+
+**Learned:** Security and integrity checks must never be presence-only; every validation must bind evidence strictly to the exact target operation identity and cryptographic hash.
+
+**Left open:** PR #53 updated, awaiting Official PM review.
+
+---
+
+## 2026-09-14 — Phase 2J Third Adversarial Review Remediation (PR #53)
+
+**Did:**
+Remediated the remaining architectural boundary finding from the Official PM third adversarial review on PR #53:
+1. **Typed Authoritative Operation Identity (Gate I4):**
+   - Defined `OperationIdentity` frozen Pydantic v2 contract in `cv_agent/dataset/contracts.py` representing the authoritative ADR-0003 4-tuple: `(operation_id, operation_version, canonical_payload_hash, target_identity)`. Exported in `cv_agent/dataset/__init__.py`.
+2. **Eliminated Local Synthesis and Ad-hoc Fallbacks:**
+   - In `FileSystemDatasetRegistry.require_mutation_approval()`, removed the `"1.0.0"` fallback, removed the ad-hoc local SHA-256 payload hash synthesis, and removed local operation identity manufacturing.
+   - Preserved ADR-0003 as the sole authority for operation identity, versioning, and canonicalization.
+   - Made `expected_operation_identity: OperationIdentity` mandatory; when absent or `None`, the registry immediately fails closed with `DatasetApprovalRequiredError`.
+3. **Regression Test Added:**
+   - Added dedicated regression test in `tests/test_dataset_boundary.py` proving that mutation approval fails closed when expected operation identity is absent (`expected_operation_identity=None`) rather than falling back to synthetic values.
+4. **Quality Gates Verified:**
+   - Pytest: 433 passed, 0 failures across 20 test modules.
+   - Ruff check: clean (0 warnings).
+   - Ruff format check: 148 files formatted.
+   - Mypy: clean across 83 source files in `cv_agent`.
+   - Git diff check: clean.
+   - Python -m build: clean sdist and wheel built.
+   - Pip-audit: clean (0 known vulnerabilities).
+
+**Why:** `[P§19]`, `[P§20]`, `[P§24]`, `[P§34]`, ADR-0003, and frozen ADR-0009. Prohibits layer leakage where the dataset layer invents or synthesizes orchestration operation identities, guaranteeing strict architectural boundary separation.
+
+**Broke:** Nothing broken. 433 tests pass across 19 test modules, all quality gates green.
+
+**Learned:** Architectural boundaries between orchestration and dataset subsystems must be absolute: one subsystem must never synthesize or approximate the security identities owned by another.
+
+**Left open:** Pushing remediation commit to `feature/ajmunna/phase-2j-dataset-subsystem` for PR #53 and awaiting final Official PM merge authorization.

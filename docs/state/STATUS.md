@@ -3,35 +3,34 @@
 > **Rewritten** every session. Describes **now**, never history — history lives in
 > `JOURNAL.md`. Hard cap: 60 lines. If it exceeds that, you are logging, not stating.
 
-**Updated:** 2026-09-14 · **Phase:** Phase 2I Complete · **Health:** green
+**Updated:** 2026-09-14 · **Phase:** Phase 2J Third Review Remediation · **Health:** green
 
 ## Where we are
 
-Phase 2I (ADR-0008 Reasoning Subsystem Architecture, Issue #51) is closed, accepted, and squash-merged into `main` (`b380800`):
-- PR #52 merged via squash merge; Issue #51 closed.
-- Stateless cognitive layer (`ProblemFramingNode`, `BaselineSelectionNode`, `DiagnosisNode`, `StrategyNode`) operational.
-- Restored closed `ReasoningOutputPayload` union crossing Reasoning into Orchestration (B1).
-- Fail-closed NFC key collision detection in freezing, canonicalization, and bounds (B2).
-- Content-bound `ReasoningContext.context_ref` invariant enforced with `ReasoningContext.create(...)` factory (B3).
-- Full 397-test suite passing (39 adversarial Phase 2I tests) across Python 3.10–3.13 CI.
-- All quality gates (Ruff check, format, Mypy on `cv_agent`, `git diff --check`) green.
+Phase 2J (ADR-0009 Dataset Subsystem Architecture) remediated per Official PM third adversarial review on PR #53 (`feature/ajmunna/phase-2j-dataset-subsystem`):
+- Round 3 Blocker: Eliminated local synthesis / ad-hoc fallbacks for ADR-0003 operation identity in `FileSystemDatasetRegistry.require_mutation_approval()`.
+- Authoritative expected operation identity is now strictly required as a typed `OperationIdentity` model `(operation_id, operation_version, canonical_payload_hash, target_identity)`.
+- Approval check fails closed with `DatasetApprovalRequiredError` if authoritative expected identity is absent (verified by regression test).
+- ADR-0003 remains the sole authority for operation identity, versioning, and canonicalization.
+- Full 433-test suite passing (36 Phase 2J boundary tests, 0 failures).
+- All quality gates (Ruff check, format, Mypy on `cv_agent` across 83 source files, `git diff --check`, `python -m build`, `pip-audit`) clean.
 
 ## In flight
 
 | Item | Issue | PR | State |
 |---|---|---|---|
-| Phase 2J Preparation | — | — | Awaiting Official PM instruction and milestone sequencing for Phase 2J (ADR-0009) |
+| Phase 2J Third Review Remediation | — | #53 | Round 3 blocker remediated; pushing commit for Official PM review |
 
 ## Next 3 actions
 
-1. Review ADR-0009 (Dataset Subsystem Architecture) and compile Phase 2J pre-implementation specification.
-2. Submit Phase 2J specification to Official PM for pre-implementation architecture review.
-3. Cut short-lived work branch for Phase 2J from `main` upon PM authorization.
+1. Commit Round 3 remediations to `feature/ajmunna/phase-2j-dataset-subsystem`.
+2. Push branch to update PR #53 and trigger CI matrix execution.
+3. Monitor CI and await Official PM final review and merge authorization.
 
 ## Blockers
 
-- None. Phase 2I accepted and merged.
+- None. PR #53 awaiting final PM review.
 
 ## Scope guard
 
-Reasoning layer owns problem framing, baseline specification, diagnostic analysis, and strategy formulation. It expresses capability intent without executing tools (ADR-0005), resolving skills (ADR-0007), performing RAG retrieval (ADR-0006), owning workflow state/checkpoints (ADR-0003), or enforcing approval policies (ADR-0003 / `docs/APPROVALS.md`).
+Dataset layer owns authoritative dataset identity, Git-tracked manifests in `.cv_agent/datasets/`, independent annotation manifests, content-addressed payload storage (`DatasetStore`), explicit split membership, and 5-point leakage auditing. It does not own workflow orchestration (ADR-0003), experiment ledgers (ADR-0004), physical subprocess execution (ADR-0005), cognitive dataset diagnosis (ADR-0008), or model training (ADR-0010).
