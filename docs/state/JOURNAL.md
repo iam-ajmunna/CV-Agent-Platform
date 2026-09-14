@@ -1037,3 +1037,81 @@ Added 8 new regression tests, expanding the Phase 2D contract test suite to 35 t
 **Learned:** Combining database-level triggers in SQLite (`BEFORE INSERT/UPDATE/DELETE`) with application-level frozen dataclasses and explicit boundary contracts (`accuracy_metric_requirements`) provides defense-in-depth against data corruption, guaranteeing that even direct SQL queries cannot violate experiment ledger immutability or baseline relational integrity.
 
 **Left open:** Phase 2F formally closed. Phase 2G (ADR-0006 Knowledge & RAG Subsystem) or next dependency unblocked and awaiting Official PM instruction.
+
+---
+
+## 2026-09-14 — Phase 2G (ADR-0006 Knowledge & RAG Subsystem) Implementation (feature/ajmunna/phase-2g-knowledge-rag)
+
+**Did:**
+1. Created short-lived branch `feature/ajmunna/phase-2g-knowledge-rag` from `main` to implement Issue #47.
+2. Implemented `cv_agent/knowledge/`:
+   - `interfaces.py`: Frozen typed contracts (`DocumentId`, `ChunkId` with ADR-0001 §3.1 regex validation, `SourceClass` 8-level evidential hierarchy, `TopicDomain` 6 freshness domains, `Provenance` with mandatory origin anchor, `KnowledgeChunk` with immutable metadata, `KnowledgeDocument`, `ScoredCitation`, `RetrievalRequest`, `RetrievalResponse`, `EmbeddingGateway`, `KnowledgeIngester`, `KnowledgeRetriever`).
+   - `exceptions.py`: Normalized failure taxonomy per ADR-0006 §5 covering ingestion, store, and retrieval failure modes.
+   - `bm25.py`: Deterministic pure-Python Okapi BM25 lexical index with token preservation for model tags (`yolov8n-seg`) and CUDA errors (`cudaErrorMemoryAllocation`), and min-max score normalization to $[0.0, 1.0]$.
+   - `store.py`: `HybridKnowledgeStore` managing single-project workspace containment strictly under `.cv_agent/knowledge/` (`D-013`), atomic persistence of document JSONs, chunk JSONs, BM25 indices, and dense float vectors, cosine similarity computation and normalization ($S_{\text{dense}} = (S_{\text{cos}} + 1)/2$), and embedding model versioning invariant enforcing re-indexing on model change (Gate 10).
+   - `ingester.py`: `DefaultKnowledgeIngester` enforcing Gate 1 mandatory provenance validation (raises `MissingProvenanceError`), Gate 2 local-file anchoring via Git commit SHA or content SHA-256 (rejects `mtime`), secondary sanitization stripping null bytes and escape codes without altering technical source text, and delegation to `EmbeddingGateway`.
+   - `retriever.py`: `DefaultKnowledgeRetriever` implementing Gate 3 normalized hybrid scoring ($S_{\text{hybrid}} = 0.65 S_{\text{dense}} + 0.35 S_{\text{sparse}} \in [0, 1]$), Gate 4 freshness degradation and volatile expired suppression, Gate 5 LinkedIn signal isolation (`PROFESSIONAL_POST` weight $\le 0.2$, `signal_only = True`), and deterministic tie-breaking.
+   - `quarantine.py`: Implements Gate 6 prompt-injection quarantine encapsulating retrieved chunks into passive `<knowledge_citation>` data tags with zero execution, tool invocation, or approval authority.
+   - `__init__.py`: Clean public API export.
+3. Implemented comprehensive test suite in `tests/test_knowledge_rag_boundary.py`: 16 contract and boundary tests covering all 10 non-negotiable acceptance gates, deterministic tie-breaking, BM25 token matching, AST audit proving zero direct LLM provider SDK imports (Gate 8), and memory subsystem isolation (Gate 9).
+4. Verified all quality gates: Ruff check clean, Ruff format check clean, Mypy clean on `cv_agent` (59 source files), `git diff --check` clean. Full test suite stands at **301 passed** (0 warnings).
+5. Created implementation report in `docs/reports/ISSUE-47-PHASE-2G-REPORT.md` and updated `STATUS.md`.
+
+**Why:** `[P§16]`, `[P§17]`, `[P§18]`, `[P§19]`, `[P§20]`, `[P§29.3]`, `[P§29.7]`, `[P§34]`, and frozen ADR-0006 (`D-024`, `D-039`). Fulfills Issue #47 requirements by delivering an evidence-weighted, hybrid-indexed knowledge retrieval layer for computer vision reasoning without layer leakage or prompt injection risks.
+
+**Broke:** Nothing broken. All 301 pytest tests pass across 16 test modules.
+
+**Learned:** Normalizing both dense cosine similarity ($[-1, 1] \rightarrow [0, 1]$) and sparse BM25 scores via min-max scaling before linear fusion eliminates score scale distortion between keyword matching and conceptual semantics while guaranteeing that composite re-ranking remains mathematically bounded.
+
+**Left open:** PR #48 opened; awaiting Official PM adversarial review against all 10 gates.
+
+---
+
+## 2026-09-14 — Phase 2G ADR-0006 PM Adversarial Review Remediations (feature/ajmunna/phase-2g-knowledge-rag)
+
+**Did:**
+1. Responded to the Official PM's adversarial review on PR #48 (3 Blockers + 5 Important Findings) against frozen ADR-0006.
+2. Corrected all 3 Blockers:
+   - **Blocker 1 (Quarantine boundary escape):** In `cv_agent/knowledge/quarantine.py`, escaped chunk content using `html.escape(chunk.content, quote=True)` prior to interpolating into `<knowledge_citation>` boundary tags, neutralizing forged `</knowledge_citation>` closing tags.
+   - **Blocker 2 (Atomic persistence rollback):** In `cv_agent/knowledge/store.py`, implemented atomic transactional persistence with in-memory backups of index/manifest files and tracking of newly created chunk files, rolling back all created files and restoring index backups on mid-operation write failures.
+   - **Blocker 3 (Partition-level embedding model isolation):** In `cv_agent/knowledge/store.py`, restructured vector persistence to model-scoped partitions under `.cv_agent/knowledge/partitions/{partition_id}/` (sanitized slug), with per-partition `manifest.json` and `vectors.json`. Updated `validate_embedding_model()` to strictly verify active model compatibility against partition manifests and reject mismatched partitions with `EmbeddingModelMismatchError`.
+3. Corrected all 5 Important Findings:
+   - **Important 4 (Exact 0.65/0.35 hybrid fusion):** Added explicit numerical verification test confirming $0.65 S_{\text{dense}} + 0.35 S_{\text{sparse}}$ within floating-point precision.
+   - **Important 5 (Real filesystem containment & symlinks):** Hardened path resolution in `store.py` and added regression test exercising real `..` path traversal escapes and workspace symlinks pointing to external directories.
+   - **Important 6 (BM25 inverted-index cleanup):** In `cv_agent/knowledge/bm25.py`, added document removal invocation in `add_document()` to purge stale postings before re-indexing chunks.
+   - **Important 7 (Invalid date fail-closed handling):** In `cv_agent/knowledge/retriever.py`, updated `compute_freshness()` to fail closed on unparseable dates to $(F=0.05, \text{is\_stale}=\text{True}, \text{is\_expired}=\text{True})$.
+   - **Important 8 (Raw absolute POSIX path rejection):** In `cv_agent/knowledge/ingester.py`, strictly rejected raw absolute POSIX paths (e.g. `/path`) without `file://` scheme as invalid provenance.
+4. Added 8 dedicated regression tests in `tests/test_knowledge_rag_boundary.py`, bringing Phase 2G boundary tests to 24 and the entire test suite to **309 passed** (0 warnings).
+5. Verified all quality gates: Ruff check clean, Ruff format check clean, Mypy clean (59 source files), `git diff --check` clean.
+6. Updated `docs/reports/ISSUE-47-PHASE-2G-REPORT.md` and `docs/state/STATUS.md`.
+
+**Why:** ADR-0006 §3.4, §3.6, §3.9, `[P§18]`, `[P§20]`, `[P§29.3]`, `[P§34]`. Satisfies the Official PM's non-negotiable architectural findings to ensure tamper-proof prompt quarantine, crash-resilient atomic index persistence, partition-level vector isolation, and fail-closed security.
+
+**Broke:** Nothing broken. 309 pytest tests pass, 0 warnings.
+
+**Learned:** Defense-in-depth in RAG systems requires escaping passive boundary tags to eliminate prompt boundary confusion, and organizing vector indexes into discrete, model-versioned filesystem partitions so model transitions cannot query stale or incompatible embedding dimensions.
+
+**Left open:** PR #48 second review completed with 2 blockers + 3 important findings; proceeding to second-pass hardening.
+
+---
+
+## 2026-09-14 — Phase 2G Second Adversarial Review Hardening (feature/ajmunna/phase-2g-knowledge-rag)
+
+**Did:**
+1. Addressed all 5 findings (2 Blockers + 3 Important Findings) from the Official PM's second adversarial review of PR #48:
+   - **Blocker 4 (Overwritten files rollback):** In `cv_agent/knowledge/store.py`, `store_document_and_chunks()` now tracks `overwritten_backups: dict[Path, str]` to capture existing document and chunk JSON contents before writing. On any mid-operation failure, newly created files are deleted and overwritten files are restored to their exact pre-transaction state.
+   - **Blocker 5 (Collision-free canonical partition ID):** Updated `_sanitize_partition_id()` to compute `f"{clean_prefix}_{hashlib.sha256(model_id.encode('utf-8')).hexdigest()}"`. Model IDs with distinct punctuation (e.g. `model/a` vs `model_a`) now map to provably disjoint filesystem directories.
+   - **Important 9 (Immutable vector dimension per partition):** In `save_partition_vectors()`, strictly enforced that existing valid partitions cannot have their `vector_dimension` altered without explicit re-indexing, raising `EmbeddingModelMismatchError`. Validated all batch vectors match declared dimension.
+   - **Important 10 (Corrupted partition manifest handling):** In `list_partitions()` and `get_partition_manifest()`, unparseable/corrupted `manifest.json` files strictly raise `StoreCorruptedError` rather than being silently skipped.
+   - **Important 11 (Crash-safe atomic writes):** Implemented `_atomic_write_text()` utilizing `tempfile.mkstemp(dir=target.parent)`, `f.flush()`, `os.fsync(f.fileno())`, and `os.replace()` for atomic, crash-resilient file replacement. Replaced all direct `write_text()` calls in `store.py`.
+2. Added 5 dedicated negative regression tests in `tests/test_knowledge_rag_boundary.py`, bringing Phase 2G boundary tests to 29 and the entire test suite to **314 passed** (0 warnings).
+3. Verified all local quality gates: Ruff check clean, Ruff format check clean, Mypy clean on `cv_agent` (59 source files), `git diff --check` clean.
+4. Updated `docs/reports/ISSUE-47-PHASE-2G-REPORT.md` and `docs/state/STATUS.md`.
+
+**Why:** ADR-0006 §3.4, §3.6, §5.B, `[P§18]`, `[P§20]`, `[P§29.3]`, `[P§34]`. Guarantees crash-safe POSIX atomic replacement, full transactional rollback for pre-existing documents, collision-free partition namespaces, partition dimensionality immutability, and fail-closed store integrity verification.
+
+**Broke:** Nothing broken. 314 pytest tests pass, 0 warnings.
+
+**Learned:** True transactional filesystem storage requires pairing atomic write-and-replace (`mkstemp` + `fsync` + `rename`) with bidirectional rollback tracking (tracking both newly created unlinks and pre-existing content restorations) to ensure no state mutation survives an aborted transaction.
+
+**Left open:** Commit, push to `origin feature/ajmunna/phase-2g-knowledge-rag`, monitor GitHub Actions CI matrix across Python 3.10–3.13, and submit remediation report to Official PM for final acceptance.
