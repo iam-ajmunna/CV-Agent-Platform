@@ -125,6 +125,7 @@ TAO_TRANSFER_LEARNING_SKILL = SkillDescriptor(
         },
     },
     procedural_recipe="Invoke tao model <network> train -e {spec_file} -r {output_dir}",
+    prerequisites=("docker", "nvidia-container-toolkit"),
     timeout_seconds=7200,
     requires_approval=True,  # Heavy compute action
 )
@@ -141,7 +142,7 @@ DEEPSTREAM_PIPELINE_SKILL = SkillDescriptor(
     required_tools=(ToolId("tool.nvidia.deepstream_app"),),
     target_requirements=TargetRequirements(
         allowed_targets=(TargetType.REMOTE,),
-        required_hardware=HardwareClass.JETSON,
+        required_hardware=HardwareClass.NVIDIA_GPU,  # Jetson or dGPU per ADR-0007 §3.4
     ),
     parameter_schema={
         "type": "object",
@@ -151,6 +152,7 @@ DEEPSTREAM_PIPELINE_SKILL = SkillDescriptor(
         },
     },
     procedural_recipe="Execute deepstream-app -c {config_file}",
+    prerequisites=("gstreamer", "deepstream_sdk"),
     timeout_seconds=600,
     requires_approval=False,
 )

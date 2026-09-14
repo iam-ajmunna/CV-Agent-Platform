@@ -17,6 +17,7 @@ Verifies all 11 Acceptance Gates:
 from __future__ import annotations
 
 import asyncio
+from typing import Any
 
 import pytest
 
@@ -58,10 +59,13 @@ from cv_agent.tools.contracts import (
     ExecutionTargetDescriptor,
     TargetId,
     TargetType,
+    ToolDescriptor,
     ToolExecutionStatus,
     ToolInvocation,
     ToolResult,
+    ToolRiskLevel,
 )
+from cv_agent.tools.registry import DefaultToolRegistry
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -113,6 +117,61 @@ def remote_jetson_target() -> ExecutionTargetDescriptor:
             "arch": "aarch64",
         },
     )
+
+
+@pytest.fixture
+def populated_tool_registry(
+    remote_gpu_target: ExecutionTargetDescriptor,
+    remote_jetson_target: ExecutionTargetDescriptor,
+    local_mac_target: ExecutionTargetDescriptor,
+) -> DefaultToolRegistry:
+    """ToolRegistry with operational descriptors registered for targets."""
+    tool_reg = DefaultToolRegistry(
+        targets=[remote_gpu_target, remote_jetson_target, local_mac_target]
+    )
+
+    def _make_tool(
+        tid: str, name: str, targets: tuple[TargetType, ...]
+    ) -> ToolDescriptor:
+        return ToolDescriptor(
+            tool_id=ToolId(tid),
+            name=name,
+            description=f"Test tool {name}",
+            compatible_target_types=targets,
+            input_schema={"type": "object"},
+            output_schema={"type": "object"},
+            risk_level=ToolRiskLevel.READ_ONLY,
+            requires_approval=False,
+        )
+
+    tools = [
+        _make_tool("tool.nvidia.trtexec", "trtexec", (TargetType.REMOTE,)),
+        _make_tool("tool.nvidia.modelopt", "modelopt", (TargetType.REMOTE,)),
+        _make_tool("tool.nvidia.tao", "tao", (TargetType.REMOTE,)),
+        _make_tool(
+            "tool.nvidia.deepstream_app", "deepstream-app", (TargetType.REMOTE,)
+        ),
+        _make_tool("tool.nvidia.dali", "dali", (TargetType.REMOTE,)),
+        _make_tool("tool.mcp.dali", "mcp-dali", (TargetType.REMOTE,)),
+        _make_tool(
+            "tool.nvidia.tritonserver",
+            "tritonserver",
+            (TargetType.REMOTE, TargetType.MCP_ENDPOINT),
+        ),
+        _make_tool("tool.nvidia.nsys", "nsys", (TargetType.REMOTE,)),
+        _make_tool("tool.nvidia.tegrastats", "tegrastats", (TargetType.REMOTE,)),
+        _make_tool("tool.netron", "netron", (TargetType.LOCAL, TargetType.REMOTE)),
+        _make_tool("tool.onnx", "onnx", (TargetType.LOCAL, TargetType.REMOTE)),
+        _make_tool(
+            "tool.internal.inspect", "inspect", (TargetType.LOCAL, TargetType.REMOTE)
+        ),
+        _make_tool(
+            "tool.internal.audit", "audit", (TargetType.LOCAL, TargetType.REMOTE)
+        ),
+    ]
+    for t in tools:
+        tool_reg.register(t)
+    return tool_reg
 
 
 from pathlib import Path
@@ -370,9 +429,12 @@ class TestGate5KnownButUnavailableZeroSilentFallback:
         populated_skill_registry: DefaultSkillRegistry,
         remote_gpu_target: ExecutionTargetDescriptor,
         capability_registry: CapabilityRegistry,
+        populated_tool_registry: DefaultToolRegistry,
     ) -> None:
         resolver = DefaultSkillResolver(
-            populated_skill_registry, capability_registry=capability_registry
+            populated_skill_registry,
+            capability_registry=capability_registry,
+            tool_registry=populated_tool_registry,
         )
 
         resolution = resolver.resolve(
@@ -384,6 +446,29 @@ class TestGate5KnownButUnavailableZeroSilentFallback:
         assert resolution.is_executable
         assert resolution.selected_skill is not None
         assert resolution.target_descriptor == remote_gpu_target
+
+    def test_nvidia_skill_without_tool_registry_returns_unavailable_b4(
+        self,
+        populated_skill_registry: DefaultSkillRegistry,
+        remote_gpu_target: ExecutionTargetDescriptor,
+        capability_registry: CapabilityRegistry,
+    ) -> None:
+        # Blocker B4: Tool dependency verification is mandatory.
+        # When tool_registry is None, resolver MUST NOT report EXECUTABLE for skills with required tools.
+        resolver = DefaultSkillResolver(
+            populated_skill_registry,
+            capability_registry=capability_registry,
+            tool_registry=None,
+        )
+
+        resolution = resolver.resolve(
+            CapabilityId("cv.deployment.optimization"),
+            available_targets=(remote_gpu_target,),
+        )
+
+        assert resolution.availability_state == AvailabilityState.UNAVAILABLE
+        assert not resolution.is_executable
+        assert any("unverified_tool" in p for p in resolution.missing_prerequisites)
 
 
 # ---------------------------------------------------------------------------
@@ -499,6 +584,7 @@ class TestGate7EphemeralDiscoveryCache:
         self,
         capability_registry: CapabilityRegistry,
         remote_gpu_target: ExecutionTargetDescriptor,
+        populated_tool_registry: DefaultToolRegistry,
     ) -> None:
         authoritative_reg = DefaultSkillRegistry(
             capability_registry=capability_registry
@@ -528,6 +614,7 @@ class TestGate7EphemeralDiscoveryCache:
             authoritative_reg,
             discovery_cache=cache,
             capability_registry=capability_registry,
+            tool_registry=populated_tool_registry,
         )
         res = resolver.resolve(
             CapabilityId("cv.dataset.audit"),
@@ -935,3 +1022,408 @@ class TestGate11SchemaAndImmutability:
         assert issubclass(TargetMismatchError, SkillError)
         assert issubclass(ParameterValidationError, SkillError)
         assert issubclass(SkillTimeoutError, SkillError)
+
+
+# ---------------------------------------------------------------------------
+# PM Review Remediation Tests (B3, B4, I3–I9)
+# ---------------------------------------------------------------------------
+
+
+class TestPMReviewRemediations:
+    """Adversarial verification for all 2 blockers and 7 important PM review findings."""
+
+    def test_b3_adr0001_authority_is_mandatory_by_default(self) -> None:
+        # B3: DefaultSkillRegistry with zero arguments must enforce ADR-0001 authority
+        reg = DefaultSkillRegistry()
+        unregistered_cap_skill = SkillDescriptor(
+            skill_id=SkillId("test.unregistered.cap"),
+            name="Unregistered Cap Skill",
+            description="Testing B3 enforcement",
+            version="1.0.0",
+            provenance=SkillProvenance.INTERNAL,
+            satisfies_capabilities=(CapabilityId("cv.nonexistent.arbitrary_cap"),),
+            required_tools=(),
+            target_requirements=TargetRequirements(),
+            parameter_schema={},
+            procedural_recipe="recipe",
+        )
+        with pytest.raises(UnknownCapabilityError) as exc_info:
+            reg.register_skill(unregistered_cap_skill)
+        assert "violating ADR-0001 authority (B1)" in str(exc_info.value)
+
+        # DiscoveryCache with zero extra args also enforces ADR-0001 authority
+        cache = DiscoveryCache(reg)
+        discovered_invalid = SkillDescriptor(
+            skill_id=SkillId("test.disc.unreg"),
+            name="Discovered Invalid Cap",
+            description="Testing B3 discovery cache",
+            version="1.0.0",
+            provenance=SkillProvenance.DISCOVERED,
+            satisfies_capabilities=(CapabilityId("cv.fake.unregistered"),),
+            required_tools=(),
+            target_requirements=TargetRequirements(),
+            parameter_schema={},
+            procedural_recipe="recipe",
+        )
+        with pytest.raises(UnknownCapabilityError) as exc_info:
+            cache.register_discovered(discovered_invalid)
+        assert "violating ADR-0001 authority (B1)" in str(exc_info.value)
+
+        # is_capability_valid must fail closed for unknown capabilities
+        assert not reg.is_capability_valid(CapabilityId("cv.nonexistent.anything"))
+        assert not cache.is_capability_valid(CapabilityId("cv.nonexistent.anything"))
+
+    def test_b4_tool_dependency_verification_fails_closed_when_registry_missing(
+        self,
+        populated_skill_registry: DefaultSkillRegistry,
+        remote_gpu_target: ExecutionTargetDescriptor,
+    ) -> None:
+        # B4: When tool_registry is not provided, resolver MUST report UNAVAILABLE
+        resolver = DefaultSkillResolver(populated_skill_registry, tool_registry=None)
+        res = resolver.resolve(
+            CapabilityId("cv.deployment.optimization"),
+            available_targets=(remote_gpu_target,),
+        )
+        assert res.availability_state == AvailabilityState.UNAVAILABLE
+        assert not res.is_executable
+        assert any("unverified_tool:" in p for p in res.missing_prerequisites)
+
+    def test_i3_declarative_prerequisites_evaluated_in_resolver_and_executor(
+        self,
+        remote_gpu_target: ExecutionTargetDescriptor,
+    ) -> None:
+        # I3: Declarative prerequisites must be evaluated against target metadata
+        prereq_skill = SkillDescriptor(
+            skill_id=SkillId("test.prereq.eval"),
+            name="Prerequisite Skill",
+            description="Testing I3 prerequisites",
+            version="1.0.0",
+            provenance=SkillProvenance.INTERNAL,
+            satisfies_capabilities=(CapabilityId("cv.dataset.audit"),),
+            required_tools=(),
+            target_requirements=TargetRequirements(
+                allowed_targets=(TargetType.REMOTE,),
+                required_hardware=HardwareClass.NVIDIA_GPU,
+            ),
+            prerequisites=("docker", "nvidia-container-toolkit"),
+            parameter_schema={},
+            procedural_recipe="recipe",
+        )
+        reg = DefaultSkillRegistry()
+        reg.register_skill(prereq_skill)
+
+        # Target missing "nvidia-container-toolkit"
+        target_partial_prereqs = ExecutionTargetDescriptor(
+            target_id=TargetId("target.partial.prereqs"),
+            target_type=TargetType.REMOTE,
+            is_available=True,
+            target_metadata={
+                "hardware": "nvidia_gpu",
+                "prerequisites": ["docker"],  # Missing "nvidia-container-toolkit"
+            },
+        )
+
+        resolver = DefaultSkillResolver(reg)
+        res = resolver.resolve(
+            CapabilityId("cv.dataset.audit"),
+            available_targets=(target_partial_prereqs,),
+        )
+        assert res.availability_state == AvailabilityState.UNAVAILABLE
+        assert "nvidia-container-toolkit" in res.missing_prerequisites
+
+        # Executor must fail with PREREQUISITE_FAILED when target lacks prerequisites
+        executor = DefaultSkillExecutor()
+
+        class NoopToolExecutor:
+            async def execute(self, inv: Any) -> Any:
+                raise AssertionError("Should not be called")
+
+        exec_res = asyncio.run(
+            executor.execute(
+                prereq_skill,
+                parameters={},
+                target=target_partial_prereqs,
+                tool_executor=NoopToolExecutor(),  # type: ignore[arg-type]
+            )
+        )
+        assert exec_res.status == SkillExecutionStatus.PREREQUISITE_FAILED
+        assert "failed declarative prerequisites verification" in (
+            exec_res.error_message or ""
+        )
+
+    def test_i4_comprehensive_json_schema_validation(self) -> None:
+        # I4: Comprehensive parameter validation supporting nested objects, arrays, enums, numbers
+        schema = {
+            "type": "object",
+            "required": ["model_config", "metrics", "batch_size"],
+            "additionalProperties": False,
+            "properties": {
+                "model_config": {
+                    "type": "object",
+                    "required": ["architecture", "num_classes"],
+                    "additionalProperties": False,
+                    "properties": {
+                        "architecture": {"type": "string", "minLength": 3},
+                        "num_classes": {"type": "integer", "minimum": 1},
+                    },
+                },
+                "metrics": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {"type": "string", "enum": ["map", "fps", "latency"]},
+                },
+                "batch_size": {"type": "integer", "minimum": 1, "maximum": 128},
+            },
+        }
+
+        # Valid payload passes
+        valid_params = {
+            "model_config": {"architecture": "yolo", "num_classes": 80},
+            "metrics": ["map", "fps"],
+            "batch_size": 32,
+        }
+        validate_parameters_against_schema(valid_params, schema)
+
+        # Missing required in nested object
+        with pytest.raises(ParameterValidationError) as exc:
+            validate_parameters_against_schema(
+                {
+                    "model_config": {"architecture": "yolo"},
+                    "metrics": ["map"],
+                    "batch_size": 32,
+                },
+                schema,
+            )
+        assert "Missing required parameter 'model_config.num_classes'" in str(exc.value)
+
+        # Additional property rejected when additionalProperties is False
+        with pytest.raises(ParameterValidationError) as exc:
+            validate_parameters_against_schema(
+                {
+                    "model_config": {
+                        "architecture": "yolo",
+                        "num_classes": 80,
+                        "unexpected": True,
+                    },
+                    "metrics": ["map"],
+                    "batch_size": 32,
+                },
+                schema,
+            )
+        assert "Additional property 'model_config.unexpected' is not allowed" in str(
+            exc.value
+        )
+
+        # Invalid enum value in array items
+        with pytest.raises(ParameterValidationError) as exc:
+            validate_parameters_against_schema(
+                {
+                    "model_config": {"architecture": "yolo", "num_classes": 80},
+                    "metrics": ["map", "invalid_metric"],
+                    "batch_size": 32,
+                },
+                schema,
+            )
+        assert "not in allowed enum" in str(exc.value)
+
+        # Number out of bounds
+        with pytest.raises(ParameterValidationError) as exc:
+            validate_parameters_against_schema(
+                {
+                    "model_config": {"architecture": "yolo", "num_classes": 80},
+                    "metrics": ["map"],
+                    "batch_size": 256,
+                },
+                schema,
+            )
+        assert "must be <= 128" in str(exc.value)
+
+        # Boolean is rejected when integer is expected
+        with pytest.raises(ParameterValidationError) as exc:
+            validate_parameters_against_schema(
+                {
+                    "model_config": {"architecture": "yolo", "num_classes": 80},
+                    "metrics": ["map"],
+                    "batch_size": True,
+                },
+                schema,
+            )
+        assert "must be integer, got bool" in str(exc.value)
+
+    def test_i5_resolver_selection_is_order_independent(
+        self,
+        populated_skill_registry: DefaultSkillRegistry,
+        populated_tool_registry: DefaultToolRegistry,
+    ) -> None:
+        # I5: Resolver must select an online, available target regardless of input order
+        offline_target = ExecutionTargetDescriptor(
+            target_id=TargetId("target.offline.gpu"),
+            target_type=TargetType.REMOTE,
+            is_available=False,
+            target_metadata={
+                "hardware": "nvidia_gpu",
+                "cuda_compute": "8.0",
+                "env_vars": {"CUDA_HOME": "/usr/local/cuda", "TRT_PATH": "/opt/trt"},
+            },
+        )
+        online_target = ExecutionTargetDescriptor(
+            target_id=TargetId("target.online.gpu"),
+            target_type=TargetType.REMOTE,
+            is_available=True,
+            target_metadata={
+                "hardware": "nvidia_gpu",
+                "cuda_compute": "8.0",
+                "env_vars": {"CUDA_HOME": "/usr/local/cuda", "TRT_PATH": "/opt/trt"},
+            },
+        )
+        populated_tool_registry.register_target(offline_target)
+        populated_tool_registry.register_target(online_target)
+
+        resolver = DefaultSkillResolver(
+            populated_skill_registry, tool_registry=populated_tool_registry
+        )
+
+        # Order 1: Offline target first
+        res1 = resolver.resolve(
+            CapabilityId("cv.deployment.optimization"),
+            available_targets=(offline_target, online_target),
+        )
+        assert res1.availability_state == AvailabilityState.EXECUTABLE
+        assert res1.target_descriptor == online_target
+
+        # Order 2: Online target first
+        res2 = resolver.resolve(
+            CapabilityId("cv.deployment.optimization"),
+            available_targets=(online_target, offline_target),
+        )
+        assert res2.availability_state == AvailabilityState.EXECUTABLE
+        assert res2.target_descriptor == online_target
+
+    def test_i6_re_registering_discovered_skill_cleans_up_index(self) -> None:
+        # I6: Re-registering discovered candidate with different capability cleans up old index
+        reg = DefaultSkillRegistry()
+        cache = DiscoveryCache(reg)
+
+        cand_v1 = SkillDescriptor(
+            skill_id=SkillId("mcp.test.dyn_skill"),
+            name="Dynamic V1",
+            description="V1",
+            version="1.0.0",
+            provenance=SkillProvenance.DISCOVERED,
+            satisfies_capabilities=(CapabilityId("cv.dataset.audit"),),
+            required_tools=(),
+            target_requirements=TargetRequirements(),
+            parameter_schema={},
+            procedural_recipe="recipe",
+        )
+        cache.register_discovered(cand_v1)
+        assert (
+            len(cache.list_candidates_for_capability(CapabilityId("cv.dataset.audit")))
+            == 1
+        )
+        assert (
+            len(
+                cache.list_candidates_for_capability(
+                    CapabilityId("cv.model.inspection")
+                )
+            )
+            == 0
+        )
+
+        # Re-register with capability cv.model.inspection
+        cand_v2 = SkillDescriptor(
+            skill_id=SkillId("mcp.test.dyn_skill"),
+            name="Dynamic V2",
+            description="V2",
+            version="2.0.0",
+            provenance=SkillProvenance.DISCOVERED,
+            satisfies_capabilities=(CapabilityId("cv.model.inspection"),),
+            required_tools=(),
+            target_requirements=TargetRequirements(),
+            parameter_schema={},
+            procedural_recipe="recipe",
+        )
+        cache.register_discovered(cand_v2)
+
+        # Old capability index must be cleaned up
+        assert (
+            len(cache.list_candidates_for_capability(CapabilityId("cv.dataset.audit")))
+            == 0
+        )
+        # New capability index must contain candidate exactly once
+        new_cands = cache.list_candidates_for_capability(
+            CapabilityId("cv.model.inspection")
+        )
+        assert len(new_cands) == 1
+        assert new_cands[0].version == "2.0.0"
+
+    def test_i7_strict_regex_no_strip_weakening(self) -> None:
+        # I7: Strict regex validation without .strip()
+        with pytest.raises(ValueError) as exc:
+            parse_cuda_compute(" 8.0 ")
+        assert "min_cuda_compute must match regex" in str(exc.value)
+
+        with pytest.raises(ValueError) as exc:
+            parse_cuda_compute("8.0\n")
+        assert "min_cuda_compute must match regex" in str(exc.value)
+
+        with pytest.raises(ValueError) as exc:
+            validate_env_var_name(" CUDA_HOME ")
+        assert "Environment variable name must match regex" in str(exc.value)
+
+        with pytest.raises(ValueError) as exc:
+            validate_env_var_name("CUDA_HOME\t")
+        assert "Environment variable name must match regex" in str(exc.value)
+
+    def test_i8_deepstream_and_tao_catalog_prerequisites(self) -> None:
+        # I8: DeepStream and TAO target requirements and prerequisites
+        from cv_agent.skills.catalog import (
+            DEEPSTREAM_PIPELINE_SKILL,
+            TAO_TRANSFER_LEARNING_SKILL,
+        )
+
+        assert (
+            DEEPSTREAM_PIPELINE_SKILL.target_requirements.required_hardware
+            == HardwareClass.NVIDIA_GPU
+        )
+        assert DEEPSTREAM_PIPELINE_SKILL.prerequisites == (
+            "gstreamer",
+            "deepstream_sdk",
+        )
+
+        assert (
+            TAO_TRANSFER_LEARNING_SKILL.target_requirements.required_hardware
+            == HardwareClass.NVIDIA_GPU
+        )
+        assert TAO_TRANSFER_LEARNING_SKILL.prerequisites == (
+            "docker",
+            "nvidia-container-toolkit",
+        )
+
+    def test_i9_immutability_tightened_on_resolution_and_contracts(
+        self,
+        populated_skill_registry: DefaultSkillRegistry,
+        remote_gpu_target: ExecutionTargetDescriptor,
+        populated_tool_registry: DefaultToolRegistry,
+    ) -> None:
+        # I9: Tightened immutability on resolution and descriptors
+        resolver = DefaultSkillResolver(
+            populated_skill_registry, tool_registry=populated_tool_registry
+        )
+        res = resolver.resolve(
+            CapabilityId("cv.deployment.optimization"),
+            available_targets=(remote_gpu_target,),
+        )
+        assert isinstance(res.candidate_skills, tuple)
+        assert isinstance(res.missing_prerequisites, tuple)
+
+        with pytest.raises((AttributeError, TypeError)):
+            res.candidate_skills.append("invalid")  # type: ignore[attr-defined]
+
+        with pytest.raises((AttributeError, TypeError)):
+            res.availability_state = AvailabilityState.UNAVAILABLE  # type: ignore[misc]
+
+        skill = res.selected_skill
+        assert skill is not None
+        with pytest.raises((AttributeError, TypeError)):
+            skill.parameter_schema["new_key"] = "value"  # type: ignore[index]

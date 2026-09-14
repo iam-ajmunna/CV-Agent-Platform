@@ -57,11 +57,11 @@ def parse_cuda_compute(val: str) -> tuple[int, int]:
     Canonical syntax: ^[0-9]+\\.[0-9]+$ (e.g. '7.0', '8.0', '8.7', '9.0').
     Comparison semantics: numeric tuple comparison, preventing lexical string errors.
     """
-    if not isinstance(val, str) or not _CUDA_COMPUTE_PATTERN.fullmatch(val.strip()):
+    if not isinstance(val, str) or not _CUDA_COMPUTE_PATTERN.fullmatch(val):
         raise ValueError(
             f"min_cuda_compute must match regex '^[0-9]+\\.[0-9]+$', got {val!r}"
         )
-    major_str, minor_str = val.strip().split(".", 1)
+    major_str, minor_str = val.split(".", 1)
     return int(major_str), int(minor_str)
 
 
@@ -109,11 +109,11 @@ def is_hardware_compatible(required: HardwareClass, target_hw: str) -> bool:
 
 def validate_env_var_name(name: str) -> str:
     """Validate that an environment variable name is a valid non-empty C identifier."""
-    if not isinstance(name, str) or not _ENV_VAR_PATTERN.fullmatch(name.strip()):
+    if not isinstance(name, str) or not _ENV_VAR_PATTERN.fullmatch(name):
         raise ValueError(
             f"Environment variable name must match regex '^[A-Za-z_][A-Za-z0-9_]*$', got {name!r}"
         )
-    return name.strip()
+    return name
 
 
 @dataclass(frozen=True)

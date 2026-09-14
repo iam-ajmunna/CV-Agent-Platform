@@ -1169,3 +1169,30 @@ Added 8 new regression tests, expanding the Phase 2D contract test suite to 35 t
 **Learned:** Anchoring procedural skills directly to authoritative ADR-0001 capabilities and reusing the domain availability state machine preserves clean architectural boundaries, preventing the skills layer from drifting into capability definition or competing lifecycle governance. `asyncio.wait_for` remains the reliable cross-version timeout mechanism across Python 3.10–3.13.
 
 **Left open:** PR #50 open and green across all matrix jobs (Python 3.10, 3.11, 3.12, 3.13). Awaiting Official PM adversarial review and squash merge to `main`.
+
+---
+
+## 2026-09-14 — Phase 2H PM Adversarial Review Remediation (PR #50 / branch: feature/ajmunna/phase-2h-skills-architecture)
+
+**Did:**
+1. Remediated all 2 Blockers and 7 Important findings identified in Official PM review of PR #50:
+   - **B3 (Capability Authority Mandatory):** Made `capability_registry` mandatory in `DefaultSkillRegistry` and `DiscoveryCache`, defaulting automatically to `load_default_capability_registry()`. Removed fallback that treated unverified `CapabilityId` strings as valid; unknown capabilities fail closed with `UnknownCapabilityError`.
+   - **B4 (Tool Dependency Verification Mandatory):** Added `tool_registry` support to `SkillResolver`. If `tool_registry` is missing, or required tools are missing/unverified/incompatible, resolution deterministically fails closed to `AvailabilityState.UNAVAILABLE` with `unverified_tool:<id>` or `missing_tool:<id>` and `is_executable = False`.
+   - **I3 (Declarative Prerequisites Evaluation):** `SkillResolver` evaluates `skill.prerequisites` against `target.metadata["prerequisites"]`; missing prerequisites yield `UNAVAILABLE` (`missing_prerequisite:<prereq>`). `SkillExecutor` verifies prerequisites before execution, failing fast with `SkillExecutionStatus.PREREQUISITE_FAILED` and empty `tool_results = ()`.
+   - **I4 (Comprehensive Recursive JSON Schema Validator):** Upgraded `SkillExecutor` parameter validation from ad-hoc top-level checks to a complete recursive JSON Schema validator supporting `object`, `properties`, `required`, `additionalProperties: false`, numeric bounds (`minimum`, `maximum`, `exclusiveMinimum`, `exclusiveMaximum`), string constraints (`minLength`, `maxLength`, `pattern`), array item schema validation, and `enum` enforcement.
+   - **I5 (Order-Independent Candidate/Target Selection):** Implemented three-tier bucketed priority ranking in `SkillResolver` (`EXECUTABLE` > `UNAVAILABLE` with missing tool/prereq > offline/incompatible target) with deterministic sorting by `(hardware_specificity, skill_id, target_id)`. Prevents offline targets from eclipsing available targets.
+   - **I6 (Discovery Capability Index Cleanup):** `DiscoveryCache.register_discovered()` explicitly purges prior capability index mappings when re-registering an updated candidate, preventing stale references or index corruption.
+   - **I7 (Canonical Regex Strictness):** Removed `.strip()` from `parse_cuda_compute` and `validate_env_var_name`; whitespace fails canonical regex validation immediately.
+   - **I8 (DeepStream & TAO Target Prerequisites):** Updated `DEEPSTREAM_PIPELINE_SKILL` to `HardwareClass.NVIDIA_GPU` with prerequisites `("gstreamer", "deepstream_sdk")`; updated `TAO_TRANSFER_LEARNING_SKILL` with prerequisites `("docker", "nvidia-container-toolkit")`.
+   - **I9 (Immutability Hardening):** Added immutability tests and frozen mapping enforcement across `SkillResolution` and descriptors.
+2. Added `TestPMReviewRemediations` test class in `tests/test_skills_boundary.py` with 10 new regression tests covering B3, B4, and I3–I9. Total test suite expanded to **356 passed** (42 skills tests).
+3. Re-verified all quality gates: Ruff check (0 issues), Ruff format (129 files formatted), Mypy (`cv_agent` 66 source files, 0 issues), `git diff --check` (clean).
+4. Updated `docs/reports/ISSUE-49-PHASE-2H-REPORT.md` and `docs/state/STATUS.md`.
+
+**Why:** `[P§15]`, `[P§23]`, `[P§24]`, `[P§29.4]`, `[P§29.9]`, `[P§34]`, and frozen ADR-0007. Eliminates false-positive `EXECUTABLE` states, enforces authoritative ADR-0001 capability integrity, guarantees fail-closed tool/prerequisite validation, and ensures deterministic, order-independent candidate selection.
+
+**Broke:** Discovered that calling `cache.register_discovered()` twice for the same candidate without capability cleanup left stale entries in the reverse capability index. Resolved by explicitly pruning stale reverse index entries before indexing new capabilities.
+
+**Learned:** In multi-candidate resolution engines, relying on iteration order over sets or registries can inadvertently mask executable candidates if an offline or partially-compatible target is evaluated first. Bucketed priority partitioning with deterministic secondary keys ensures robust, order-independent resolution.
+
+**Left open:** Ready for final PM adversarial re-review on PR #50 and squash-merge authorization.

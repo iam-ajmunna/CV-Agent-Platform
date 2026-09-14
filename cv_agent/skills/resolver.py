@@ -53,16 +53,22 @@ class DefaultSkillResolver:
         *,
         discovery_cache: DiscoveryCache | None = None,
         capability_registry: CapabilityRegistry | None = None,
+        tool_registry: ToolRegistry | None = None,
     ) -> None:
         self._skill_registry = skill_registry
         self._discovery_cache = discovery_cache
+        if capability_registry is None:
+            from cv_agent.capabilities.registry import load_default_capability_registry
+
+            capability_registry = load_default_capability_registry()
         self._capability_registry = capability_registry
+        self._tool_registry = tool_registry
 
     def _is_capability_known(self, capability_id: CapabilityId) -> bool:
         """Check whether capability_id is registered under ADR-0001."""
-        if self._capability_registry is None:
-            return True
-        return self._capability_registry.get_capability(capability_id) is not None
+        if self._capability_registry is not None:
+            return self._capability_registry.get_capability(capability_id) is not None
+        return False
 
     def resolve(
         self,
@@ -76,7 +82,7 @@ class DefaultSkillResolver:
         Resolution chain (ADR-0007 §3.3, B2):
         CapabilityId -> Skill Candidates -> Target/Tool Compatibility -> ADR-0001 AvailabilityState.
         """
-        # 1. Authority validation against ADR-0001 (B1)
+        # 1. Authority validation against ADR-0001 (B1, B3)
         if not self._is_capability_known(capability_id):
             raise UnknownCapabilityError(
                 f"Requested capability {str(capability_id)!r} is not registered in ADR-0001"
@@ -106,7 +112,6 @@ class DefaultSkillResolver:
 
         # 4. If no compute targets configured at all
         if not available_targets:
-            # Check if candidates require hardware constraints
             first_candidate = all_candidates[0]
             if (
                 first_candidate.target_requirements.required_hardware
@@ -129,7 +134,6 @@ class DefaultSkillResolver:
 
         # 5. Evaluate candidates against targets
         # Check for host-local macOS constraint (D-022, Gate 5)
-        # If candidate requires NVIDIA GPU / remote target, but only LOCAL (apple_silicon / cpu) targets exist:
         requires_nvidia = any(
             c.target_requirements.required_hardware
             in (
@@ -148,41 +152,75 @@ class DefaultSkillResolver:
             for t in available_targets
         )
 
-        # Test each candidate for a fully compatible target
+        effective_tool_registry = tool_registry or self._tool_registry
+
+        # Buckets for order-independent selection (I5):
+        # Cat 1: target available + all tools & prerequisites satisfied (EXECUTABLE)
+        # Cat 2: target available + missing tools or prerequisites (UNAVAILABLE)
+        # Cat 3: target offline, but hardware matches (UNAVAILABLE)
+        cat1: list[tuple[SkillDescriptor, ExecutionTargetDescriptor]] = []
+        cat2: list[
+            tuple[SkillDescriptor, ExecutionTargetDescriptor, tuple[str, ...]]
+        ] = []
+        cat3: list[
+            tuple[SkillDescriptor, ExecutionTargetDescriptor, tuple[str, ...]]
+        ] = []
+
         for candidate in all_candidates:
-            compat_result = self._evaluate_candidate(
-                candidate, available_targets, tool_registry
-            )
-            if compat_result is not None:
-                target, missing_tools = compat_result
-                if not missing_tools:
-                    if target.is_available:
-                        return SkillResolution(
-                            capability_id=capability_id,
-                            candidate_skills=all_candidates,
-                            selected_skill=candidate,
-                            availability_state=AvailabilityState.EXECUTABLE,
-                            target_descriptor=target,
-                        )
+            for target in available_targets:
+                eval_res = self._evaluate_candidate_target(
+                    candidate, target, effective_tool_registry
+                )
+                if eval_res is None:
+                    continue  # Incompatible target (hardware/compute/target_type mismatch)
+
+                missing = eval_res
+                if target.is_available:
+                    if not missing:
+                        cat1.append((candidate, target))
                     else:
-                        return SkillResolution(
-                            capability_id=capability_id,
-                            candidate_skills=all_candidates,
-                            selected_skill=candidate,
-                            availability_state=AvailabilityState.UNAVAILABLE,
-                            target_descriptor=target,
-                            unavailability_reason=f"Target {str(target.target_id)!r} is offline or unavailable",
-                        )
+                        cat2.append((candidate, target, missing))
                 else:
-                    return SkillResolution(
-                        capability_id=capability_id,
-                        candidate_skills=all_candidates,
-                        selected_skill=candidate,
-                        availability_state=AvailabilityState.UNAVAILABLE,
-                        target_descriptor=target,
-                        missing_prerequisites=missing_tools,
-                        unavailability_reason=f"Required tools missing on target {str(target.target_id)!r}: {missing_tools}",
-                    )
+                    cat3.append((candidate, target, missing))
+
+        # Order-independent priority selection (I5):
+        if cat1:
+            best_cand, best_target = cat1[0]
+            return SkillResolution(
+                capability_id=capability_id,
+                candidate_skills=all_candidates,
+                selected_skill=best_cand,
+                availability_state=AvailabilityState.EXECUTABLE,
+                target_descriptor=best_target,
+            )
+
+        if cat2:
+            # Pick candidate/target with fewest missing items
+            best_cand, best_target, missing = min(cat2, key=lambda x: len(x[2]))
+            return SkillResolution(
+                capability_id=capability_id,
+                candidate_skills=all_candidates,
+                selected_skill=best_cand,
+                availability_state=AvailabilityState.UNAVAILABLE,
+                target_descriptor=best_target,
+                missing_prerequisites=missing,
+                unavailability_reason=(
+                    f"Required tools or prerequisites missing on target {str(best_target.target_id)!r}: "
+                    f"{list(missing)}"
+                ),
+            )
+
+        if cat3:
+            best_cand, best_target, missing = cat3[0]
+            return SkillResolution(
+                capability_id=capability_id,
+                candidate_skills=all_candidates,
+                selected_skill=best_cand,
+                availability_state=AvailabilityState.UNAVAILABLE,
+                target_descriptor=best_target,
+                missing_prerequisites=missing,
+                unavailability_reason=f"Target {str(best_target.target_id)!r} is offline or unavailable",
+            )
 
         # If no compatible target found and NVIDIA capability requested on local host (D-022)
         if requires_nvidia and not has_remote_or_mcp:
@@ -206,49 +244,58 @@ class DefaultSkillResolver:
             unavailability_reason="No configured execution target satisfies skill target requirements",
         )
 
-    def _evaluate_candidate(
+    def _evaluate_candidate_target(
         self,
         candidate: SkillDescriptor,
-        available_targets: tuple[ExecutionTargetDescriptor, ...],
+        target: ExecutionTargetDescriptor,
         tool_registry: ToolRegistry | None,
-    ) -> tuple[ExecutionTargetDescriptor, tuple[str, ...]] | None:
-        """Find the best compatible target for candidate, returning (target, missing_tools) or None."""
+    ) -> tuple[str, ...] | None:
+        """Evaluate a candidate skill against a single target.
+
+        Returns tuple of missing tool IDs and prerequisites, or None if hardware/type incompatible.
+        """
         reqs = candidate.target_requirements
 
-        for target in available_targets:
-            # Check target_type
-            if target.target_type not in reqs.allowed_targets:
-                continue
+        # 1. Target type compatibility
+        if target.target_type not in reqs.allowed_targets:
+            return None
 
-            # Check hardware
-            target_hw = str(target.target_metadata.get("hardware", ""))
-            if not is_hardware_compatible(reqs.required_hardware, target_hw):
-                continue
+        # 2. Hardware class compatibility
+        target_hw = str(target.target_metadata.get("hardware", ""))
+        if not is_hardware_compatible(reqs.required_hardware, target_hw):
+            return None
 
-            # Check numeric CUDA compute
-            if reqs.min_cuda_compute is not None:
-                target_compute_val = target.target_metadata.get("cuda_compute")
-                if not target_compute_val:
-                    continue
-                try:
-                    req_compute = parse_cuda_compute(reqs.min_cuda_compute)
-                    target_compute = parse_cuda_compute(str(target_compute_val))
-                    if target_compute < req_compute:
-                        continue
-                except ValueError:
-                    continue
+        # 3. Numeric CUDA compute check
+        if reqs.min_cuda_compute is not None:
+            target_compute_val = target.target_metadata.get("cuda_compute")
+            if not target_compute_val:
+                return None
+            try:
+                req_compute = parse_cuda_compute(reqs.min_cuda_compute)
+                target_compute = parse_cuda_compute(str(target_compute_val))
+                if target_compute < req_compute:
+                    return None
+            except ValueError:
+                return None
 
-            # Check required env vars
-            if reqs.required_env_vars:
-                target_env = target.target_metadata.get("env_vars")
-                if not isinstance(target_env, Mapping) or any(
-                    v not in target_env for v in reqs.required_env_vars
-                ):
-                    continue
+        # 4. Required environment variables
+        if reqs.required_env_vars:
+            target_env = target.target_metadata.get("env_vars")
+            if not isinstance(target_env, Mapping) or any(
+                v not in target_env for v in reqs.required_env_vars
+            ):
+                return None
 
-            # Check tools if tool_registry provided
-            missing_tools: list[str] = []
-            if tool_registry is not None:
+        # 5. Tool dependency verification (Blocker B4)
+        missing_tools: list[str] = []
+        if candidate.required_tools:
+            if tool_registry is None:
+                # B4: If tool_registry is None, required tools cannot be verified.
+                # Must fail verification to prevent false-positive EXECUTABLE states.
+                missing_tools = [
+                    f"unverified_tool:{tid}" for tid in candidate.required_tools
+                ]
+            else:
                 for tool_id in candidate.required_tools:
                     tool_desc = tool_registry.get(tool_id)
                     if tool_desc is None:
@@ -260,6 +307,23 @@ class DefaultSkillResolver:
                         if not avail.is_available:
                             missing_tools.append(str(tool_id))
 
-            return target, tuple(missing_tools)
+        # 6. Declarative prerequisites evaluation (Important I3)
+        missing_prereqs: list[str] = []
+        if candidate.prerequisites:
+            target_prereqs = target.target_metadata.get("prerequisites")
+            target_features = target.target_metadata.get("features")
+            provided: set[str] = set()
+            if isinstance(target_prereqs, (list, tuple, set, frozenset)):
+                provided.update(str(p).lower() for p in target_prereqs)
+            if isinstance(target_features, (list, tuple, set, frozenset)):
+                provided.update(str(f).lower() for f in target_features)
 
-        return None
+            if (
+                "prerequisites" in target.target_metadata
+                or "features" in target.target_metadata
+            ):
+                for req_p in candidate.prerequisites:
+                    if req_p.lower() not in provided:
+                        missing_prereqs.append(req_p)
+
+        return tuple(missing_tools) + tuple(missing_prereqs)

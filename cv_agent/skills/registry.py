@@ -52,6 +52,10 @@ class DefaultSkillRegistry:
     ) -> None:
         self._skills: dict[SkillId, SkillDescriptor] = {}
         self._cap_to_skills: dict[CapabilityId, list[SkillDescriptor]] = {}
+        if capability_registry is None and valid_capability_ids is None:
+            from cv_agent.capabilities.registry import load_default_capability_registry
+
+            capability_registry = load_default_capability_registry()
         self._capability_registry = capability_registry
         self._valid_capability_ids = (
             frozenset(valid_capability_ids)
@@ -67,8 +71,7 @@ class DefaultSkillRegistry:
         if self._capability_registry is not None:
             return self._capability_registry.get_capability(capability_id) is not None
 
-        # If no capability authority passed, treat any non-empty CapabilityId as valid
-        return bool(str(capability_id).strip())
+        return False
 
     def register_skill(self, descriptor: SkillDescriptor) -> None:
         """Register a validated skill descriptor into the authoritative catalogue.
@@ -135,6 +138,10 @@ class DiscoveryCache:
         self._authoritative = authoritative_registry
         self._candidates: dict[SkillId, SkillDescriptor] = {}
         self._cap_to_candidates: dict[CapabilityId, list[SkillDescriptor]] = {}
+        if capability_registry is None and valid_capability_ids is None:
+            from cv_agent.capabilities.registry import load_default_capability_registry
+
+            capability_registry = load_default_capability_registry()
         self._capability_registry = capability_registry
         self._valid_capability_ids = (
             frozenset(valid_capability_ids)
@@ -150,7 +157,7 @@ class DiscoveryCache:
         if self._capability_registry is not None:
             return self._capability_registry.get_capability(capability_id) is not None
 
-        return True
+        return False
 
     def register_discovered(self, descriptor: SkillDescriptor) -> None:
         """Register a runtime-discovered candidate skill into the discovery cache.
@@ -159,6 +166,7 @@ class DiscoveryCache:
         - Ephemeral candidates cannot overwrite authoritative registry entries.
         - Provenance must be SkillProvenance.DISCOVERED.
         - Satisfies capabilities must be valid ADR-0001 capabilities.
+        - Re-registering candidate cleans up prior capability mapping index entries (I6).
         """
         if self._authoritative.get_skill(descriptor.skill_id) is not None:
             raise ValueError(
@@ -178,6 +186,19 @@ class DiscoveryCache:
                     f"Discovered skill {str(descriptor.skill_id)!r} declares unregistered capability "
                     f"{str(cap_id)!r} violating ADR-0001 authority (B1)"
                 )
+
+        # I6: Clean up previous capability index references if re-registering an existing candidate
+        existing = self._candidates.get(descriptor.skill_id)
+        if existing is not None:
+            for old_cap_id in existing.satisfies_capabilities:
+                if old_cap_id in self._cap_to_candidates:
+                    self._cap_to_candidates[old_cap_id] = [
+                        c
+                        for c in self._cap_to_candidates[old_cap_id]
+                        if c.skill_id != descriptor.skill_id
+                    ]
+                    if not self._cap_to_candidates[old_cap_id]:
+                        del self._cap_to_candidates[old_cap_id]
 
         self._candidates[descriptor.skill_id] = descriptor
         for cap_id in descriptor.satisfies_capabilities:

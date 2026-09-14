@@ -86,6 +86,56 @@ $$\text{User Task} \longrightarrow \text{Capability} \longrightarrow \text{Skill
 
 ---
 
+## PM Adversarial Review Remediation (B3, B4, I3–I9)
+
+Following the Official PM adversarial review of PR #50, all 2 Blockers and 7 Important findings were remediated and verified:
+
+### Blockers
+
+1. **B3 — Authoritative Capability Registry Mandatory & Fail-Closed:**
+   - Made `capability_registry` mandatory in `DefaultSkillRegistry` and `DiscoveryCache`, defaulting automatically to `load_default_capability_registry()` (`cv_agent/capabilities/registry.py`).
+   - Removed the permissive fallback that accepted any syntactically valid `CapabilityId`.
+   - Now any candidate (discovered or static) declaring an unknown capability fails closed with `UnknownCapabilityError` citing ADR-0001 authority.
+
+2. **B4 — Mandatory Tool Dependency Verification & Fail-Closed Resolver:**
+   - Added `tool_registry` support to `SkillResolver`.
+   - When a skill requires tools, `tool_registry` is checked. If `tool_registry` is missing, or if any required `ToolId` is not registered in the tool registry or incompatible with the target type, the resolution fails closed to `AvailabilityState.UNAVAILABLE` with `unverified_tool:<tool_id>` or `missing_tool:<tool_id>` and `is_executable = False`.
+   - Eliminates false-positive `EXECUTABLE` resolutions.
+
+### Important Findings
+
+- **I3 — Declarative Prerequisites Evaluation:**
+   - `SkillResolver` now evaluates `skill.prerequisites` against `target.metadata["prerequisites"]` (or installed system tools). Missing prerequisites result in `AvailabilityState.UNAVAILABLE` with `missing_prerequisite:<prereq>` and `is_executable = False`.
+   - `SkillExecutor` enforces prerequisites prior to invocation, failing fast with `SkillExecutionStatus.PREREQUISITE_FAILED` and `tool_results = ()` if any prerequisite is unsatisfied.
+- **I4 — Comprehensive Recursive JSON Schema Validation:**
+   - Replaced ad-hoc top-level schema validation in `SkillExecutor` with a full recursive JSON Schema validator supporting:
+     - `type`: `object`, `string`, `integer`, `number`, `boolean`, `array`, `null`.
+     - `properties`, `required`, and `additionalProperties` (rejects undeclared properties when `additionalProperties: false`).
+     - Numeric constraints: `minimum`, `maximum`, `exclusiveMinimum`, `exclusiveMaximum`.
+     - String constraints: `minLength`, `maxLength`, `pattern` (regex).
+     - Array constraints: `items` (recursive schema validation), `minItems`, `maxItems`.
+     - `enum` validation.
+   - Any validation failure exits immediately with `SkillExecutionStatus.PREREQUISITE_FAILED` before any tools are called.
+- **I5 — Order-Independent Candidate & Target Selection:**
+   - Removed input-order dependency from `SkillResolver.resolve()`.
+   - Candidates and targets are sorted deterministically using a three-tier bucketed ranking:
+     1. Target matches and tool/prereq checks pass (`EXECUTABLE` bucket).
+     2. Target matches hardware/type but missing tool/prereq (`UNAVAILABLE` bucket).
+     3. Target is offline or incompatible (`KNOWN_BUT_UNAVAILABLE` / `UNAVAILABLE` bucket).
+   - Within each bucket, candidates are sorted deterministically by `(hardware_specificity, skill_id, target_id)`. An offline target cannot eclipse an available target.
+- **I6 — Discovery Capability Index Integrity on Re-registration:**
+   - In `DiscoveryCache.register_discovered()`, when a skill candidate is re-registered with new capabilities, prior capability index entries pointing to that candidate are explicitly pruned, preventing stale references or index corruption.
+- **I7 — Strict Canonical Regex Enforcement without `.strip()`:**
+   - Removed `.strip()` from `parse_cuda_compute()` and `validate_env_var_name()`.
+   - Whitespace (leading, trailing, or embedded) now immediately fails canonical regex checks with `DomainValidationError` / `ValueError`.
+- **I8 — DeepStream & TAO Catalog Prerequisites & Hardware Classes:**
+   - `DEEPSTREAM_PIPELINE_SKILL` updated to `HardwareClass.NVIDIA_GPU` (subsuming Jetson and dGPU per ADR-0007 §3.4) and declared prerequisites `("gstreamer", "deepstream_sdk")`.
+   - `TAO_TRANSFER_LEARNING_SKILL` updated with declared prerequisites `("docker", "nvidia-container-toolkit")`.
+- **I9 — Immutability Coverage Tightened:**
+   - Added immutability tests and frozen mappings across `SkillResolution` and all skill descriptors, ensuring immutability across resolution and execution contracts.
+
+---
+
 ## Verification Summary
 
 ```text
@@ -95,31 +145,33 @@ rootdir: /Users/ajmunna/Desktop/Workspace/TDI WorkSpace/cv-engineering-agent
 configfile: pyproject.toml
 testpaths: tests
 plugins: asyncio-1.4.0, langsmith-0.12.4, anyio-4.15.1
-collected 346 items
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collected 356 items
 
 tests/test_agent.py ..                                                   [  0%]
 tests/test_capabilities.py .........................................     [ 12%]
 tests/test_capability_registry_phase2b.py .........................      [ 19%]
-tests/test_cli.py .........                                              [ 22%]
-tests/test_config.py ..........                                          [ 25%]
+tests/test_cli.py .........                                              [ 21%]
+tests/test_config.py ..........                                          [ 24%]
 tests/test_domain_contracts.py .............                             [ 28%]
-tests/test_graph.py ...........                                          [ 32%]
-tests/test_knowledge_rag_boundary.py .............................       [ 40%]
-tests/test_llm_gateway.py ....................................           [ 50%]
-tests/test_llm_mock.py ...................                               [ 56%]
-tests/test_memory_ledger_boundary.py ........................            [ 63%]
-tests/test_orchestration_boundary.py ................................... [ 73%]
-................                                                         [ 78%]
-tests/test_package_resources.py ..                                       [ 78%]
-tests/test_skills_boundary.py ................................           [ 87%]
+tests/test_graph.py ...........                                          [ 31%]
+tests/test_knowledge_rag_boundary.py .............................       [ 39%]
+tests/test_llm_gateway.py ....................................           [ 49%]
+tests/test_llm_mock.py ...................                               [ 54%]
+tests/test_memory_ledger_boundary.py ........................            [ 61%]
+tests/test_orchestration_boundary.py ................................... [ 71%]
+................                                                         [ 75%]
+tests/test_package_resources.py ..                                       [ 76%]
+tests/test_skills_boundary.py .......................................... [ 88%]
 tests/test_state.py .....                                                [ 89%]
 tests/test_tools_boundary.py .....................................       [100%]
 
-============================= 346 passed in 4.97s ==============================
+============================= 356 passed in 4.87s ==============================
 ```
 
 ### Quality Gate Audits
-- **Ruff Lint:** Clean (`uv run ruff check .` -> All checks passed)
-- **Ruff Format Check:** Clean (`128 files already formatted`)
+- **Ruff Lint:** Clean (`uv run ruff check .` -> All checks passed!)
+- **Ruff Format Check:** Clean (`129 files already formatted`)
 - **Mypy Type Checking:** Clean (`uv run mypy cv_agent` -> Success: no issues found in 66 source files)
-- **Git Diff Check:** Clean (`git diff --check` -> 0 issues)
+- **Git Diff Check:** Clean (`git diff --check` -> 0 whitespace or formatting issues)
+- **Test Matrix Expansion:** 42 dedicated skills boundary and contract tests (including `TestPMReviewRemediations` covering B3, B4, I3–I9). Total test suite: 356 passing.
