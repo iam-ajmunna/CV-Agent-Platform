@@ -7,18 +7,19 @@
 
 ## Where we are
 
-Phase 2K (ADR-0010 Training Subsystem Architecture) implementation is complete on `feature/ajmunna/phase-2k-training-subsystem`:
-- Architecture gate approved under Issue #55; implementation tracked under Issue #54.
-- Subsystem implemented in `cv_agent/training/` with immutable Pydantic v2 domain models, pure domain lifecycle validator, deterministic cost estimator, online divergence monitor with explicit early stopping semantics, and logical checkpoint retention.
-- Strict cross-ADR boundaries enforced: ADR-0003 owns OperationIdentity, approval verification, and orchestration state authority; ADR-0009 owns dataset manifests; ADR-0005 owns execution transport.
-- Full 455-test suite passes (including 22 adversarial boundary tests); all quality gates, type checks, packaging, and security audits clean.
-- PR opened against `main` for Official PM adversarial review.
+Phase 2K (ADR-0010 Training Subsystem Architecture) PR #57 remediated following Official PM adversarial review:
+- Resolved B1: `abort_request()` delegates cancellation invocation to ADR-0005 `ToolExecutor`.
+- Resolved B2: eliminated local `"default"` target fallback; fails closed without authorized target.
+- Resolved B3: unique `TrainingJobId` generated per execution launch, preserving `plan_id` lineage.
+- Resolved tie-breaking: implemented exact ascending `checkpoint_id` ranking on metric and epoch ties.
+- Full 459-test suite passes (including 26 adversarial boundary tests); all quality gates, type checks, packaging, and security audits clean.
+- PR #57 updated for second PM review.
 
 ## In flight
 
 | Item | Issue | PR | State |
 |---|---|---|---|
-| Phase 2K | #54 | pending | Implemented, awaiting PM review |
+| Phase 2K | #54 | #57 | Remediated, awaiting PM review |
 
 ## Next 3 actions
 

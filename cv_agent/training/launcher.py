@@ -6,7 +6,7 @@ import asyncio
 import inspect
 import uuid
 from datetime import datetime, timezone
-from typing import Protocol, runtime_checkable
+from typing import Protocol, cast, runtime_checkable
 
 from cv_agent.dataset import DatasetManifest, OperationIdentity
 from cv_agent.orchestration import ApprovalDecision, ApprovalRequest, ApprovalStatus
@@ -17,6 +17,7 @@ from cv_agent.tools import (
     ToolExecutor,
     ToolId,
     ToolInvocation,
+    ToolResult,
 )
 from cv_agent.training.canonicalization import (
     compute_training_payload_hash,
@@ -33,6 +34,7 @@ from cv_agent.training.types import (
     TrainingJobId,
     TrainingJobStatus,
     TrainingPrecision,
+    validate_training_job_id,
 )
 
 
@@ -52,7 +54,10 @@ class TrainingLauncher(Protocol):
         self,
         plan: TrainingPlan,
         tool_id: ToolId,
-        target_id: TargetId | None = None,
+        target_id: TargetId,
+        *,
+        execution_id: ExecutionId | None = None,
+        timeout_seconds: int = 86400,
     ) -> ToolInvocation:
         """Format training execution payload into a typed ADR-0005 ToolInvocation."""
         ...
@@ -76,6 +81,7 @@ class TrainingLauncher(Protocol):
         approval_request: ApprovalRequest,
         approval_decision: ApprovalDecision,
         target_id: TargetId | None = None,
+        job_id: TrainingJobId | None = None,
         tool_executor: ToolExecutor | None = None,
     ) -> TrainingJobRecord:
         """Dispatch an approved training plan to ADR-0005."""
@@ -84,8 +90,12 @@ class TrainingLauncher(Protocol):
     def abort_request(
         self,
         job_id: TrainingJobId,
-        target_id: TargetId | None = None,
-        tool_executor: ToolExecutor | None = None,
+        target_id: TargetId,
+        tool_executor: ToolExecutor,
+        *,
+        cancel_tool_id: ToolId | None = None,
+        execution_id: ExecutionId | None = None,
+        timeout_seconds: int = 60,
     ) -> bool:
         """Emit cancellation signal to execution target via ADR-0005."""
         ...
@@ -190,24 +200,58 @@ class DefaultTrainingLauncher:
 
         return True
 
+    def _dispatch_invocation(
+        self,
+        tool_executor: ToolExecutor,
+        invocation: ToolInvocation,
+    ) -> ToolResult:
+        """Dispatch ToolInvocation to ADR-0005 ToolExecutor synchronously or via async event loop."""
+        try:
+            coro_or_res = tool_executor.execute(invocation)
+            if inspect.iscoroutine(coro_or_res):
+                try:
+                    loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    loop = None
+                if loop and loop.is_running():
+                    import concurrent.futures
+
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                        return pool.submit(asyncio.run, coro_or_res).result()
+                else:
+                    return asyncio.run(coro_or_res)
+            return cast(ToolResult, coro_or_res)
+        except Exception as exc:
+            if isinstance(exc, TrainingExecutionError):
+                raise
+            raise TrainingExecutionError(
+                f"Dispatch to tool executor failed: {exc}"
+            ) from exc
+
     def prepare_invocation(
         self,
         plan: TrainingPlan,
         tool_id: ToolId,
-        target_id: TargetId | None = None,
+        target_id: TargetId,
+        *,
         execution_id: ExecutionId | None = None,
-        timeout_seconds: int = 3600,
+        timeout_seconds: int = 86400,
     ) -> ToolInvocation:
         """Format training execution payload into a typed ADR-0005 ToolInvocation.
 
-        Zero shell interpretation, zero subprocess calls.
+        Zero shell interpretation, zero subprocess calls, zero local target synthesis.
         """
+        if target_id is None or not str(target_id).strip():
+            raise TrainingApprovalRequiredError(
+                "Cannot prepare invocation without an authorized TargetId. "
+                "Local target synthesis is strictly prohibited."
+            )
         payload = extract_training_operation_payload(plan)
         exec_id = execution_id or ExecutionId(f"exec-train-{uuid.uuid4().hex[:12]}")
         return ToolInvocation(
             tool_id=tool_id,
             parameters=payload,
-            target_id=target_id or TargetId("default"),
+            target_id=target_id,
             execution_id=exec_id,
             timeout_seconds=timeout_seconds,
             approval_authorized=True,
@@ -309,7 +353,7 @@ class DefaultTrainingLauncher:
 
         # 4. Target ID consistency check (PM hard invariant)
         if target_id is not None:
-            # If the authoritative resource scope / target identity contains an explicit target specification,
+            # If the authoritative resource scope contains an explicit target specification,
             # ensure target_id does not disagree with it.
             scope = approval_request.resource_scope
             if ":" in scope:
@@ -317,6 +361,12 @@ class DefaultTrainingLauncher:
                 if prefix == "target" and scope_target != str(target_id):
                     raise TrainingApprovalRequiredError(
                         f"Supplied target_id {target_id!r} conflicts with authorized scope target {scope_target!r}"
+                    )
+            elif str(operation_identity.target_identity).startswith("target:"):
+                _, op_target = str(operation_identity.target_identity).split(":", 1)
+                if op_target != str(target_id):
+                    raise TrainingApprovalRequiredError(
+                        f"Supplied target_id {target_id!r} conflicts with authorized operation target {op_target!r}"
                     )
 
     def launch(
@@ -327,9 +377,17 @@ class DefaultTrainingLauncher:
         approval_request: ApprovalRequest,
         approval_decision: ApprovalDecision,
         target_id: TargetId | None = None,
+        job_id: TrainingJobId | None = None,
         tool_executor: ToolExecutor | None = None,
     ) -> TrainingJobRecord:
-        """Launch training workload by verifying approval and delegating execution transport to ADR-0005."""
+        """Launch training workload by verifying approval and delegating execution transport to ADR-0005.
+
+        Invariants:
+        1. Approval verification is performed strictly against authoritative ADR-0003 credentials.
+        2. Target identity is derived from the authoritative approval context if not explicitly passed.
+           Local synthesis (such as inventing 'default') is strictly prohibited.
+        3. A unique TrainingJobId is generated for each execution launch, preserving plan_id for lineage.
+        """
         self.validate_plan(plan)
         self.verify_approval(
             plan=plan,
@@ -339,68 +397,95 @@ class DefaultTrainingLauncher:
             target_id=target_id,
         )
 
+        # Authoritative target resolution (zero local synthesis):
+        # Derive target from approval context if not explicitly provided
+        resolved_target_id = target_id
+        if resolved_target_id is None:
+            scope = approval_request.resource_scope
+            if scope.startswith("target:"):
+                resolved_target_id = TargetId(scope.split(":", 1)[1])
+            elif str(operation_identity.target_identity).startswith("target:"):
+                resolved_target_id = TargetId(
+                    str(operation_identity.target_identity).split(":", 1)[1]
+                )
+
+        if resolved_target_id is None or not str(resolved_target_id).strip():
+            raise TrainingApprovalRequiredError(
+                "No authorized execution target_id supplied or derivable from authoritative approval context. "
+                "Local target synthesis is strictly prohibited."
+            )
+
         validate_training_job_transition(
             TrainingJobStatus.APPROVED, TrainingJobStatus.LAUNCHING
         )
 
-        invocation = self.prepare_invocation(plan, tool_id, target_id=target_id)
+        invocation = self.prepare_invocation(
+            plan, tool_id, target_id=resolved_target_id
+        )
         execution_id: ExecutionId | None = None
 
         if tool_executor is not None:
-            try:
-                coro_or_res = tool_executor.execute(invocation)
-                if inspect.iscoroutine(coro_or_res):
-                    try:
-                        loop = asyncio.get_running_loop()
-                    except RuntimeError:
-                        loop = None
-                    if loop and loop.is_running():
-                        import concurrent.futures
-
-                        with concurrent.futures.ThreadPoolExecutor(
-                            max_workers=1
-                        ) as pool:
-                            result = pool.submit(asyncio.run, coro_or_res).result()
-                    else:
-                        result = asyncio.run(coro_or_res)
-                else:
-                    result = coro_or_res
-
-                execution_id = result.execution_id
-                if result.status != ToolExecutionStatus.SUCCESS:
-                    validate_training_job_transition(
-                        TrainingJobStatus.LAUNCHING, TrainingJobStatus.FAILED
-                    )
-                    raise TrainingExecutionError(
-                        f"Tool execution failed for tool {tool_id!r}: {result.error_message}"
-                    )
-            except Exception as exc:
-                if not isinstance(exc, TrainingExecutionError):
-                    raise TrainingExecutionError(
-                        f"Dispatch to tool executor failed: {exc}"
-                    ) from exc
-                raise
+            result = self._dispatch_invocation(tool_executor, invocation)
+            execution_id = result.execution_id
+            if result.status != ToolExecutionStatus.SUCCESS:
+                validate_training_job_transition(
+                    TrainingJobStatus.LAUNCHING, TrainingJobStatus.FAILED
+                )
+                raise TrainingExecutionError(
+                    f"Tool execution failed for tool {tool_id!r}: {result.error_message}"
+                )
 
         validate_training_job_transition(
             TrainingJobStatus.LAUNCHING, TrainingJobStatus.RUNNING
         )
 
-        job_id = TrainingJobId(f"train-{plan.plan_id}")
+        # Unique execution identity per launch (preserves plan_id as lineage reference)
+        if job_id is not None:
+            resolved_job_id = validate_training_job_id(str(job_id))
+        else:
+            resolved_job_id = validate_training_job_id(
+                f"job-{plan.plan_id}-{uuid.uuid4().hex[:12]}"
+            )
+
         return TrainingJobRecord(
-            job_id=job_id,
+            job_id=resolved_job_id,
             plan_id=plan.plan_id,
             status=TrainingJobStatus.RUNNING,
             started_at=datetime.now(timezone.utc),
             execution_id=execution_id,
-            target_id=target_id,
+            target_id=resolved_target_id,
         )
 
     def abort_request(
         self,
         job_id: TrainingJobId,
-        target_id: TargetId | None = None,
-        tool_executor: ToolExecutor | None = None,
+        target_id: TargetId,
+        tool_executor: ToolExecutor,
+        *,
+        cancel_tool_id: ToolId | None = None,
+        execution_id: ExecutionId | None = None,
+        timeout_seconds: int = 60,
     ) -> bool:
-        """Emit cancellation signal via ADR-0005 without unilaterally mutating orchestrator session records."""
-        # Pure signal delegation to execution transport if executor is available
-        return True
+        """Emit cancellation signal via ADR-0005 ToolExecutor without mutating orchestrator session state."""
+        if target_id is None or not str(target_id).strip():
+            raise TrainingExecutionError(
+                "TargetId is required to emit cancellation signal via ADR-0005"
+            )
+        if tool_executor is None:
+            raise TrainingExecutionError(
+                "ToolExecutor is required to emit cancellation signal via ADR-0005"
+            )
+
+        tool = cancel_tool_id or ToolId("cv.train.cancel")
+        exec_id = execution_id or ExecutionId(f"exec-abort-{uuid.uuid4().hex[:12]}")
+        invocation = ToolInvocation(
+            tool_id=tool,
+            parameters={"job_id": str(job_id)},
+            target_id=target_id,
+            execution_id=exec_id,
+            timeout_seconds=timeout_seconds,
+            approval_authorized=True,
+        )
+
+        result = self._dispatch_invocation(tool_executor, invocation)
+        return result.status == ToolExecutionStatus.SUCCESS

@@ -42,42 +42,81 @@ class CheckpointRetentionManager:
                 f"total_epochs must be >= 1, got {total_epochs}"
             )
 
-        # 1. Identify final checkpoint
+        # 1. Ranking keys for deterministic ordering
+        class _BestRankingKey:
+            __slots__ = ("checkpoint_id", "epoch", "higher_is_better", "val")
+
+            def __init__(
+                self,
+                c: CheckpointManifest,
+                primary_metric: str,
+                higher_is_better: bool,
+            ) -> None:
+                m = c.metrics.get(primary_metric)
+                if m is None:
+                    self.val = float("-inf") if higher_is_better else float("inf")
+                else:
+                    self.val = m
+                self.epoch = c.epoch
+                self.checkpoint_id = str(c.checkpoint_id)
+                self.higher_is_better = higher_is_better
+
+            def __lt__(self, other: _BestRankingKey) -> bool:
+                # Primary metric: better metric comes first
+                if self.val != other.val:
+                    return (
+                        self.val > other.val
+                        if self.higher_is_better
+                        else self.val < other.val
+                    )
+                # Deterministic tie-break 1: higher epoch comes first (epoch desc)
+                if self.epoch != other.epoch:
+                    return self.epoch > other.epoch
+                # Deterministic tie-break 2: smaller checkpoint_id comes first (checkpoint_id asc)
+                return self.checkpoint_id < other.checkpoint_id
+
+        class _RecencyRankingKey:
+            __slots__ = ("checkpoint_id", "epoch", "step")
+
+            def __init__(self, c: CheckpointManifest) -> None:
+                self.epoch = c.epoch
+                self.step = c.step
+                self.checkpoint_id = str(c.checkpoint_id)
+
+            def __lt__(self, other: _RecencyRankingKey) -> bool:
+                if self.epoch != other.epoch:
+                    return self.epoch > other.epoch
+                if self.step != other.step:
+                    return self.step > other.step
+                return self.checkpoint_id < other.checkpoint_id
+
+        # 2. Identify final checkpoint
         # Prefer exact match epoch == total_epochs - 1, fallback to highest epoch/step
         exact_final = [c for c in checkpoints if c.epoch == total_epochs - 1]
         if exact_final:
-            final_ckpt = max(exact_final, key=lambda c: (c.step, c.checkpoint_id))
+            final_ckpt = min(exact_final, key=_RecencyRankingKey)
         else:
-            final_ckpt = max(
-                checkpoints, key=lambda c: (c.epoch, c.step, c.checkpoint_id)
-            )
+            final_ckpt = min(checkpoints, key=_RecencyRankingKey)
 
-        # 2. Rank checkpoints for keep_best
-        def _metric_key(c: CheckpointManifest) -> tuple[float, int, str]:
-            metric_val = c.metrics.get(policy.primary_metric)
-            if metric_val is None:
-                # If metric missing, penalize to worst possible rank
-                val = float("-inf") if policy.higher_is_better else float("inf")
-            else:
-                val = metric_val if policy.higher_is_better else -metric_val
-            # Deterministic tie-breaking: epoch descending (represented as c.epoch), checkpoint_id ascending
-            return (val, c.epoch, str(c.checkpoint_id))
-
-        ranked_best = sorted(checkpoints, key=_metric_key, reverse=True)
+        # 3. Rank checkpoints for keep_best (primary metric best first, epoch desc, checkpoint_id asc)
+        ranked_best = sorted(
+            checkpoints,
+            key=lambda c: _BestRankingKey(
+                c, policy.primary_metric, policy.higher_is_better
+            ),
+        )
         best_ckpt = ranked_best[0]
 
-        # 3. Select keep_best IDs
+        # 4. Select keep_best IDs
         best_k = min(policy.keep_best, len(ranked_best))
         best_ids = {c.checkpoint_id for c in ranked_best[:best_k]}
 
-        # 4. Select keep_last IDs
-        sorted_by_recency = sorted(
-            checkpoints, key=lambda c: (c.epoch, c.step, c.checkpoint_id), reverse=True
-        )
+        # 5. Select keep_last IDs
+        sorted_by_recency = sorted(checkpoints, key=_RecencyRankingKey)
         last_n = min(policy.keep_last, len(sorted_by_recency))
         last_ids = {c.checkpoint_id for c in sorted_by_recency[:last_n]}
 
-        # 5. Formulate retained set
+        # 6. Formulate retained set
         retained_set = best_ids | last_ids
         retained_set.add(best_ckpt.checkpoint_id)
         if policy.keep_final:

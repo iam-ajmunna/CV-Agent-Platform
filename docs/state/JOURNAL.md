@@ -1480,3 +1480,33 @@ Implemented the complete ADR-0010 Training Subsystem architecture in `cv_agent/t
 **Learned:** Subsystem launchers must strictly consume the full security context from authoritative orchestration (ADR-0003) rather than manufacturing synthetic identity components or re-interpreting resource scopes.
 
 **Left open:** PR submission and Official PM adversarial review under Issue #54.
+
+---
+
+## 2026-09-14 — Phase 2K Adversarial Review Remediation (PR #57)
+
+**Did:**
+Remediated the four findings from the Official PM adversarial review on PR #57:
+1. **B1: Implemented ADR-0005 Cancellation Delegation (`cv_agent/training/launcher.py`):**
+   - Implemented `abort_request()` to construct typed `ToolInvocation` with `tool_id="cv.train.cancel"`, `job_id`, and `target_id`.
+   - Dispatched via ADR-0005 `ToolExecutor.execute()`, returning `True` on `SUCCESS` without mutating orchestration state.
+   - Requires explicit `TargetId` and `ToolExecutor`, failing closed if either is missing.
+2. **B2: Eliminated Target Synthesis (`cv_agent/training/launcher.py`):**
+   - Removed `"default"` fallback in `prepare_invocation()` and `launch()`.
+   - Requires an authorized `TargetId` or derives it strictly from the authoritative approval scope (`target:<id>`); fails closed if no authorized target is available.
+3. **B3: Unique Execution Identity Per Launch (`cv_agent/training/launcher.py`):**
+   - Replaced deterministic `job_id = f"train-{plan.plan_id}"` with uniquely generated `TrainingJobId` per execution launch (`f"job-{plan.plan_id}-{uuid.uuid4().hex[:12]}"`).
+   - Retained `plan_id` for lineage while preventing telemetry/checkpoint/job-record collisions across relaunches.
+4. **Important Finding: Fixed Retention Tie-Break Ordering (`cv_agent/training/retention.py`):**
+   - Implemented `_BestRankingKey` and `_RecencyRankingKey` custom comparators ensuring metric descending/ascending, epoch descending, and `checkpoint_id` strictly ascending.
+5. **Adversarial Regression Tests Added (`tests/test_training_boundary.py`):**
+   - Added 4 dedicated tests: `test_abort_request_delegates_to_adr0005`, `test_launch_rejects_missing_target_and_prevents_default_synthesis`, `test_launch_unique_execution_identity_per_run`, and `test_retention_ascending_checkpoint_id_tie_break`.
+   - Verified 459 total passing tests across 20 test modules.
+
+**Why:** `[P§10]`, `[P§15]`, `[P§21]`, `[P§22]`, `[P§24]`, `[P§34]`, ADR-0003, ADR-0005, and frozen ADR-0010. Guarantees true transport cancellation delegation, zero unauthorized target invention, execution identity uniqueness per launch, and exact adherence to documented tie-breaking contracts.
+
+**Broke:** Nothing broken. 459 tests pass across 20 test modules; all quality gates, type checks, packaging, and security audits clean.
+
+**Learned:** Subsystem launchers must avoid local target defaulting just as strictly as identity synthesis, and ranking keys must be explicitly composed when tuple tie-break directions differ across fields.
+
+**Left open:** Pushing remediation commit to `feature/ajmunna/phase-2k-training-subsystem` for PR #57 and awaiting second Official PM review.

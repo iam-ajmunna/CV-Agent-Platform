@@ -31,6 +31,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 from types import MappingProxyType
+from typing import Any
 
 import pytest
 from pydantic import ValidationError
@@ -54,7 +55,10 @@ from cv_agent.orchestration import (
 from cv_agent.tools import (
     ActiveJobHandoff,
     TargetId,
+    ToolExecutionStatus,
     ToolId,
+    ToolInvocation,
+    ToolResult,
 )
 from cv_agent.training import (
     AugmentationConfig,
@@ -77,6 +81,7 @@ from cv_agent.training import (
     RetentionPolicy,
     SchedulerConfig,
     TrainingApprovalRequiredError,
+    TrainingExecutionError,
     TrainingJobId,
     TrainingJobStatus,
     TrainingPlan,
@@ -151,7 +156,7 @@ def _make_approval_context(
     operation_version: int = 1,
     request_id: str = "req-app-001",
     policy_version: str = "policy-v1",
-    resource_scope: str = "training_plan:plan-exp001",
+    resource_scope: str = "target:local_gpu",
     status: ApprovalStatus = ApprovalStatus.APPROVED,
 ) -> tuple[OperationIdentity, ApprovalRequest, ApprovalDecision]:
     payload_hash = compute_training_payload_hash(plan)
@@ -287,14 +292,14 @@ def test_wrong_target_identity() -> None:
     launcher = DefaultTrainingLauncher()
     plan = _make_valid_plan()
     op_id, app_req, app_dec = _make_approval_context(
-        plan, resource_scope="training_plan:plan-exp001"
+        plan, resource_scope="target:local_gpu"
     )
 
     mismatched_op_id = OperationIdentity(
         operation_id=op_id.operation_id,
         operation_version=op_id.operation_version,
         canonical_payload_hash=op_id.canonical_payload_hash,
-        target_identity="training_plan:different-plan",  # Mismatch!
+        target_identity="target:remote_gpu",  # Mismatch!
     )
 
     with pytest.raises(
@@ -319,7 +324,7 @@ def test_cross_plan_approval_replay() -> None:
     plan_b = _make_valid_plan(plan_id="plan-b")
 
     op_id_a, app_req_a, app_dec_a = _make_approval_context(
-        plan_a, resource_scope="training_plan:plan-a"
+        plan_a, resource_scope="target:local_gpu"
     )
 
     with pytest.raises(
@@ -1000,3 +1005,221 @@ def test_domain_state_machine_transitions() -> None:
         validate_training_job_transition(
             TrainingJobStatus.COMPLETED, TrainingJobStatus.RUNNING
         )
+
+
+# =============================================================================
+# B1 Regression: abort_request delegates to ADR-0005 ToolExecutor
+# =============================================================================
+def test_abort_request_delegates_to_adr0005() -> None:
+    """Verify abort_request constructs ToolInvocation and delegates cancellation via ADR-0005."""
+    launcher = DefaultTrainingLauncher()
+    invocations: list[ToolInvocation] = []
+
+    class MockCancelExecutor:
+        async def execute(self, invocation: ToolInvocation) -> ToolResult:
+            invocations.append(invocation)
+            return ToolResult(
+                tool_id=invocation.tool_id,
+                execution_id=invocation.execution_id,
+                target_id=invocation.target_id,
+                status=ToolExecutionStatus.SUCCESS,
+            )
+
+        async def probe(self, tool: Any, target: Any) -> Any:
+            raise NotImplementedError
+
+    executor = MockCancelExecutor()
+    job_id = TrainingJobId("job-test-abort-001")
+    target_id = TargetId("remote-gpu-01")
+
+    # Successful cancellation delegation
+    result = launcher.abort_request(
+        job_id=job_id,
+        target_id=target_id,
+        tool_executor=executor,  # type: ignore[arg-type]
+    )
+
+    assert result is True
+    assert len(invocations) == 1
+    inv = invocations[0]
+    assert inv.tool_id == ToolId("cv.train.cancel")
+    assert inv.target_id == target_id
+    assert inv.parameters["job_id"] == str(job_id)
+    assert inv.approval_authorized is True
+
+    # Missing target_id fails closed
+    with pytest.raises(TrainingExecutionError, match="TargetId is required"):
+        launcher.abort_request(
+            job_id=job_id,
+            target_id=None,  # type: ignore[arg-type]
+            tool_executor=executor,  # type: ignore[arg-type]
+        )
+
+    # Missing tool_executor fails closed
+    with pytest.raises(TrainingExecutionError, match="ToolExecutor is required"):
+        launcher.abort_request(
+            job_id=job_id,
+            target_id=target_id,
+            tool_executor=None,  # type: ignore[arg-type]
+        )
+
+
+# =============================================================================
+# B2 Regression: Zero target synthesis, fail closed without authorized target
+# =============================================================================
+def test_launch_rejects_missing_target_and_prevents_default_synthesis() -> None:
+    """Verify launch rejects missing target_id and never synthesizes a default target."""
+    launcher = DefaultTrainingLauncher()
+    plan = _make_valid_plan()
+
+    # Approval scope has no target (e.g. general plan resource scope)
+    op_id, app_req, app_dec = _make_approval_context(
+        plan, resource_scope="training_plan:plan-exp001"
+    )
+
+    # Calling launch without target_id fails closed without synthesizing "default"
+    with pytest.raises(
+        TrainingApprovalRequiredError,
+        match="No authorized execution target_id supplied or derivable",
+    ):
+        launcher.launch(
+            plan=plan,
+            tool_id=ToolId("cv.train.execute"),
+            operation_identity=op_id,
+            approval_request=app_req,
+            approval_decision=app_dec,
+            target_id=None,  # Omitted!
+        )
+
+    # prepare_invocation fails closed without an explicit target_id
+    with pytest.raises(
+        TrainingApprovalRequiredError,
+        match="Cannot prepare invocation without an authorized TargetId",
+    ):
+        launcher.prepare_invocation(
+            plan=plan,
+            tool_id=ToolId("cv.train.execute"),
+            target_id=None,  # type: ignore[arg-type]
+        )
+
+    # When scope explicitly provides the authoritative target, launch derives it
+    op_id_scoped, app_req_scoped, app_dec_scoped = _make_approval_context(
+        plan, resource_scope="target:cluster-h100"
+    )
+    record = launcher.launch(
+        plan=plan,
+        tool_id=ToolId("cv.train.execute"),
+        operation_identity=op_id_scoped,
+        approval_request=app_req_scoped,
+        approval_decision=app_dec_scoped,
+        target_id=None,  # Derived from authorized scope!
+    )
+    assert record.target_id == TargetId("cluster-h100")
+
+
+# =============================================================================
+# B3 Regression: Unique TrainingJobId per launch execution
+# =============================================================================
+def test_launch_unique_execution_identity_per_run() -> None:
+    """Verify each launch execution generates a distinct TrainingJobId while preserving plan_id lineage."""
+    launcher = DefaultTrainingLauncher()
+    plan = _make_valid_plan(plan_id="plan-exp-unique")
+    op_id, app_req, app_dec = _make_approval_context(plan)
+
+    rec1 = launcher.launch(
+        plan=plan,
+        tool_id=ToolId("cv.train.execute"),
+        operation_identity=op_id,
+        approval_request=app_req,
+        approval_decision=app_dec,
+    )
+    rec2 = launcher.launch(
+        plan=plan,
+        tool_id=ToolId("cv.train.execute"),
+        operation_identity=op_id,
+        approval_request=app_req,
+        approval_decision=app_dec,
+    )
+
+    # Different job identities for separate executions
+    assert rec1.job_id != rec2.job_id
+    # Both preserve the exact same plan_id lineage
+    assert rec1.plan_id == PlanId("plan-exp-unique")
+    assert rec2.plan_id == PlanId("plan-exp-unique")
+
+    # Explicit job_id is accepted and respected
+    custom_job_id = TrainingJobId("job-custom-explicit-001")
+    rec_custom = launcher.launch(
+        plan=plan,
+        tool_id=ToolId("cv.train.execute"),
+        operation_identity=op_id,
+        approval_request=app_req,
+        approval_decision=app_dec,
+        job_id=custom_job_id,
+    )
+    assert rec_custom.job_id == custom_job_id
+
+
+# =============================================================================
+# Important Finding Regression: Ascending checkpoint_id tie-breaking
+# =============================================================================
+def test_retention_ascending_checkpoint_id_tie_break() -> None:
+    """Verify tie-breaking orders checkpoint_id in ascending order when metrics and epochs match."""
+    manager = CheckpointRetentionManager()
+    base_metrics = {"val_loss": 0.42}
+
+    # Three checkpoints with identical loss and epoch, different IDs
+    ckpt_beta = CheckpointManifest(
+        checkpoint_id=CheckpointId("ckpt-beta"),
+        job_id=TrainingJobId("job-001"),
+        plan_id=PlanId("plan-001"),
+        epoch=2,
+        step=200,
+        weights_hash=ContentHash("0" * 64),
+        weights_uri="s3://models/ckpt-beta.pt",
+        created_at=datetime.now(timezone.utc),
+        metrics=base_metrics,
+    )
+    ckpt_alpha = CheckpointManifest(
+        checkpoint_id=CheckpointId("ckpt-alpha"),
+        job_id=TrainingJobId("job-001"),
+        plan_id=PlanId("plan-001"),
+        epoch=2,
+        step=200,
+        weights_hash=ContentHash("0" * 64),
+        weights_uri="s3://models/ckpt-alpha.pt",
+        created_at=datetime.now(timezone.utc),
+        metrics=base_metrics,
+    )
+    ckpt_gamma = CheckpointManifest(
+        checkpoint_id=CheckpointId("ckpt-gamma"),
+        job_id=TrainingJobId("job-001"),
+        plan_id=PlanId("plan-001"),
+        epoch=2,
+        step=200,
+        weights_hash=ContentHash("0" * 64),
+        weights_uri="s3://models/ckpt-gamma.pt",
+        created_at=datetime.now(timezone.utc),
+        metrics=base_metrics,
+    )
+
+    policy = RetentionPolicy(
+        keep_best=1,
+        keep_last=1,
+        keep_final=False,
+        primary_metric="val_loss",
+        higher_is_better=False,
+    )
+
+    # Present in non-alphabetical order to test sorting
+    decision = manager.evaluate_retention(
+        [ckpt_gamma, ckpt_beta, ckpt_alpha], policy, total_epochs=5
+    )
+
+    # Ascending tie-break must pick ckpt-alpha ahead of ckpt-beta and ckpt-gamma
+    assert decision.best_checkpoint_id == CheckpointId("ckpt-alpha")
+    assert decision.retained_checkpoint_ids == (CheckpointId("ckpt-alpha"),)
+    assert decision.prunable_checkpoint_ids == (
+        CheckpointId("ckpt-beta"),
+        CheckpointId("ckpt-gamma"),
+    )
