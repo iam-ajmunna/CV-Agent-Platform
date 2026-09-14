@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import ast
 import json
+import unicodedata
 from decimal import Decimal
 from pathlib import Path
 
@@ -49,11 +50,14 @@ from cv_agent.reasoning.contracts import (
     ProblemCharacterization,
     ReasoningContext,
     ReasoningOutput,
+    ReasoningOutputPayload,
     Reversibility,
     RiskLevel,
     StrategyRecommendation,
     canonicalize_context_preimage,
+    canonicalize_preimage_fields,
     compute_context_ref,
+    compute_context_ref_from_fields,
     generate_decision_id,
     generate_replay_decision_id,
     validate_and_freeze_json_domain,
@@ -131,15 +135,13 @@ class TestCanonicalizationPortability:
 
     def test_signed_zero_float_invariance(self) -> None:
         """-0.0 and 0.0 must serialize to identical canonical bytes and SHA-256 hashes."""
-        ctx_pos = ReasoningContext(
-            context_ref="placeholder",
+        ctx_pos = ReasoningContext.create(
             current_hop=1,
             max_hops=10,
             trace_id="trace-001",
             parameters={"zero_val": 0.0},
         )
-        ctx_neg = ReasoningContext(
-            context_ref="placeholder",
+        ctx_neg = ReasoningContext.create(
             current_hop=1,
             max_hops=10,
             trace_id="trace-001",
@@ -150,13 +152,13 @@ class TestCanonicalizationPortability:
         bytes_neg = canonicalize_context_preimage(ctx_neg)
 
         assert bytes_pos == bytes_neg
+        assert ctx_pos.context_ref == ctx_neg.context_ref
         assert compute_context_ref(ctx_pos) == compute_context_ref(ctx_neg)
         assert b'"zero_val":0.0' in bytes_pos
 
     def test_golden_vectors_edge_case_numbers(self) -> None:
         """Golden vector evaluation for edge-case numbers across Python 3.10–3.13."""
-        ctx = ReasoningContext(
-            context_ref="placeholder",
+        ctx = ReasoningContext.create(
             current_hop=2,
             max_hops=10,
             trace_id="trace-golden",
@@ -185,6 +187,7 @@ class TestCanonicalizationPortability:
         # Invariant checks
         assert isinstance(canonical_bytes, bytes)
         assert len(digest) == 64
+        assert ctx.context_ref == digest
         # Verify deterministic fields presence in canonical bytes
         assert b'"current_hop":2' in canonical_bytes
         assert b'"large_int":9223372036854775807' in canonical_bytes
@@ -194,39 +197,36 @@ class TestCanonicalizationPortability:
         assert compute_context_ref(ctx) == digest
 
     def test_preimage_excludes_context_ref(self) -> None:
-        """Changing context_ref on identical context fields must yield the exact same computed digest."""
-        ctx1 = ReasoningContext(
-            context_ref="first_arbitrary_ref",
+        """Preimage byte serialization strictly excludes context_ref to eliminate circularity."""
+        ctx = ReasoningContext.create(
             current_hop=1,
             max_hops=5,
             trace_id="trace-abc",
             parameters={"alpha": 1, "beta": "test"},
         )
-        ctx2 = ReasoningContext(
-            context_ref="second_different_ref",
+        canonical_bytes = canonicalize_context_preimage(ctx)
+        # context_ref must NOT appear in preimage
+        assert b'"context_ref"' not in canonical_bytes
+        # Preimage fields function matches context preimage exactly
+        fields_bytes = canonicalize_preimage_fields(
             current_hop=1,
             max_hops=5,
             trace_id="trace-abc",
+            schema_version="1.0.0",
+            evidence_refs=(),
             parameters={"alpha": 1, "beta": "test"},
         )
-
-        assert ctx1.context_ref != ctx2.context_ref
-        assert canonicalize_context_preimage(ctx1) == canonicalize_context_preimage(
-            ctx2
-        )
-        assert compute_context_ref(ctx1) == compute_context_ref(ctx2)
+        assert canonical_bytes == fields_bytes
 
     def test_mapping_key_order_invariance(self) -> None:
         """Dictionary key insertion order must not alter canonical byte representation or hash."""
-        ctx_ordered = ReasoningContext(
-            context_ref="x",
+        ctx_ordered = ReasoningContext.create(
             current_hop=1,
             max_hops=5,
             trace_id="trace-1",
             parameters={"a": 1, "b": 2, "c": 3},
         )
-        ctx_reversed = ReasoningContext(
-            context_ref="x",
+        ctx_reversed = ReasoningContext.create(
             current_hop=1,
             max_hops=5,
             trace_id="trace-1",
@@ -236,19 +236,17 @@ class TestCanonicalizationPortability:
         assert canonicalize_context_preimage(
             ctx_ordered
         ) == canonicalize_context_preimage(ctx_reversed)
-        assert compute_context_ref(ctx_ordered) == compute_context_ref(ctx_reversed)
+        assert ctx_ordered.context_ref == ctx_reversed.context_ref
 
     def test_semantic_whitespace_vs_formatting_whitespace(self) -> None:
         """Semantic string whitespace must alter the digest; formatting whitespace must be normalized."""
-        ctx_single_space = ReasoningContext(
-            context_ref="x",
+        ctx_single_space = ReasoningContext.create(
             current_hop=1,
             max_hops=5,
             trace_id="t",
             parameters={"requirement": "latency target: < 20ms"},
         )
-        ctx_double_space = ReasoningContext(
-            context_ref="x",
+        ctx_double_space = ReasoningContext.create(
             current_hop=1,
             max_hops=5,
             trace_id="t",
@@ -256,9 +254,7 @@ class TestCanonicalizationPortability:
         )
 
         # Different semantic whitespace MUST produce different digests
-        assert compute_context_ref(ctx_single_space) != compute_context_ref(
-            ctx_double_space
-        )
+        assert ctx_single_space.context_ref != ctx_double_space.context_ref
 
 
 # ==============================================================================
@@ -278,8 +274,7 @@ class TestClosedJsonValueAndImmutability:
             validate_and_freeze_json_domain(lambda x: x)
 
         with pytest.raises(TypeError, match="not JSON-compatible"):
-            ReasoningContext(
-                context_ref="ref",
+            ReasoningContext.create(
                 current_hop=1,
                 max_hops=5,
                 trace_id="t",
@@ -330,6 +325,46 @@ class TestClosedJsonValueAndImmutability:
         with pytest.raises(AttributeError):
             frozen["level1"][0]["level2"].append(4)  # type: ignore[union-attr]
 
+    def test_nfc_key_collision_fails_closed(self) -> None:
+        """Two distinct keys normalizing to the same NFC representation must fail closed (B2)."""
+        # 'e\u0301' is 'e' + combining acute accent; '\u00e9' is precomposed 'é'
+        e_combining = "e\u0301"
+        e_precomposed = "\u00e9"
+        assert e_combining != e_precomposed
+        assert unicodedata.normalize("NFC", e_combining) == e_precomposed
+
+        colliding_dict = {e_combining: "val1", e_precomposed: "val2"}
+
+        # 1. validate_and_freeze_json_domain must raise ValueError
+        with pytest.raises(
+            ValueError, match="Canonical key collision after NFC normalization"
+        ):
+            validate_and_freeze_json_domain(colliding_dict)
+
+        # 2. Canonical serialization must also raise ValueError
+        with pytest.raises(
+            ValueError, match="Canonical key collision after NFC normalization"
+        ):
+            canonicalize_preimage_fields(
+                current_hop=1,
+                max_hops=5,
+                trace_id="trace-t",
+                parameters=colliding_dict,
+            )
+
+        # 3. Evidence bounds key collision must also raise ValueError
+        with pytest.raises(
+            ValueError,
+            match="Canonical key collision after NFC normalization in evidence bounds",
+        ):
+            EvidenceRef(
+                uri="kb://test",
+                sha256="abc" * 21 + "a",
+                title="title",
+                snippet="snippet",
+                bounds={e_combining: (1.0, 2.0), e_precomposed: (3.0, 4.0)},
+            )
+
 
 # ==============================================================================
 # Gate 3: 128-Bit DecisionId Entropy & Replay Identity
@@ -368,6 +403,149 @@ class TestDecisionIdContract:
 
 
 # ==============================================================================
+# Gate 3b: Content-Bound ReasoningContext & Closed Payload Domain (B1 & B3)
+# ==============================================================================
+
+
+class TestReasoningContextContentBinding:
+    """Verifies B3 invariant: ReasoningContext.context_ref MUST equal compute_context_ref(self)."""
+
+    def test_context_ref_tamper_modified_parameters_rejected(self) -> None:
+        """Valid context_ref + modified parameters -> rejection."""
+        ctx = ReasoningContext.create(
+            current_hop=1,
+            max_hops=5,
+            trace_id="trace-tamper",
+            parameters={"param1": "original"},
+        )
+        valid_ref = ctx.context_ref
+
+        # Modify parameters while reusing the previously valid context_ref
+        with pytest.raises(ValueError, match="context_ref mismatch"):
+            ReasoningContext(
+                context_ref=valid_ref,
+                current_hop=1,
+                max_hops=5,
+                trace_id="trace-tamper",
+                parameters={"param1": "tampered"},
+            )
+
+    def test_context_ref_forged_ref_rejected(self) -> None:
+        """Valid parameters + forged context_ref -> rejection."""
+        forged_ref = "0123456789abcdef" * 4
+        with pytest.raises(ValueError, match="context_ref mismatch"):
+            ReasoningContext(
+                context_ref=forged_ref,
+                current_hop=1,
+                max_hops=5,
+                trace_id="trace-forged",
+                parameters={"param1": "original"},
+            )
+
+    def test_context_ref_tamper_hop_or_trace_rejected(self) -> None:
+        """Modifying hop or trace_id with unchanged context_ref is rejected."""
+        ctx = ReasoningContext.create(
+            current_hop=1,
+            max_hops=5,
+            trace_id="trace-01",
+        )
+        with pytest.raises(ValueError, match="context_ref mismatch"):
+            ReasoningContext(
+                context_ref=ctx.context_ref,
+                current_hop=2,
+                max_hops=5,
+                trace_id="trace-01",
+            )
+        with pytest.raises(ValueError, match="context_ref mismatch"):
+            ReasoningContext(
+                context_ref=ctx.context_ref,
+                current_hop=1,
+                max_hops=5,
+                trace_id="trace-tampered",
+            )
+
+    def test_context_create_factory_matches_authoritative_digest(self) -> None:
+        """ReasoningContext.create(...) produces authoritative digest matching compute_context_ref."""
+        ctx = ReasoningContext.create(
+            current_hop=1,
+            max_hops=5,
+            trace_id="trace-create",
+            parameters={"batch_size": 32},
+        )
+        assert ctx.context_ref == compute_context_ref(ctx)
+
+    def test_compute_context_ref_from_fields_matches_factory(self) -> None:
+        """compute_context_ref_from_fields produces the exact same digest as create()."""
+        ctx = ReasoningContext.create(
+            current_hop=1,
+            max_hops=5,
+            trace_id="trace-test",
+            parameters={"k": "v"},
+        )
+        direct_digest = compute_context_ref_from_fields(
+            current_hop=1,
+            max_hops=5,
+            trace_id="trace-test",
+            schema_version="1.0.0",
+            parameters={"k": "v"},
+        )
+        assert ctx.context_ref == direct_digest
+
+
+class TestReasoningOutputClosedPayload:
+    """Verifies B1 invariant: ReasoningOutput.payload is strictly closed to ReasoningOutputPayload."""
+
+    def test_reasoning_output_payload_type_hint_membership(self) -> None:
+        """Verify ReasoningOutputPayload union members."""
+        from typing import get_args
+
+        args = get_args(ReasoningOutputPayload)
+        assert ProblemCharacterization in args
+        assert BaselineSpec in args
+        assert DiagnosticReport in args
+        assert StrategyRecommendation in args
+
+    def test_valid_payload_types_accepted(self) -> None:
+        dec_id = generate_decision_id()
+        ctx = ReasoningContext.create(current_hop=1, max_hops=5, trace_id="t")
+
+        p1 = ProblemCharacterization("det", "jetson")
+        p2 = BaselineSpec("yolo", "coco", (640, 640), 16, "mAP")
+        p3 = DiagnosticReport("diag", (), (), ())
+        p4 = StrategyRecommendation("s1", "title", "desc", "impact", RiskLevel.LOW)
+
+        for payload in (p1, p2, p3, p4):
+            out = ReasoningOutput(
+                decision_id=dec_id,
+                node_type=NodeType.PROBLEM_FRAMING,
+                context_ref=ctx.context_ref,
+                payload=payload,
+            )
+            assert out.payload == payload
+
+    def test_open_ended_payload_rejected(self) -> None:
+        dec_id = generate_decision_id()
+        ctx = ReasoningContext.create(current_hop=1, max_hops=5, trace_id="t")
+
+        for bad_payload in (
+            "arbitrary_str",
+            12345,
+            {"dict": "value"},
+            [1, 2, 3],
+            object(),
+        ):
+            with pytest.raises(
+                TypeError, match="must be an instance of ReasoningOutputPayload"
+            ):
+                ReasoningOutput(
+                    decision_id=dec_id,
+                    node_type=NodeType.PROBLEM_FRAMING,
+                    context_ref=ctx.context_ref,
+                    payload=bad_payload,  # type: ignore[arg-type]
+                )
+
+
+# ==============================================================================
 # Gate 4: Closed EmpiricalComparator & Formal Boundary Semantics
 # ==============================================================================
 
@@ -377,8 +555,7 @@ class TestEmpiricalComparatorBoundaries:
 
     @pytest.fixture
     def sample_context(self) -> ReasoningContext:
-        return ReasoningContext(
-            context_ref="ctx_evidence_ref",
+        return ReasoningContext.create(
             current_hop=1,
             max_hops=5,
             trace_id="trace-01",
@@ -397,6 +574,9 @@ class TestEmpiricalComparatorBoundaries:
             ),
         )
 
+    _SHA = "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+    _PAYLOAD = ProblemCharacterization("object_detection", "nvidia_jetson_orin_nano")
+
     def test_comparator_lte_boundary(self, sample_context: ReasoningContext) -> None:
         validator = GroundingValidator()
         dec_id = generate_decision_id()
@@ -406,9 +586,11 @@ class TestEmpiricalComparatorBoundaries:
             decision_id=dec_id,
             node_type=NodeType.EXPERIMENT_DIAGNOSIS,
             context_ref=sample_context.context_ref,
-            payload="ok",
+            payload=self._PAYLOAD,
             citations=(
-                CitationRef("c1", "kb://cv/models/edge_metrics", "hash", "statement"),
+                CitationRef(
+                    "c1", "kb://cv/models/edge_metrics", self._SHA, "statement"
+                ),
             ),
             empirical_claims=(
                 EmpiricalClaim(
@@ -426,9 +608,11 @@ class TestEmpiricalComparatorBoundaries:
             decision_id=dec_id,
             node_type=NodeType.EXPERIMENT_DIAGNOSIS,
             context_ref=sample_context.context_ref,
-            payload="bad",
+            payload=self._PAYLOAD,
             citations=(
-                CitationRef("c1", "kb://cv/models/edge_metrics", "hash", "statement"),
+                CitationRef(
+                    "c1", "kb://cv/models/edge_metrics", self._SHA, "statement"
+                ),
             ),
             empirical_claims=(
                 EmpiricalClaim(
@@ -453,9 +637,11 @@ class TestEmpiricalComparatorBoundaries:
             decision_id=dec_id,
             node_type=NodeType.EXPERIMENT_DIAGNOSIS,
             context_ref=sample_context.context_ref,
-            payload="ok",
+            payload=self._PAYLOAD,
             citations=(
-                CitationRef("c1", "kb://cv/models/edge_metrics", "hash", "statement"),
+                CitationRef(
+                    "c1", "kb://cv/models/edge_metrics", self._SHA, "statement"
+                ),
             ),
             empirical_claims=(
                 EmpiricalClaim(
@@ -473,9 +659,11 @@ class TestEmpiricalComparatorBoundaries:
             decision_id=dec_id,
             node_type=NodeType.EXPERIMENT_DIAGNOSIS,
             context_ref=sample_context.context_ref,
-            payload="bad",
+            payload=self._PAYLOAD,
             citations=(
-                CitationRef("c1", "kb://cv/models/edge_metrics", "hash", "statement"),
+                CitationRef(
+                    "c1", "kb://cv/models/edge_metrics", self._SHA, "statement"
+                ),
             ),
             empirical_claims=(
                 EmpiricalClaim(
@@ -500,9 +688,11 @@ class TestEmpiricalComparatorBoundaries:
             decision_id=dec_id,
             node_type=NodeType.EXPERIMENT_DIAGNOSIS,
             context_ref=sample_context.context_ref,
-            payload="ok",
+            payload=self._PAYLOAD,
             citations=(
-                CitationRef("c1", "kb://cv/models/edge_metrics", "hash", "statement"),
+                CitationRef(
+                    "c1", "kb://cv/models/edge_metrics", self._SHA, "statement"
+                ),
             ),
             empirical_claims=(
                 EmpiricalClaim(
@@ -517,9 +707,11 @@ class TestEmpiricalComparatorBoundaries:
             decision_id=dec_id,
             node_type=NodeType.EXPERIMENT_DIAGNOSIS,
             context_ref=sample_context.context_ref,
-            payload="bad",
+            payload=self._PAYLOAD,
             citations=(
-                CitationRef("c1", "kb://cv/models/edge_metrics", "hash", "statement"),
+                CitationRef(
+                    "c1", "kb://cv/models/edge_metrics", self._SHA, "statement"
+                ),
             ),
             empirical_claims=(
                 EmpiricalClaim(
@@ -544,9 +736,11 @@ class TestEmpiricalComparatorBoundaries:
             decision_id=dec_id,
             node_type=NodeType.EXPERIMENT_DIAGNOSIS,
             context_ref=sample_context.context_ref,
-            payload="ok",
+            payload=self._PAYLOAD,
             citations=(
-                CitationRef("c1", "kb://cv/models/edge_metrics", "hash", "statement"),
+                CitationRef(
+                    "c1", "kb://cv/models/edge_metrics", self._SHA, "statement"
+                ),
             ),
             empirical_claims=(
                 EmpiricalClaim(
@@ -561,9 +755,11 @@ class TestEmpiricalComparatorBoundaries:
             decision_id=dec_id,
             node_type=NodeType.EXPERIMENT_DIAGNOSIS,
             context_ref=sample_context.context_ref,
-            payload="bad",
+            payload=self._PAYLOAD,
             citations=(
-                CitationRef("c1", "kb://cv/models/edge_metrics", "hash", "statement"),
+                CitationRef(
+                    "c1", "kb://cv/models/edge_metrics", self._SHA, "statement"
+                ),
             ),
             empirical_claims=(
                 EmpiricalClaim(
@@ -585,9 +781,11 @@ class TestEmpiricalComparatorBoundaries:
             decision_id=dec_id,
             node_type=NodeType.EXPERIMENT_DIAGNOSIS,
             context_ref=sample_context.context_ref,
-            payload="ok",
+            payload=self._PAYLOAD,
             citations=(
-                CitationRef("c1", "kb://cv/models/edge_metrics", "hash", "statement"),
+                CitationRef(
+                    "c1", "kb://cv/models/edge_metrics", self._SHA, "statement"
+                ),
             ),
             empirical_claims=(
                 EmpiricalClaim(
@@ -605,9 +803,11 @@ class TestEmpiricalComparatorBoundaries:
             decision_id=dec_id,
             node_type=NodeType.EXPERIMENT_DIAGNOSIS,
             context_ref=sample_context.context_ref,
-            payload="bad",
+            payload=self._PAYLOAD,
             citations=(
-                CitationRef("c1", "kb://cv/models/edge_metrics", "hash", "statement"),
+                CitationRef(
+                    "c1", "kb://cv/models/edge_metrics", self._SHA, "statement"
+                ),
             ),
             empirical_claims=(
                 EmpiricalClaim(
@@ -634,8 +834,7 @@ class TestGroundingValidatorGating:
 
     def test_unanchored_citation_raises(self) -> None:
         validator = GroundingValidator()
-        ctx = ReasoningContext(
-            context_ref="ref",
+        ctx = ReasoningContext.create(
             current_hop=1,
             max_hops=5,
             trace_id="t",
@@ -645,7 +844,9 @@ class TestGroundingValidatorGating:
             decision_id=generate_decision_id(),
             node_type=NodeType.PROBLEM_FRAMING,
             context_ref=ctx.context_ref,
-            payload="p",
+            payload=ProblemCharacterization(
+                "object_detection", "nvidia_jetson_orin_nano"
+            ),
             citations=(CitationRef("c1", "kb://unknown/uri", "hash", "statement"),),
         )
         with pytest.raises(
@@ -655,8 +856,7 @@ class TestGroundingValidatorGating:
 
     def test_uncited_empirical_claim_raises(self) -> None:
         validator = GroundingValidator()
-        ctx = ReasoningContext(
-            context_ref="ref",
+        ctx = ReasoningContext.create(
             current_hop=1,
             max_hops=5,
             trace_id="t",
@@ -666,7 +866,9 @@ class TestGroundingValidatorGating:
             decision_id=generate_decision_id(),
             node_type=NodeType.PROBLEM_FRAMING,
             context_ref=ctx.context_ref,
-            payload="p",
+            payload=ProblemCharacterization(
+                "object_detection", "nvidia_jetson_orin_nano"
+            ),
             citations=(),  # ZERO citations
             empirical_claims=(
                 EmpiricalClaim("latency", 10.0, EmpiricalComparator.LTE, "kb://any"),
@@ -679,8 +881,7 @@ class TestGroundingValidatorGating:
 
     def test_unsupported_speculation_raises(self) -> None:
         validator = GroundingValidator()
-        ctx = ReasoningContext(
-            context_ref="ref",
+        ctx = ReasoningContext.create(
             current_hop=1,
             max_hops=5,
             trace_id="t",
@@ -725,8 +926,7 @@ class TestReasoningNodesExecution:
         gw, _ = _build_mock_gateway()
         node = ProblemFramingNode(gw)
 
-        ctx_exhausted = ReasoningContext(
-            context_ref="ref",
+        ctx_exhausted = ReasoningContext.create(
             current_hop=5,
             max_hops=5,  # hop == max_hops -> exhausted
             trace_id="t",
@@ -757,8 +957,7 @@ class TestReasoningNodesExecution:
         gw, _ = _build_mock_gateway(adapter)
         node = ProblemFramingNode(gw)
 
-        ctx = ReasoningContext(
-            context_ref="ctx-pf",
+        ctx = ReasoningContext.create(
             current_hop=1,
             max_hops=5,
             trace_id="trace-pf",
@@ -790,8 +989,7 @@ class TestReasoningNodesExecution:
         gw, _ = _build_mock_gateway(adapter)
         node = BaselineSelectionNode(gw)
 
-        ctx = ReasoningContext(
-            context_ref="ctx-bs",
+        ctx = ReasoningContext.create(
             current_hop=2,
             max_hops=5,
             trace_id="trace-bs",
@@ -848,8 +1046,7 @@ class TestReasoningNodesExecution:
         gw, _ = _build_mock_gateway(adapter)
         node = DiagnosisNode(gw)
 
-        ctx = ReasoningContext(
-            context_ref="ctx-diag",
+        ctx = ReasoningContext.create(
             current_hop=3,
             max_hops=5,
             trace_id="trace-diag",
@@ -896,8 +1093,7 @@ class TestReasoningNodesExecution:
         gw, _ = _build_mock_gateway(adapter)
         node = StrategyNode(gw)
 
-        ctx = ReasoningContext(
-            context_ref="ctx-strat",
+        ctx = ReasoningContext.create(
             current_hop=4,
             max_hops=5,
             trace_id="trace-strat",
@@ -945,8 +1141,7 @@ class TestReasoningNodesExecution:
         gw, _ = _build_mock_gateway(adapter)
         node = ProblemFramingNode(gw)
 
-        ctx = ReasoningContext(
-            context_ref="ctx-repair-succ",
+        ctx = ReasoningContext.create(
             current_hop=1,
             max_hops=5,
             trace_id="trace-succ",
@@ -966,8 +1161,7 @@ class TestReasoningNodesExecution:
         gw, _ = _build_mock_gateway(adapter)
         node = ProblemFramingNode(gw)
 
-        ctx = ReasoningContext(
-            context_ref="ctx-repair",
+        ctx = ReasoningContext.create(
             current_hop=1,
             max_hops=5,
             trace_id="trace-repair",
@@ -1000,8 +1194,7 @@ class TestReasoningNodesExecution:
         gw, _ = _build_mock_gateway(adapter)
         node = ProblemFramingNode(gw)
 
-        ctx = ReasoningContext(
-            context_ref="ctx-transport",
+        ctx = ReasoningContext.create(
             current_hop=1,
             max_hops=5,
             trace_id="trace-transport",
@@ -1043,3 +1236,77 @@ def test_zero_provider_sdk_imports_in_reasoning() -> None:
                     assert not node.module.startswith(forbidden), (
                         f"Violation of [P§20] in {path.name}: direct from-import of {node.module!r}"
                     )
+
+
+# ==============================================================================
+# Gate 8: Secondary Findings Adversarial Coverage
+# ==============================================================================
+
+
+class TestSecondaryFindingsAdversarial:
+    """Adversarial tests covering PM secondary findings."""
+
+    def test_evidence_bounds_interval_validation(self) -> None:
+        """Evidence bounds with min > max must be rejected (Secondary 1)."""
+        with pytest.raises(ValueError, match="cannot exceed max"):
+            EvidenceRef(
+                uri="kb://evidence/invalid_interval",
+                sha256="abc" * 21 + "a",
+                title="title",
+                snippet="snippet",
+                bounds={"latency_ms": (15.0, 5.0)},  # 15.0 > 5.0
+            )
+
+    def test_evidence_citation_hash_binding(self) -> None:
+        """Citation claiming an arbitrary/mismatched sha256 for a known URI must be rejected (Secondary 2)."""
+        evidence_sha = "1234567890abcdef" * 4
+        mismatched_sha = "fedcba0987654321" * 4
+        evidence = EvidenceRef(
+            uri="kb://cv/evidence/1",
+            sha256=evidence_sha,
+            title="Evidence 1",
+            snippet="Snippet",
+        )
+        ctx = ReasoningContext.create(
+            current_hop=1,
+            max_hops=5,
+            trace_id="t",
+            evidence_refs=(evidence,),
+        )
+        citation_bad = CitationRef(
+            citation_id="cite-bad",
+            uri="kb://cv/evidence/1",
+            sha256=mismatched_sha,  # Mismatched!
+            statement="A claim",
+        )
+        out = ReasoningOutput(
+            decision_id=generate_decision_id(),
+            node_type=NodeType.PROBLEM_FRAMING,
+            context_ref=ctx.context_ref,
+            payload=ProblemCharacterization("det", "jetson"),
+            citations=(citation_bad,),
+        )
+        validator = GroundingValidator()
+        with pytest.raises(UnanchoredCitationError, match="hash mismatch for URI"):
+            validator.validate(ctx, out)
+
+    def test_schema_version_explicit_validation(self) -> None:
+        """ReasoningContext must reject schema_version != '1.0.0' (Secondary 3)."""
+        with pytest.raises(ValueError, match="Unsupported schema_version '2.0.0'"):
+            ReasoningContext.create(
+                current_hop=1,
+                max_hops=5,
+                trace_id="t",
+                schema_version="2.0.0",
+            )
+
+    def test_hypothesis_confidence_finite_validation(self) -> None:
+        """Hypothesis confidence must reject NaN and ±inf (Secondary 4)."""
+        with pytest.raises(ValueError, match="Non-finite float"):
+            Hypothesis("h1", "Statement", confidence=float("nan"))
+        with pytest.raises(ValueError, match="Non-finite float"):
+            Hypothesis("h1", "Statement", confidence=float("inf"))
+        with pytest.raises(ValueError, match="Non-finite float"):
+            Hypothesis("h1", "Statement", confidence=float("-inf"))
+        with pytest.raises(ValueError, match="Confidence must be in"):
+            Hypothesis("h1", "Statement", confidence=1.5)

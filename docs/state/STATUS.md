@@ -3,39 +3,37 @@
 > **Rewritten** every session. Describes **now**, never history — history lives in
 > `JOURNAL.md`. Hard cap: 60 lines. If it exceeds that, you are logging, not stating.
 
-**Updated:** 2026-09-14 · **Phase:** Phase 2I In Flight (Issue #51) · **Health:** green
+**Updated:** 2026-09-14 · **Phase:** Phase 2I Remediation (PR #52, Issue #51) · **Health:** green
 
 ## Where we are
 
-Phase 2I (ADR-0008 Reasoning Subsystem Architecture, Issue #51) is authorized and active on `feature/ajmunna/phase-2i-reasoning-subsystem`:
-- Pre-implementation architecture gates successfully passed (B1, B2, B3, I1–I5 resolved).
-- Reasoning is structured as a stateless cognitive layer between Orchestration (ADR-0003), Knowledge (ADR-0006), Capability Intent (ADR-0001), and LLM Gateway (ADR-0002).
-- ADR-0002 contract compliance: consumes frozen `LLMRequest` / `LLMResponse` directly via `LLMGateway.complete()`.
-- Non-circular `cv_agent.canonical_v1` context canonicalization excluding `context_ref` from preimage.
-- Semantic string whitespace preserved; JSON formatting whitespace normalized.
-- 128-bit `DecisionId` (`dec-<32-hex>`) with content-derived replay identity.
-- Closed `EmpiricalComparator` with formal boundary semantics and non-generative `GroundingValidator`.
-- Closed recursive `JsonValue` domain ensuring deep defensive immutability.
-- ADR-0003 retains sole ownership of hop counter; Reasoning validates budget and fails closed.
-- Non-authoritative `ApprovalRecommendation` flags risk without duplicating approval authority.
-Baseline test suite stands at 356 passed, 0 warnings.
-All quality gates (Ruff check, format, Mypy on `cv_agent`, diff check) are green.
+Phase 2I (ADR-0008 Reasoning Subsystem Architecture, Issue #51, PR #52) remediation complete on `feature/ajmunna/phase-2i-reasoning-subsystem`:
+- **B1 closed payload:** restored `ReasoningOutputPayload` closed union on `ReasoningOutput` and narrowed `_parse_payload()` return types across all reasoning nodes.
+- **B2 NFC key collision fail-closed:** added collision detection on NFC normalization in `validate_and_freeze_json_domain`, preimage canonicalization, and evidence bounds.
+- **B3 content-bound context_ref:** enforced `context_ref == compute_context_ref(self)` in `ReasoningContext.__post_init__` with `ReasoningContext.create(...)` factory and tamper verification.
+- **Secondary 1:** `EvidenceRef` validates bound interval (`min <= max`).
+- **Secondary 2:** `GroundingValidator` strongly binds citation hash to referenced evidence SHA-256.
+- **Secondary 3:** `ReasoningContext` explicitly validates `schema_version == "1.0.0"`.
+- **Secondary 4:** `Hypothesis.confidence` explicitly rejects non-finite floats (NaN/inf).
+- **Secondary 5:** Reverted `.gitignore` to remove `uv.lock`.
+Full test suite stands at 397 passed (39 comprehensive adversarial reasoning tests).
+All quality gates (Ruff check, format, Mypy on `cv_agent` + tests, `git diff --check`) are green.
 
 ## In flight
 
 | Item | Issue | PR | State |
 |---|---|---|---|
-| Phase 2I — Reasoning Subsystem Architecture | #51 | — | In progress on `feature/ajmunna/phase-2i-reasoning-subsystem` |
+| Phase 2I — Reasoning Subsystem Architecture | #51 | #52 | Changes requested by PM; remediation complete locally; ready for push & CI |
 
 ## Next 3 actions
 
-1. Implement `cv_agent/reasoning/contracts.py`, `errors.py`, and `grounding.py`.
-2. Implement `cv_agent/reasoning/prompts.py`, `nodes.py`, and `__init__.py`.
-3. Author adversarial boundary test suite in `tests/test_reasoning_boundary.py` and run full CI quality gates.
+1. Commit remediation changes and push to `origin/feature/ajmunna/phase-2i-reasoning-subsystem`.
+2. Verify GitHub Actions CI matrix (Python 3.10–3.13) on PR #52.
+3. Submit remediation report to Official PM for second review and merge authorization.
 
 ## Blockers
 
-- None. Architecture authorized by Official PM.
+- None. PM adversarial review blockers B1–B3 and secondary findings remediated.
 
 ## Scope guard
 

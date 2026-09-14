@@ -12,7 +12,7 @@ import math
 import re
 import unicodedata
 import uuid
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from decimal import Decimal
 from enum import Enum
@@ -123,6 +123,10 @@ def validate_and_freeze_json_domain(val: Any) -> Any:
                     f"Dictionary key must be str, got {type(k).__name__}: {k!r}"
                 )
             norm_k = unicodedata.normalize("NFC", k)
+            if norm_k in frozen_mapping:
+                raise ValueError(
+                    f"Canonical key collision after NFC normalization: {k!r} collides with {norm_k!r}"
+                )
             frozen_mapping[norm_k] = validate_and_freeze_json_domain(v)
         return MappingProxyType(frozen_mapping)
     if isinstance(val, (list, tuple)):
@@ -150,14 +154,22 @@ class EvidenceRef:
         for k, v in self.bounds.items():
             if not isinstance(k, str):
                 raise TypeError(f"Metric bound key must be str: {k!r}")
+            norm_k = unicodedata.normalize("NFC", k)
+            if norm_k in norm_bounds:
+                raise ValueError(
+                    f"Canonical key collision after NFC normalization in evidence bounds: {k!r}"
+                )
             if not (isinstance(v, (list, tuple)) and len(v) == 2):
                 raise ValueError(
                     f"Metric bound for {k!r} must be a 2-tuple (min, max): {v!r}"
                 )
-            norm_bounds[unicodedata.normalize("NFC", k)] = (
-                _normalize_float(float(v[0])),
-                _normalize_float(float(v[1])),
-            )
+            min_val = _normalize_float(float(v[0]))
+            max_val = _normalize_float(float(v[1]))
+            if min_val > max_val:
+                raise ValueError(
+                    f"Invalid evidence bound interval for {k!r}: min ({min_val}) cannot exceed max ({max_val})"
+                )
+            norm_bounds[norm_k] = (min_val, max_val)
         object.__setattr__(self, "bounds", MappingProxyType(norm_bounds))
         object.__setattr__(self, "uri", unicodedata.normalize("NFC", self.uri))
         object.__setattr__(self, "title", unicodedata.normalize("NFC", self.title))
@@ -219,8 +231,10 @@ class Hypothesis:
     citation_refs: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        if not (0.0 <= self.confidence <= 1.0):
-            raise ValueError(f"Confidence must be in [0.0, 1.0], got {self.confidence}")
+        norm_conf = _normalize_float(float(self.confidence))
+        if not (0.0 <= norm_conf <= 1.0):
+            raise ValueError(f"Confidence must be in [0.0, 1.0], got {norm_conf}")
+        object.__setattr__(self, "confidence", norm_conf)
         object.__setattr__(
             self, "statement", unicodedata.normalize("NFC", self.statement)
         )
@@ -363,12 +377,22 @@ class StrategyRecommendation:
         object.__setattr__(self, "capability_intents", tuple(self.capability_intents))
 
 
+# --- Closed Reasoning Output Payload Union (Gate B1) ---
+
+ReasoningOutputPayload = (
+    ProblemCharacterization | BaselineSpec | DiagnosticReport | StrategyRecommendation
+)
+
+
 # --- Reasoning Context & Output (ADR-0008 §3.1) ---
 
 
 @dataclass(frozen=True)
 class ReasoningContext:
-    """Immutable input context provided by Orchestration to a ReasoningNode."""
+    """Immutable input context provided by Orchestration to a ReasoningNode.
+
+    Per Gate B3, context_ref MUST equal the digest computed from its canonical preimage.
+    """
 
     context_ref: str
     current_hop: int
@@ -379,9 +403,52 @@ class ReasoningContext:
     parameters: Mapping[str, JsonValue] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        if self.schema_version != "1.0.0":
+            raise ValueError(
+                f"Unsupported schema_version {self.schema_version!r}; supported version is '1.0.0'"
+            )
         object.__setattr__(self, "evidence_refs", tuple(self.evidence_refs))
         object.__setattr__(
             self, "parameters", validate_and_freeze_json_domain(self.parameters)
+        )
+
+        # Content binding verification (Gate B3)
+        expected_ref = compute_context_ref(self)
+        if self.context_ref != expected_ref:
+            raise ValueError(
+                f"context_ref mismatch: supplied {self.context_ref!r} does not match computed {expected_ref!r}"
+            )
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        current_hop: int,
+        max_hops: int,
+        trace_id: str,
+        schema_version: str = "1.0.0",
+        evidence_refs: tuple[EvidenceRef, ...] | Sequence[EvidenceRef] = (),
+        parameters: Mapping[str, JsonValue] | None = None,
+    ) -> ReasoningContext:
+        """Construct a ReasoningContext with its authoritative computed context_ref."""
+        norm_params = validate_and_freeze_json_domain(parameters or {})
+        norm_evidence = tuple(evidence_refs)
+        computed_ref = compute_context_ref_from_fields(
+            current_hop=current_hop,
+            max_hops=max_hops,
+            trace_id=trace_id,
+            schema_version=schema_version,
+            evidence_refs=norm_evidence,
+            parameters=norm_params,
+        )
+        return cls(
+            context_ref=computed_ref,
+            current_hop=current_hop,
+            max_hops=max_hops,
+            trace_id=trace_id,
+            schema_version=schema_version,
+            evidence_refs=norm_evidence,
+            parameters=norm_params,
         )
 
 
@@ -392,7 +459,7 @@ class ReasoningOutput:
     decision_id: DecisionId
     node_type: NodeType
     context_ref: str
-    payload: Any
+    payload: ReasoningOutputPayload
     capability_intents: tuple[CapabilityIntent, ...] = ()
     citations: tuple[CitationRef, ...] = ()
     empirical_claims: tuple[EmpiricalClaim, ...] = ()
@@ -401,6 +468,18 @@ class ReasoningOutput:
 
     def __post_init__(self) -> None:
         validate_decision_id(self.decision_id)
+        if not isinstance(
+            self.payload,
+            (
+                ProblemCharacterization,
+                BaselineSpec,
+                DiagnosticReport,
+                StrategyRecommendation,
+            ),
+        ):
+            raise TypeError(
+                f"ReasoningOutput payload must be an instance of ReasoningOutputPayload, got {type(self.payload).__name__}"
+            )
         object.__setattr__(self, "capability_intents", tuple(self.capability_intents))
         object.__setattr__(self, "citations", tuple(self.citations))
         object.__setattr__(self, "empirical_claims", tuple(self.empirical_claims))
@@ -422,24 +501,39 @@ def _to_canonical_json_value(val: Any) -> Any:
     if isinstance(val, float):
         return _normalize_float(val)
     if isinstance(val, Mapping):
-        return {
-            unicodedata.normalize("NFC", k): _to_canonical_json_value(v)
-            for k, v in sorted(
-                val.items(), key=lambda item: unicodedata.normalize("NFC", item[0])
-            )
-        }
+        canonical_mapping: dict[str, Any] = {}
+        for k, v in val.items():
+            if not isinstance(k, str):
+                raise TypeError(
+                    f"Dictionary key must be str, got {type(k).__name__}: {k!r}"
+                )
+            norm_k = unicodedata.normalize("NFC", k)
+            if norm_k in canonical_mapping:
+                raise ValueError(
+                    f"Canonical key collision after NFC normalization: {k!r} collides with {norm_k!r}"
+                )
+            canonical_mapping[norm_k] = _to_canonical_json_value(v)
+        return {k: canonical_mapping[k] for k in sorted(canonical_mapping.keys())}
     if isinstance(val, (list, tuple)):
         return [_to_canonical_json_value(item) for item in val]
     raise TypeError(f"Cannot canonicalize non-JSON value of type {type(val).__name__}")
 
 
-def canonicalize_context_preimage(context: ReasoningContext) -> bytes:
-    """Serialize the canonical preimage of a ReasoningContext into UTF-8 bytes.
+def canonicalize_preimage_fields(
+    *,
+    current_hop: int,
+    max_hops: int,
+    trace_id: str,
+    schema_version: str = "1.0.0",
+    evidence_refs: tuple[EvidenceRef, ...] | Sequence[EvidenceRef] = (),
+    parameters: Mapping[str, JsonValue] | None = None,
+) -> bytes:
+    """Serialize the canonical preimage of reasoning context fields into UTF-8 bytes.
 
     Per the Gate B2 resolution, `context_ref` is strictly excluded from the preimage
     to eliminate circular hashing dependency.
     """
-    sorted_evidence = sorted(context.evidence_refs, key=lambda r: (r.uri, r.sha256))
+    sorted_evidence = sorted(evidence_refs, key=lambda r: (r.uri, r.sha256))
     evidence_payload = [
         {
             "bounds": {
@@ -461,12 +555,12 @@ def canonicalize_context_preimage(context: ReasoningContext) -> bytes:
     ]
 
     preimage: dict[str, Any] = {
-        "current_hop": context.current_hop,
+        "current_hop": current_hop,
         "evidence_refs": evidence_payload,
-        "max_hops": context.max_hops,
-        "parameters": _to_canonical_json_value(context.parameters),
-        "schema_version": unicodedata.normalize("NFC", context.schema_version),
-        "trace_id": unicodedata.normalize("NFC", context.trace_id),
+        "max_hops": max_hops,
+        "parameters": _to_canonical_json_value(parameters or {}),
+        "schema_version": unicodedata.normalize("NFC", schema_version),
+        "trace_id": unicodedata.normalize("NFC", trace_id),
     }
 
     # Strict compact formatting without extraneous whitespace, sorted keys, NaN rejection
@@ -477,6 +571,40 @@ def canonicalize_context_preimage(context: ReasoningContext) -> bytes:
         ensure_ascii=False,
         allow_nan=False,
     ).encode("utf-8")
+
+
+def canonicalize_context_preimage(context: ReasoningContext) -> bytes:
+    """Serialize the canonical preimage of a ReasoningContext into UTF-8 bytes."""
+    return canonicalize_preimage_fields(
+        current_hop=context.current_hop,
+        max_hops=context.max_hops,
+        trace_id=context.trace_id,
+        schema_version=context.schema_version,
+        evidence_refs=context.evidence_refs,
+        parameters=context.parameters,
+    )
+
+
+def compute_context_ref_from_fields(
+    *,
+    current_hop: int,
+    max_hops: int,
+    trace_id: str,
+    schema_version: str = "1.0.0",
+    evidence_refs: tuple[EvidenceRef, ...] | Sequence[EvidenceRef] = (),
+    parameters: Mapping[str, JsonValue] | None = None,
+) -> str:
+    """Compute context_ref digest from preimage fields."""
+    return hashlib.sha256(
+        canonicalize_preimage_fields(
+            current_hop=current_hop,
+            max_hops=max_hops,
+            trace_id=trace_id,
+            schema_version=schema_version,
+            evidence_refs=evidence_refs,
+            parameters=parameters,
+        )
+    ).hexdigest()
 
 
 def compute_context_ref(context: ReasoningContext) -> str:

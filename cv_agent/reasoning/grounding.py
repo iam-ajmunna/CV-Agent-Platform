@@ -54,6 +54,12 @@ class GroundingValidator:
                 raise UnanchoredCitationError(
                     f"Citation {citation.citation_id!r} references unknown evidence URI: {citation.uri!r}"
                 )
+            evidence = evidence_by_uri[citation.uri]
+            if citation.sha256 != evidence.sha256:
+                raise UnanchoredCitationError(
+                    f"Citation {citation.citation_id!r} hash mismatch for URI {citation.uri!r}: "
+                    f"claimed {citation.sha256!r}, expected {evidence.sha256!r}"
+                )
 
         # 2. Enforce zero-citation fail-closed rule for empirical claims
         if len(output.citations) == 0 and len(output.empirical_claims) > 0:

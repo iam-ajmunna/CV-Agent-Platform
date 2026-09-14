@@ -37,6 +37,7 @@ from cv_agent.reasoning.contracts import (
     ProblemCharacterization,
     ReasoningContext,
     ReasoningOutput,
+    ReasoningOutputPayload,
     Reversibility,
     RiskLevel,
     StrategyRecommendation,
@@ -295,7 +296,11 @@ class ReasoningNode:
 
     def _parse_payload(
         self, raw_dict: dict[str, Any]
-    ) -> tuple[Any, tuple[CapabilityIntent, ...], ApprovalRecommendation | None]:
+    ) -> tuple[
+        ReasoningOutputPayload,
+        tuple[CapabilityIntent, ...],
+        ApprovalRecommendation | None,
+    ]:
         raise NotImplementedError
 
 
@@ -308,7 +313,11 @@ class ProblemFramingNode(ReasoningNode):
 
     def _parse_payload(
         self, raw_dict: dict[str, Any]
-    ) -> tuple[Any, tuple[CapabilityIntent, ...], ApprovalRecommendation | None]:
+    ) -> tuple[
+        ProblemCharacterization,
+        tuple[CapabilityIntent, ...],
+        ApprovalRecommendation | None,
+    ]:
         payload = ProblemCharacterization(
             task_type=raw_dict["task_type"],
             target_hardware=raw_dict["target_hardware"],
@@ -341,7 +350,9 @@ class BaselineSelectionNode(ReasoningNode):
 
     def _parse_payload(
         self, raw_dict: dict[str, Any]
-    ) -> tuple[Any, tuple[CapabilityIntent, ...], ApprovalRecommendation | None]:
+    ) -> tuple[
+        BaselineSpec, tuple[CapabilityIntent, ...], ApprovalRecommendation | None
+    ]:
         res = raw_dict["input_resolution"]
         payload = BaselineSpec(
             architecture=raw_dict["architecture"],
@@ -363,7 +374,9 @@ class DiagnosisNode(ReasoningNode):
 
     def _parse_payload(
         self, raw_dict: dict[str, Any]
-    ) -> tuple[Any, tuple[CapabilityIntent, ...], ApprovalRecommendation | None]:
+    ) -> tuple[
+        DiagnosticReport, tuple[CapabilityIntent, ...], ApprovalRecommendation | None
+    ]:
         hypotheses = tuple(
             Hypothesis(
                 hypothesis_id=h["hypothesis_id"],
@@ -391,7 +404,11 @@ class StrategyNode(ReasoningNode):
 
     def _parse_payload(
         self, raw_dict: dict[str, Any]
-    ) -> tuple[Any, tuple[CapabilityIntent, ...], ApprovalRecommendation | None]:
+    ) -> tuple[
+        StrategyRecommendation,
+        tuple[CapabilityIntent, ...],
+        ApprovalRecommendation | None,
+    ]:
         capability_intents = tuple(
             CapabilityIntent(
                 capability_id=CapabilityId(ci["capability_id"]),
