@@ -1445,3 +1445,38 @@ Remediated the remaining architectural boundary finding from the Official PM thi
 **Learned:** Architectural boundaries between orchestration and dataset subsystems must be absolute: one subsystem must never synthesize or approximate the security identities owned by another.
 
 **Left open:** Pushing remediation commit to `feature/ajmunna/phase-2j-dataset-subsystem` for PR #53 and awaiting final Official PM merge authorization.
+
+---
+
+## 2026-09-14 — Phase 2K ADR-0010 Training Subsystem Implementation (feature/ajmunna/phase-2k-training-subsystem)
+
+**Did:**
+Implemented the complete ADR-0010 Training Subsystem architecture in `cv_agent/training/` under Issue #54 following pre-implementation architecture approval (Issue #55):
+1. **Domain Models and Immutability (`cv_agent/training/contracts.py`, `types.py`, `errors.py`):**
+   - Immutable Pydantic v2 models (`TrainingPlan`, `OptimizerConfig`, `SchedulerConfig`, `LossComponentConfig`, `AugmentationConfig`, `ComputeRequirements`, `CostEstimate`, `TrainingTelemetryRecord`, `CheckpointManifest`, `TrainingEnvironmentRecord`, `TrainingJobRecord`, `RetentionPolicy`, `RetentionDecision`).
+   - Strong typing with `PlanId`, `TrainingJobId`, `CheckpointId`, `ApprovalId`, and closed enums (`TrainingPrecision`, `DistributedStrategy`, `TrainingJobStatus`, `FailureReason`, `CompletionReason`).
+   - Deep defensive immutability using `MappingProxyType` and finite float guards (`math.isfinite`).
+2. **Canonicalization & ADR-0003 Delegation (`cv_agent/training/canonicalization.py`):**
+   - Implemented `extract_training_operation_payload(plan)` and `compute_training_payload_hash(plan)` delegating to ADR-0003 `compute_payload_hash`.
+   - Zero local synthesis of operation versions, target identities, or ad-hoc payload hashes.
+3. **Pure Domain Lifecycle Validation (`cv_agent/training/state_machine.py`):**
+   - Decoupled from orchestration persistence: `validate_training_job_transition()` strictly validates the 11-state transition matrix without persisting state or competing with ADR-0003.
+4. **Deterministic Cost Estimation (`cv_agent/training/estimator.py`):**
+   - `DeterministicTrainingEstimator` computes exact training steps (integer ceiling), wall-clock duration, compute hours, and financial costs using `Decimal` arithmetic.
+5. **Online Telemetry & Divergence Monitoring (`cv_agent/training/monitor.py`):**
+   - `OnlineDivergenceMonitor` detects NaN/Inf loss, loss explosions (>3x baseline), and plateauing with early stopping semantics (`RUNNING -> COMPLETED` with `CompletionReason.EARLY_STOPPING`).
+6. **Logical Checkpoint Retention (`cv_agent/training/retention.py`):**
+   - `CheckpointRetentionManager` computes logical retention decisions preserving best and final checkpoints with deterministic tie-breaking, without performing physical storage deletion.
+7. **Secure Execution Launcher (`cv_agent/training/launcher.py`):**
+   - `DefaultTrainingLauncher` validates complete ADR-0003 approval security tuples (`ApprovalRequest` + `ApprovalDecision`), verifies ADR-0009 dataset manifest split disjointness (calibration split strictly isolated), enforces target ID consistency against approval resource scope, and delegates execution transport exclusively to ADR-0005 `ToolExecutor`.
+8. **Comprehensive Adversarial Boundary Tests (`tests/test_training_boundary.py`):**
+   - 22 passing tests covering all cross-ADR failure surfaces, tamper rejection, invalid state transitions, NaN loss abort, early stopping completion, split disjointness, and target ID consistency.
+   - Verified 455 total passing tests across the entire repository test suite.
+
+**Why:** `[P§10]`, `[P§11]`, `[P§13]`, `[P§15]`, `[P§21]`, `[P§22]`, `[P§24]`, `[P§25]`, `[P§29.2]`, `[P§29.4]`, `[P§29.8]`, `[P§34]`, and frozen ADR-0010. Enforces strict layer decoupling: training specifies and monitors domain execution while delegating orchestration authority to ADR-0003, dataset manifests to ADR-0009, and execution transport to ADR-0005.
+
+**Broke:** Nothing broken. 455 tests pass across 20 test modules; all quality gates, type checks, packaging, and security audits clean.
+
+**Learned:** Subsystem launchers must strictly consume the full security context from authoritative orchestration (ADR-0003) rather than manufacturing synthetic identity components or re-interpreting resource scopes.
+
+**Left open:** PR submission and Official PM adversarial review under Issue #54.

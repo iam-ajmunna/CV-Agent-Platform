@@ -3,28 +3,28 @@
 > **Rewritten** every session. Describes **now**, never history — history lives in
 > `JOURNAL.md`. Hard cap: 60 lines. If it exceeds that, you are logging, not stating.
 
-**Updated:** 2026-09-14 · **Phase:** Phase 2J Accepted · **Health:** green
+**Updated:** 2026-09-14 · **Phase:** Phase 2K Implementation · **Health:** green
 
 ## Where we are
 
-Phase 2J (ADR-0009 Dataset Subsystem Architecture) is implemented, adversarially reviewed, and merged to `main`:
-- PR #53 squash-merged as `24412a412b0fb47d9cc99549a07e9cc3d4e76ba9`.
-- Final Round-3 blocker closed: ADR-0003 OperationIdentity is externally supplied and mandatory; no local synthesis or ad-hoc canonical hash fallback remains.
-- Dataset subsystem provides frozen manifests, content-addressed storage, leakage auditing, split isolation, geometry validation, and atomic publication.
-- Full 433-test suite passed; all local quality/security gates and the Phase 2J CI matrix are green.
-- ADR-0003 remains authoritative for orchestration operation identity and canonicalization.
+Phase 2K (ADR-0010 Training Subsystem Architecture) implementation is complete on `feature/ajmunna/phase-2k-training-subsystem`:
+- Architecture gate approved under Issue #55; implementation tracked under Issue #54.
+- Subsystem implemented in `cv_agent/training/` with immutable Pydantic v2 domain models, pure domain lifecycle validator, deterministic cost estimator, online divergence monitor with explicit early stopping semantics, and logical checkpoint retention.
+- Strict cross-ADR boundaries enforced: ADR-0003 owns OperationIdentity, approval verification, and orchestration state authority; ADR-0009 owns dataset manifests; ADR-0005 owns execution transport.
+- Full 455-test suite passes (including 22 adversarial boundary tests); all quality gates, type checks, packaging, and security audits clean.
+- PR opened against `main` for Official PM adversarial review.
 
 ## In flight
 
 | Item | Issue | PR | State |
 |---|---|---|---|
-| Phase 2J | — | #53 | Accepted and merged |
+| Phase 2K | #54 | pending | Implemented, awaiting PM review |
 
 ## Next 3 actions
 
-1. Begin Phase 2K planning against the frozen ADR contracts.
-2. Preserve ADR-0009 ownership and cross-ADR boundaries during implementation.
-3. Continue main-only trunk governance with short-lived branches for future work.
+1. Submit PR for Issue #54 against `main`.
+2. Official PM adversarial review and CI execution on Python 3.10–3.13.
+3. Squash-merge to `main`, retire feature branch, and synchronize state ledgers for Phase 2K closure.
 
 ## Blockers
 
@@ -32,4 +32,4 @@ Phase 2J (ADR-0009 Dataset Subsystem Architecture) is implemented, adversarially
 
 ## Scope guard
 
-Dataset layer owns authoritative dataset identity, Git-tracked manifests in `.cv_agent/datasets/`, independent annotation manifests, content-addressed payload storage (`DatasetStore`), explicit split membership, and 5-point leakage auditing. It does not own workflow orchestration (ADR-0003), experiment ledgers (ADR-0004), physical subprocess execution (ADR-0005), cognitive dataset diagnosis (ADR-0008), or model training (ADR-0010).
+Training layer owns domain training specifications (`TrainingPlan`), execution cost estimation, online telemetry/divergence monitoring, domain lifecycle validation, and logical checkpoint retention. It does NOT own orchestration state/leases (ADR-0003), dataset storage/manifests (ADR-0009), physical transport execution (ADR-0005), experiment tracking ledgers (ADR-0004), or cognitive strategy (ADR-0008).
