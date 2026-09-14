@@ -1,265 +1,350 @@
 # ADR-0011: Evaluation Subsystem Architecture
 
-- **Status:** Accepted — Frozen
+- **Status:** Amended — Pending Second Architecture Review
 - **Date:** 2026-09-09
-- **Last Reviewed:** 2026-09-10
+- **Last Reviewed:** 2026-09-15
 - **Layer:** evaluation / empirical measurement
 - **Canon:** `[P§7]`, `[P§12]`, `[P§13]`, `[P§21]`, `[P§22]`, `[P§24]`, `[P§25]`, `[P§27]`, `[P§29.2]`, `[P§29.3]`, `[P§29.4]`, `[P§29.10]`, `[P§34]`
 - **Supersedes / Superseded by:** —
-- **Issue:** #6
+- **Issue:** #6; remediation gate #58
 - **Preceded by Decisions:** D-030 (ADR-0010 Training Subsystem), D-029 (ADR-0009 Dataset Subsystem), D-026 (ADR-0008 Reasoning Subsystem), D-025 (ADR-0007 Skills), D-023 (ADR-0005 Tools & MCP Boundary), D-021 (ADR-0004 Experiment Ledger), D-020 (ADR-0003 Orchestration & Approval), D-014 (Out-of-process GPU compute), D-022 (NVIDIA hardware inventory)
+
+> **Architecture gate:** This amendment is documentation-only. No runtime implementation in `cv_agent/evaluation/` is authorized until Issue #58 receives a second Official PM review with an APPROVED/FROZEN disposition.
 
 ## 1. Context
 
-In empirical computer vision engineering, "the agent must be measurement-driven" `[P§12]`. Modern computer vision systems succeed or fail on the rigor of their evaluation. Flawed, shallow, or ad-hoc evaluation produces false confidence, deploys brittle models, and wastes engineering cycles:
-1. **The Single-Metric Fallacy (`[P§12]`, `[P§29.4]`):** Evaluating only model accuracy (e.g. mAP or top-1 accuracy) without measuring systems performance creates deployability blindness. As established in `[P§12]`, "a model with 99% mAP is useless if the target Jetson can only process 2 FPS when the application requires 20 FPS." Model quality and runtime efficiency are co-equal dimensions of CV engineering.
-2. **Subjective Judgment vs. Deterministic Measurement (`[P§29.3]`):** An LLM asserting that a model "looks good" or predicting performance through conversational narrative is strictly prohibited. Claims of model performance must be backed by quantitative, reproducible measurement against explicit datasets.
-3. **The Baseline-First Invariant (`[P§29.2]`):** An evaluation result is scientifically meaningless in isolation. The agent must never claim that a model, architecture, or hyperparameter change improved performance without comparing against a quantitatively established baseline on an identical, immutable test split.
-4. **Diagnostic Depth Beyond Aggregate Metrics (`[P§27]`):** Reporting that a model achieved $72\%$ mAP is incomplete without understanding why $28\%$ failed. The system requires structured error analysis decomposing failures into physical phenomena: small objects, severe occlusion, optical blur, low illumination, class confusion, localization error, false positives, and dataset slice degradation `[P§27]`.
-5. **Execution and Lineage Integrity (`[P§25]`, `[P§26]`, ADR-0009, ADR-0010):** Evaluating unversioned checkpoints against volatile dataset directories voids experiment reproducibility. Evaluation must bind deterministically to exact `DatasetManifest` versions and model checkpoint content hashes.
-6. **Hardware Separation (`D-014`, `D-022`, ADR-0005):** Accurate latency, throughput, VRAM, and power benchmarking require running on representative physical hardware targets (e.g. NVIDIA Jetson, remote Linux GPU worker), not the local developer workstation.
+In empirical computer vision engineering, the agent must be measurement-driven. Evaluation must prevent false confidence, distinguish model quality from deployability, and provide reproducible evidence for every performance claim.
 
-This ADR establishes the architectural specification, interface contracts, lifecycle state machine, and operational invariants for the **Evaluation Subsystem**.
+The Evaluation Subsystem therefore provides deterministic empirical measurement while remaining strictly separated from cognitive reasoning, workflow orchestration, dataset authority, training, and physical execution transport.
 
-## 2. Responsibility (`[P§34]`)
+The principal risks addressed by this ADR are:
+1. **Single-metric evaluation:** accuracy without hardware performance can hide an undeployable model.
+2. **Subjective evaluation:** LLM narrative cannot substitute for quantitative measurement.
+3. **Baseline-free claims:** improvement claims require comparison against an authoritative, comparable baseline.
+4. **Shallow diagnostics:** aggregate metrics alone do not identify physical failure modes.
+5. **Lineage loss:** evaluation against unversioned datasets or transient model weights is non-reproducible.
+6. **Hardware misrepresentation:** target latency and throughput must be measured on the declared execution target, not a developer workstation.
+7. **Authority duplication:** Evaluation must not create a second approval, operation-identity, execution-lifecycle, lease/fencing, or recovery system alongside ADR-0003.
 
-- **This owns:**
-  - The structured, immutable evaluation specification (`EvaluationPlan`).
-  - Strict binding to immutable dataset versions (`DatasetId`, `DatasetVersion`, `split_membership` partition name) governed by ADR-0009.
-  - Strict binding to evaluated model artifacts (`CheckpointId`, `weights_hash`, model architecture) governed by ADR-0010.
-  - The formal decoupling and co-equal measurement of **Model Quality Metrics** (accuracy, precision, recall, F1, mAP, IoU, MOTA) and **Systems Performance Metrics** (latency p50/p90/p95/p99, throughput FPS, VRAM allocation, CPU/GPU utilization, thermal and power behavior) `[P§12]`.
-  - Extensible, versioned metric definitions (`MetricDefinition`) across CV tasks without hard-coding task-specific logic into the core agent loop.
-  - Benchmark configuration contracts (`BenchmarkConfiguration`) defining warmup cycles, measurement iterations, batch sizes, input dimensions, and precision modes.
-  - The evaluation execution dispatch abstraction (`EvaluationRunner`), translating an `EvaluationPlan` into tool invocations and delegating transport to ADR-0005.
-  - The mandatory baseline comparison engine (`BaselineComparisonResult`), calculating metric deltas, detecting regressions, and validating statistical significance `[P§29.2]`.
-  - Structured diagnostic error analysis (`ErrorAnalysisRecord`), cataloguing false positives, false negatives, localization failures, class confusion matrices, and dataset slice performance `[P§27]`.
-  - Comprehensive evaluation report generation (`EvaluationReport`).
-  - Immutable evaluation reproducibility environment packaging (`EvaluationEnvironmentRecord`) per `[P§25]`.
-  - Delegation of compute-intensive benchmarking approval checks to `docs/APPROVALS.md`.
-- **This does NOT own:**
-  - Cognitive hypothesis formulation, causal diagnosis of failures, or proposing next experiment strategies → Reasoning Subsystem (ADR-0008) `[P§4]`, `[P§27]`;
-  - Workflow graph orchestration, human approval interrupt handling, or checkpoint persistence → Orchestration Subsystem (ADR-0003) `[P§21]`, `[P§24]`;
-  - Authoritative persistence of historical experiment ledger rows in SQLite (`experiments.sqlite`) → Project Memory & Experiment Ledger (ADR-0004) `[P§25]`;
-  - Low-level subprocess spawning, SSH transport, remote environment execution, or MCP socket handling → Tools & MCP Execution Boundary (ADR-0005) `[P§22]`;
-  - Dataset payload fetching, manifest schema authority, or split leakage verification → Dataset Subsystem (ADR-0009) `[P§26]`;
-  - Model training, loss optimization, learning rate schedules, or checkpoint creation → Training Subsystem (ADR-0010) `[P§10]`;
-  - Model optimization (TensorRT compilation, pruning, quantization, calibration) → future Optimization / Deployment Subsystem (ADR-0012) `[P§14]`;
-  - Post-deployment live telemetry, data drift detection, or production monitoring → future Monitoring Subsystem (ADR-0013) `[P§28]`;
-  - Capability taxonomy authority or tool catalog registration → Capability Model (ADR-0001) `[P§23]`.
-- **Why this responsibility does not belong elsewhere:**
-  Conflating evaluation with training (ADR-0010) creates conflict of interest, encourages optimistic evaluation on validation splits, and obscures independent test benchmarking. Conflating evaluation with Reasoning (ADR-0008) tempts the agent to substitute qualitative LLM opinion for deterministic empirical measurement. Conflating evaluation with generic tools (ADR-0005) loses structured CV semantics (confusion matrices, mAP thresholds, slice breakdowns, baseline deltas). The Evaluation Subsystem isolates objective empirical measurement into an authoritative, reproducible layer.
+## 2. Responsibility and Authority Boundaries
+
+### 2.1 Evaluation owns
+
+- Immutable evaluation-domain specification (`EvaluationPlan`).
+- Dataset and model binding validation using authoritative ADR-0009 and ADR-0010 references.
+- Versioned task-specific metric definitions and deterministic metric calculation semantics.
+- Systems benchmark configuration and result semantics.
+- Baseline comparison and statistical-comparison semantics.
+- Structured quantitative error analysis.
+- Reproducibility environment metadata.
+- Evaluation result/report construction and serialization.
+- Translation of evaluation semantics into ADR-0005 `ToolInvocation` inputs.
+
+### 2.2 Evaluation does NOT own
+
+- **ADR-0001:** capability taxonomy, stable capability/tool identities, or tool catalog authority.
+- **ADR-0002:** LLM inference, provider selection, prompts, provider SDK types, or model execution.
+- **ADR-0003:** operation identity authority, canonical operation payload hashing authority, approval authority, workflow lifecycle, leases, fencing, checkpoint persistence, external-operation state, recovery/reconciliation, or authoritative execution lineage.
+- **ADR-0004:** authoritative experiment-ledger persistence in `experiments.sqlite` or baseline-record authority.
+- **ADR-0005:** subprocess/SSH/MCP transport, physical process management, target registry authority, or credential handling.
+- **ADR-0006:** knowledge/RAG retrieval and provenance authority.
+- **ADR-0007:** skill discovery, skill lifecycle, or capability-resolution authority.
+- **ADR-0008:** hypothesis formulation, causal diagnosis, or next-strategy selection.
+- **ADR-0009:** dataset manifest schema authority, payload storage, split leakage verification, or dataset identity authority.
+- **ADR-0010:** training, optimization of training parameters, checkpoint creation, or checkpoint identity authority.
+- Future ADR-0012/0013: model optimization/deployment transformation and live production monitoring respectively.
+
+No Evaluation contract may imply authority over any of the above.
 
 ## 3. Decision
 
-We establish an explicit **Evaluation Subsystem Architecture** centered on typed evaluation plans, strict dataset and model bindings, co-equal model quality and systems benchmarking, mandatory baseline comparison, structured error analysis, and clean delegation to ADR-0005 and ADR-0004.
+The Evaluation Subsystem is a stateless domain-measurement layer around immutable evaluation specifications. It consumes authoritative identities and evidence from prior subsystems, performs deterministic calculations, delegates physical execution through ADR-0005, and emits immutable results for ADR-0004 persistence and ADR-0008 reasoning consumption.
 
 ```text
-               ADR-0008 Reasoning Subsystem
-               (Evaluation Intent & Strategy)
-                            │
-                            │ specifies target hypothesis
-                            ▼
-             ┌─────────────────────────────┐
-             │       EvaluationPlan        │
-             │ (Model Artifact, Dataset,   │
-             │  Metrics, Benchmarks, Base) │
-             └──────────────┬──────────────┘
-                            │
-                            │ 1. validate bindings & cost
-                            ▼
-             ┌─────────────────────────────┐
-             │      EvaluationRunner       │
-             │  (Dispatch & Coordination)  │
-             └──────────────┬──────────────┘
-                            │
-                            │ 2. delegates physical execution
-                            ▼
-             ┌─────────────────────────────┐
-             │    ADR-0005 Tool / MCP      │
-             │     Execution Boundary      │
-             └──────────────┬──────────────┘
-                            │
-       ┌────────────────────┼────────────────────┐
-       ▼                    ▼                    ▼
-   LOCAL Target       REMOTE Target        MCP Target
-  (Inspection/Fast)  (NVIDIA GPU Worker)  (Edge / Jetson)
-       │                    │                    │
-       └────────────────────┼────────────────────┘
-                            │
-                            │ raw metrics, traces & error cases
-                            ▼
-             ┌─────────────────────────────┐
-             │   Analysis & Calculation    │
-             │ ┌─────────────────────────┐ │
-             │ │ MetricCalculator        │ │
-             │ │ BenchmarkRunner         │ │
-             │ │ ErrorAnalyzer           │ │
-             │ └─────────────────────────┘ │
-             └──────────────┬──────────────┘
-                            │
-                            │ 3. produces unified result
-                            ▼
-             ┌─────────────────────────────┐
-             │      EvaluationResult       │
-             │  ├── MetricResults          │
-             │  ├── BenchmarkResults       │
-             │  ├── BaselineComparison     │
-             │  └── ErrorAnalysisRecord    │
-             └──────────────┬──────────────┘
-                            │
-              ┌─────────────┴─────────────┐
-              ▼                           ▼
-┌───────────────────────────┐ ┌───────────────────────────┐
-│ ADR-0004 Project Memory   │ │ ADR-0008 Reasoning        │
-│ (Immutable SQLite Ledger) │ │ (ExperimentDiagnosisNode) │
-└───────────────────────────┘ └───────────────────────────┘
+ADR-0008 Reasoning
+  evaluation intent / hypothesis / baseline intent
+             │
+             ▼
+      EvaluationPlan
+             │
+             │ authoritative validation + ADR-0003 approval context
+             ▼
+      EvaluationRunner
+             │
+             ├──────────────► MetricCalculator
+             │
+             ├──────────────► BenchmarkRunner
+             │
+             └──────────────► ErrorAnalyzer
+             │
+             ▼
+      ADR-0005 ToolExecutor
+             │
+             ▼
+   LOCAL / REMOTE / MCP target
+             │
+             ▼
+      empirical outputs
+             │
+             ▼
+      EvaluationResult
+        │             │
+        ▼             ▼
+ ADR-0004 Ledger   ADR-0008 Reasoning
 ```
 
-### 3.1. Reasoning vs. Evaluation Boundary (Hypothesis vs. Measurement)
+### 3.1 Reasoning boundary: hypothesis versus measurement
 
-Consistent with ADR-0008, the boundary between cognitive reasoning and the evaluation subsystem is strictly maintained:
-- **Reasoning Subsystem (ADR-0008):** Proposes the evaluation intent, selects which baseline to measure against, and hypothesizes potential weaknesses (e.g. "Evaluate whether fine-tuning improved recall on night-time cameras without increasing inference latency beyond the 30ms budget").
-- **Evaluation Subsystem (ADR-0011):** Formulates the rigorous `EvaluationPlan`, fetches test split items via ADR-0009, runs deterministic inference via ADR-0005, calculates mathematical metric values, executes hardware benchmarks, performs slice-level error analysis, and compiles an objective `EvaluationResult`.
-- **Reasoning analyzes the results:** After evaluation completes, Reasoning ingests the structured `ErrorAnalysisRecord` and `BaselineComparisonResult` to diagnose root causes and formulate the next iteration `[P§27]`. Reasoning never overrides, invents, or subjectively alters empirical metric outputs.
+ADR-0008 may propose an evaluation intent and hypothesis. ADR-0011 turns that intent into a rigorous `EvaluationPlan`, executes/analyses measurements, and reports empirical results. Reasoning may diagnose the returned evidence and propose subsequent strategies, but cannot alter, invent, or override measured values.
 
-### 3.2. Decoupling Model Quality from Systems Performance (`[P§12]`)
+### 3.2 Model-quality and systems-performance dimensions
 
-Evaluation explicitly separates and treats as co-equal two distinct measurement dimensions:
-1. **Model Quality Metrics (`MetricResult`):** Measures task-specific mathematical fidelity against ground truth annotations on a frozen dataset split:
-   - Object Detection: $mAP_{50}$, $mAP_{50:95}$, $AP_{\text{small}}$, $AP_{\text{medium}}$, $AP_{\text{large}}$, Precision, Recall, F1 score.
-   - Classification: Top-1 accuracy, Top-5 accuracy, Precision, Recall, F1, AUROC, confusion matrix.
-   - Semantic / Instance Segmentation: Mean IoU (mIoU), per-class IoU, Dice coefficient, boundary F1.
-   - Multi-Object Tracking: MOTA, MOTP, IDF1, HOTA, ID switches, track fragmentation.
-2. **Systems Performance Metrics (`BenchmarkResult`):** Measures runtime efficiency and hardware resource consumption on a target accelerator (`[P§13]`):
-   - Latency: End-to-end and pre/infer/post latency percentiles ($p_{50}, p_{90}, p_{95}, p_{99}$, min, max).
-   - Throughput: Sustained frames per second (FPS) at specified batch sizes.
-   - Memory: Peak VRAM allocated (GB), system RAM usage.
-   - Compute: GPU engine utilization %, CPU utilization %.
-   - Power & Thermal: Average watts consumed, thermal throttling flags (where supported on Jetson/NVIDIA targets).
+Evaluation treats model quality and systems performance as distinct, co-equal dimensions.
 
-A candidate model is only viable if it simultaneously satisfies the project's quality thresholds **and** hardware operational budgets `[P§12]`, `[P§29.4]`.
+**Model quality** may include task-specific measures such as mAP, precision, recall, F1, IoU, AUROC, MOTA, MOTP, IDF1, or HOTA.
 
-### 3.3. Deterministic Dataset and Model Artifact Binding
+**Systems performance** may include latency percentiles, throughput, VRAM/RAM consumption, CPU/GPU utilization, power, and thermal behavior.
 
-To guarantee total reproducibility and prevent evaluation leakage `[P§25]`, `[P§26]`:
-- **Dataset Binding (`EvaluationDatasetBinding`):** Evaluation strictly binds to an authoritative `DatasetId` and `DatasetVersion` governed by ADR-0009. The binding records the `dataset_manifest_hash` and the specific split partition (defaulting to `test`, or a documented `val` partition). Evaluation on unversioned or ad-hoc data directories is rejected.
-- **Model Binding (`ModelArtifactReference`):** The evaluated model must be explicitly referenced by its `CheckpointId`, architecture name, weights content hash (`ContentHash` via SHA-256), and precision format. Evaluating arbitrary in-memory models without a persisted checkpoint is disallowed.
+A deployability recommendation must consider both dimensions when a systems benchmark is required by the evaluation plan. Missing required on-target system evidence makes a deployability claim inadmissible.
 
-### 3.4. Extensible Task-Agnostic Metric System
+### 3.3 Dataset binding and verification
 
-Rather than hard-coding CV metrics into a rigid conditional tree, the subsystem defines a declarative `MetricDefinition` contract:
-- Each metric specifies: `metric_id`, `name`, `task_type` (`detection`, `classification`, `segmentation`, `tracking`), `version`, parameters (e.g. IoU thresholds `0.5:0.95:0.05`), and whether higher values are better.
-- Metrics are calculated by specialized, stateless `MetricCalculator` implementations dispatched based on `task_type`.
-- Standardized `MetricResult` records store aggregate scalar values, per-class breakdowns, threshold sweeps (PR curves, ROC curves), and metadata.
+`EvaluationDatasetBinding` consumes an authoritative ADR-0009 `DatasetId`, `DatasetVersion`, manifest/root checksum, and split identifier. Evaluation must verify rather than merely trust these values:
 
-### 3.5. Systems Benchmarking Contract (`BenchmarkConfiguration`, `BenchmarkResult`)
+1. Resolve the referenced manifest through the ADR-0009 authority.
+2. Verify manifest identity (`dataset_id`, canonical version) and exact `payload_root_checksum`.
+3. Verify the requested split exists and its membership is authoritative.
+4. Reject unversioned directories, caller-supplied substitute manifests, checksum mismatches, traversal, or split leakage.
+5. `calibration` is not a normal evaluation split. It is rejected unless the plan explicitly declares a calibration/PTQ validation purpose governed by the relevant future optimization contract.
 
-Systems benchmarking is conducted under controlled, reproducible conditions to eliminate measurement noise:
-1. **Warmup Protocol:** Benchmarking mandates a configurable number of warmup iterations (default $\ge 10$ iterations) to initialize CUDA contexts, stabilize dynamic clocks, and eliminate cold-start transients.
-2. **Repetition Count:** Timing measurements must be collected over $N \ge 100$ timed runs using hardware-synchronized timers (e.g. `cudaEventRecord` / CUDA event synchronization, not host wall-clock for asynchronous CUDA queues).
-3. **Execution Target Binding (`[P§13]`, `D-014`, `D-022`):** Benchmarks must execute on the declared target environment (e.g. remote Linux workstation with RTX 4090, or NVIDIA Jetson AGX Orin). Benchmarking Jetson latency on a macOS workstation is strictly prohibited.
-4. **Configuration Sweeps:** Supports benchmarking across varying batch sizes ($1, 2, 4, 8, 16$) and precision modes (`fp32`, `fp16_amp`, `int8`).
+Evaluation does not implement a second dataset-manifest authority.
 
-### 3.6. Mandatory Baseline Comparison Invariant (`[P§29.2]`, `[P§29.3]`)
+### 3.4 Model artifact binding and verification
 
-Per the core project philosophy:
-- **Baseline Requirement:** Every evaluation plan should link to a recognized `baseline_experiment_id`.
-- **`BaselineComparisonResult`:** The subsystem automatically computes:
-  $$\Delta_{\text{metric}} = \text{Metric}_{\text{candidate}} - \text{Metric}_{\text{baseline}}$$
-  $$\%_{\text{change}} = \frac{\Delta_{\text{metric}}}{\text{Metric}_{\text{baseline}}} \times 100$$
-- **Regression Detection:** The comparison flags regressions across both quality metrics and systems metrics. If quality increases by $+1.2\%$ mAP but latency degrades by $+45\%$, the comparison records an explicit Pareto tradeoff notice for downstream reasoning.
-- **Unsubstantiated Claim Prevention:** The agent core will reject any automated claim of improvement that lacks an empirical `BaselineComparisonResult`.
+`ModelArtifactReference` consumes an authoritative ADR-0010 checkpoint reference. Evaluation must verify:
 
-### 3.7. Diagnostic Error Analysis Architecture (`[P§27]`)
+1. The checkpoint identity exists in the authoritative checkpoint/experiment lineage.
+2. The resolved checkpoint manifest identifies the same `CheckpointId`.
+3. The resolved content hash exactly matches the authoritative `weights_hash`.
+4. The resolved artifact URI is permitted by the storage/execution boundary and uses an allowed explicit scheme (`file://`, `s3://`, or `gcs://`); no arbitrary local path or inferred URI is accepted.
+5. Architecture, precision, and input-resolution metadata are consistent with the authoritative checkpoint metadata.
 
-Evaluation produces structured, empirical error diagnostic records (`ErrorAnalysisRecord`) rather than leaving error inspection to manual human effort:
-- **False Positive & False Negative Indices:** Content hashes or item indices of false positives and missed ground-truth instances.
-- **Localization Error vs. Classification Error:** Distinguishing bounding box / mask misalignment from miscategorization.
-- **Class Confusion Matrix:** Normalized class-to-class confusion mapping.
-- **Dataset Slice Performance:** Metric breakdowns across predefined dataset slices (e.g. camera location, time-of-day, object scale, occlusion level) identified in the ADR-0009 manifest.
-- **Confidence Calibration:** Expected Calibration Error (ECE) and confidence histogram distribution to detect overconfident misclassifications.
-- **Handoff to Reasoning:** The `ErrorAnalysisRecord` is directly consumed by ADR-0008 (`ExperimentDiagnosisNode`), enabling evidence-grounded hypotheses for targeted remediation.
+Transient in-memory weights and independently invented hash/URI pairs are not valid evaluation artifacts.
 
-### 3.8. Evaluation Execution Delegation via ADR-0005
+### 3.5 ADR-0003 operation identity and approval authority
 
-The evaluation subsystem manages evaluation semantics, not process management or transport protocols:
-- `EvaluationRunner` coordinates the preparation of test data slices, model checkpoints, and evaluation configuration.
-- It dispatches evaluation jobs through the **ADR-0005 Tool and MCP Execution Boundary** using appropriate `ToolId` tokens and `ExecutionTarget` bindings (`REMOTE` or `MCP_ENDPOINT`).
-- For long-running benchmarks or large-scale evaluation sweeps, ADR-0005 returns an `ActiveJobHandoff`, allowing ADR-0003 (Orchestration) to monitor progress asynchronously.
+ADR-0003 is the sole authority for operation identity, canonical payload hashing, approval, lifecycle, leases/fencing, and recovery.
 
-```text
-EvaluationPlan
-    ↓
-EvaluationRunner (evaluation semantics, test slice prep, metric aggregation)
-    ↓
-ADR-0005 Tool / Execution Boundary (SSH transport, container execution, process security)
-    ↓
-LOCAL / REMOTE / MCP_ENDPOINT (physical hardware target)
-```
+`EvaluationRunner.execute()` therefore consumes external authoritative values:
 
-### 3.9. Approval and Compute Cost Governance (`docs/APPROVALS.md`, `[P§24]`)
+- `operation_identity: OperationIdentity`
+- `approval_request: ApprovalRequest`
+- `approval_decision: ApprovalDecision`
+- `tool_executor: ToolExecutor`
 
-Evaluation operations are governed by `docs/APPROVALS.md`:
-- Standard evaluation on frozen validation or test splits is typically an analytical inspection action.
-- However, **large-scale profiling sweeps** (e.g. extensive multi-hour latency profiling across multiple hardware targets or shared cluster resources) fall under the `notify + proceed` or explicit approval gate per `docs/APPROVALS.md`.
-- ADR-0011 checks whether a benchmark plan exceeds configured duration/cost thresholds and delegates policy enforcement to Orchestration (ADR-0003). It does not create a parallel approval system.
+Evaluation may construct only its **functional operation payload** through:
 
-### 3.10. Full Reproducibility Contract (`EvaluationEnvironmentRecord`, `[P§25]`)
+`extract_evaluation_operation_payload(plan: EvaluationPlan) -> Mapping[str, Any]`
 
-Per `[P§25]`, every evaluation outcome compiles an immutable `EvaluationEnvironmentRecord`:
-- Git commit SHA and workspace cleanliness status.
-- Exact dataset manifest hash (`dataset_manifest_hash`).
-- Model checkpoint content hash (`weights_hash`).
-- Evaluation configuration parameters and metric definitions.
-- Random seeds (if stochastic test-time augmentation or sampling is applied).
-- Python, PyTorch, CUDA, and driver versions.
-- Target device identity (GPU model, compute capability, driver version, memory capacity).
+The payload is passed to ADR-0003 `compute_payload_hash()`. Evaluation MUST NOT synthesize:
 
-### 3.11. Boundaries with Future Subsystems
+- operation IDs;
+- operation versions;
+- target identities;
+- canonical payload hashes;
+- approval IDs/tokens;
+- approval status;
+- policy versions;
+- lease/fencing state.
 
-- **Future Optimization / Deployment Subsystem (ADR-0012):** ADR-0012 will own the transformation of models (TensorRT INT8 quantization, pruning, engine export). ADR-0011 will be invoked by ADR-0012 to evaluate the resulting compiled engine against the original unquantized baseline to verify that quantization did not cause unacceptable accuracy degradation.
-- **Future Monitoring Subsystem (ADR-0013):** ADR-0013 will monitor streaming production camera data for data drift and operational health. ADR-0011 provides the offline gold-standard benchmark against which production behavior is verified.
+Before dispatch, the runner verifies that the externally supplied operation identity and approval evidence agree on operation ID, operation version, canonical payload hash, target/resource scope, request identity, and approval decision. Any mismatch fails closed.
 
-### 3.12. Required Architectural Invariants
+Transient execution tokens such as `execution_id`, lease identifiers, attempt identifiers, and transport job handles are excluded from the functional payload hash preimage and are never treated as operation identity.
 
-The Evaluation Subsystem strictly enforces twelve non-negotiable architectural invariants:
-1. **Immutable Dataset Versioning (`[P§26]`, ADR-0009):** Evaluation references an authoritative, immutable `DatasetManifest` version and content hash. Evaluating implicit "current" or unversioned data directories is strictly prohibited.
-2. **Immutable Model Artifacts (`[P§25]`, ADR-0010):** Evaluation binds to a specific model checkpoint identified by `CheckpointId` and SHA-256 `ContentHash`. Evaluating transient in-memory weights is barred.
-3. **Mandatory Baseline Reference (`[P§29.2]`, `[P§29.3]`):** Every evaluation plan declares a baseline reference. Claims such as "model improved" without quantitative empirical comparison are architecturally barred. *Exception:* a root baseline evaluation — one explicitly designated as the active baseline via `ADR-0004.ExperimentLedger.set_active_baseline()` — may set `baseline_experiment_id = None` to indicate it is itself the reference point. All other evaluation plans MUST provide a non-null `baseline_experiment_id` resolving to an existing completed experiment in the ADR-0004 ledger.
-4. **Versioned Metric Definitions:** Metric definitions are declarative, versioned, and parameter-explicit (`MetricDefinition`), avoiding monolithic conditional evaluation scripts.
-5. **Separation of Quality and Systems Metrics (`[P§12]`):** Model quality metrics (`MetricResult`) and systems performance metrics (`BenchmarkResult`) remain distinct, co-equal measurement dimensions.
-6. **Hardware Execution Identification (`[P§13]`, `[P§29.4]`, `D-014`, `D-022`):** All systems benchmarks explicitly record their physical hardware target, device name, and execution environment.
-7. **Complete Reproducibility (`[P§25]`):** Every evaluation result bundles an immutable `EvaluationEnvironmentRecord` (git commit SHA, dataset manifest hash, weights hash, metric versions, random seeds, runtime/CUDA environment).
-8. **Structured Error Analysis (`[P§27]`):** Error analysis (`ErrorAnalysisRecord`) must be quantitative, structured, and evidence-based (confusion matrices, false positive/negative hashes, slice breakdowns), not subjective narrative.
-9. **No Physical Transport Ownership:** Evaluation defines evaluation semantics; physical process transport is delegated entirely to ADR-0005 (`LOCAL`, `REMOTE`, `MCP_ENDPOINT`).
-10. **No Experiment Persistence Ownership:** Evaluation produces immutable evaluation records; authoritative database persistence is owned exclusively by ADR-0004 (`experiments.sqlite`).
-11. **Anti-LLM Narrative Invariant (`[P§29.3]`):** Subjective LLM judgment or conversational narrative cannot substitute for deterministic quantitative metrics.
-12. **Decoupled Reasoning Consumption:** Evaluation results are structured for ingestion by Reasoning (ADR-0008 `ExperimentDiagnosisNode`) without coupling evaluation execution to reasoning prompts or cognitive graphs.
+### 3.6 No competing execution lifecycle
 
-## 4. Proposed Interface Contracts (Phase 2 Implementation Target)
+ADR-0011 owns no execution lifecycle state machine. The former `EvaluationStatus` and `EvaluationExecution.status` concepts are removed.
 
-*(Note: These interfaces represent the proposed type contracts for Phase 2 implementation. They do not exist in the repository today).*
+ADR-0003 exclusively owns persisted lifecycle state, including running/terminal states, leases, fencing, external-operation state, recovery, reconciliation, checkpointing, and authoritative state transitions.
+
+Evaluation may expose pure domain semantics such as `EvaluationVerdict`:
+
+- `PASSED`
+- `FAILED_QUALITY`
+- `FAILED_SYSTEMS`
+- `INCONCLUSIVE`
+
+`EvaluationVerdict` is a measurement finding, not a workflow state, and MUST NOT be persisted as an alternative orchestration lifecycle.
+
+### 3.7 Target selection and no local target synthesis
+
+`EvaluationPlan` contains no `compute_target_id` and no synthetic default target.
+
+The execution target is selected only from:
+1. an authoritative `target:<id>` resource scope supplied by ADR-0003 approval; or
+2. an explicit `TargetId` supplied by the caller and verified to be within the approved resource scope.
+
+Optional hardware requirements may constrain candidate selection:
+
+- `required_hardware_class`
+- `min_cuda_compute_capability`
+- other declarative hardware requirements defined by the target contract.
+
+If no authorized compatible target exists, execution fails closed. Evaluation never creates, invents, or silently substitutes a target.
+
+### 3.8 ADR-0005 execution and asynchronous handoff
+
+Evaluation owns evaluation semantics, not physical transport. All execution is dispatched through ADR-0005 `ToolExecutor` using an authoritative `ToolId` and `TargetId`.
+
+For long-running evaluation jobs, ADR-0005 may return an `ActiveJobHandoff`. The handoff is linked to the authoritative ADR-0003 external-operation identity and job lineage. ADR-0003 owns:
+
+- asynchronous polling;
+- lease renewal and fencing;
+- external-operation state;
+- recovery and reconciliation;
+- terminal workflow transitions.
+
+`ActiveJobHandoff.is_expired()` is a handoff/TTL condition, **not** evidence that the evaluation failed or was never submitted. Evaluation must not create a second UNKNOWN/recovery state machine.
+
+A stateless `parse_evaluation_result()` function may parse a successful authoritative tool result into immutable domain records. Parsing cannot mutate orchestration state or declare an external operation complete independently of ADR-0003.
+
+### 3.9 Baseline comparison and statistical significance
+
+Every non-root evaluation MUST identify an existing completed ADR-0004 baseline experiment with a comparable evaluation record. A root baseline may explicitly use `baseline_experiment_id = None` only when ADR-0004 has designated that experiment as the active baseline.
+
+Comparability requires, at minimum:
+
+- identical authoritative dataset manifest identity and evaluated split;
+- compatible metric definition IDs/versions and parameters;
+- compatible task semantics;
+- compatible model-output semantics;
+- compatible benchmark target/configuration when comparing systems metrics;
+- valid completed baseline evidence.
+
+`BaselineComparisonResult` records deterministic deltas and statistical evidence. Percentage change is defined only when the baseline denominator is non-zero; otherwise the percentage field is unavailable rather than fabricated.
+
+Supported statistical methods are explicitly closed:
+
+- `PAIRED_T_TEST`
+- `WILCOXON_SIGNED_RANK`
+- `BOOTSTRAP_RESAMPLING`
+- `MCNEMAR_TEST`
+
+Method selection is metric/data-type specific and recorded with its version and parameters. The implementation must define deterministic seeds/resampling rules where stochastic resampling is used.
+
+For every significance-bearing comparison, the result records:
+
+- `test_type`
+- `test_version`
+- `sample_count`
+- `p_value`
+- `confidence_level`
+- confidence interval where applicable
+- `statistically_significant`
+- metric delta(s)
+- comparable baseline/candidate experiment identities
+- the evidence identity used for the comparison.
+
+Invalid, missing, incomplete, or incomparable baseline evidence fails closed. A summary string cannot establish statistical significance.
+
+### 3.10 Structured error analysis
+
+`ErrorAnalysisRecord` is quantitative and evidence-based. It may include false-positive/false-negative content hashes, localization/classification error counts, confusion matrices, slice-level performance, and representative failure evidence. It is consumed by ADR-0008 as evidence, not as a free-form narrative authority.
+
+### 3.11 Reproducibility and canonicalization
+
+Evaluation contracts use recursive defensive immutability aligned with the project's existing canonicalization discipline:
+
+- nested mappings are recursively converted to immutable mapping proxies;
+- lists/tuples become immutable tuples;
+- sets become frozensets;
+- arbitrary mutable nested objects are rejected or normalized before contract publication.
+
+Canonical functional payload serialization uses the established canonicalization rules:
+
+- UTF-8 JSON representation;
+- Unicode NFC normalization for strings;
+- deterministic Unicode-code-point key ordering;
+- `None` represented as JSON `null`;
+- finite numeric values only;
+- `-0.0` normalized to `0.0`;
+- shortest round-trip floating representation (David Gay/IEEE-754-compatible shortest representation);
+- deterministic separators and no non-finite JSON values.
+
+The resulting functional payload is hashed only by ADR-0003 `compute_payload_hash()`. ADR-0011 does not create a competing operation-identity hash algorithm.
+
+### 3.12 Metric-result validity
+
+All externally produced numeric results are fail-closed:
+
+- every float must satisfy `math.isfinite()`;
+- probability/rate metrics such as mAP, precision, recall, and F1 are within `[0.0, 1.0]`;
+- confidence interval bounds satisfy `0.0 <= lower <= upper <= 1.0` where the metric is probability/rate bounded;
+- counts are non-negative integers;
+- per-class values use the same metric bounds as their metric definition;
+- unsupported metric ranges must be declared explicitly by the metric definition rather than silently accepting arbitrary values.
+
+`MetricResult` validation is metric-definition-aware. Metrics whose mathematical domains differ from `[0,1]` (for example some tracking counts) are validated against their declared domain rather than incorrectly clipped.
+
+### 3.13 Systems benchmark validity
+
+`BenchmarkResult` must satisfy:
+
+`0 <= min <= p50 <= p90 <= p95 <= p99 <= max`
+
+and all latency values are finite and non-negative.
+
+Throughput is finite and strictly positive. Memory, utilization, and power values are finite and non-negative; utilization percentages cannot exceed their declared physical domain. Device/target identity is mandatory for systems measurements.
+
+Benchmark configuration enforces minimum warmup and measured-iteration counts, explicit batch sizes, precision mode, and target identity. Hardware-synchronized timing is required for asynchronous accelerator measurements.
+
+### 3.14 Confusion-matrix validity
+
+For a confusion matrix with `K` class labels:
+
+- the matrix must be exactly `K x K`;
+- all entries must be non-negative integer counts;
+- an empty matrix is valid only when the task/metric definition explicitly permits zero classes;
+- mismatched matrix dimensions fail closed.
+
+### 3.15 Result and report semantics
+
+`EvaluationResult` is immutable and contains:
+
+- evaluation identity and plan;
+- validated quality metrics;
+- validated system benchmarks when required;
+- baseline comparison when applicable;
+- structured error analysis when produced;
+- immutable reproducibility environment;
+- `EvaluationVerdict`;
+- completion timestamp supplied by the authoritative result-processing boundary.
+
+It is an empirical result object, not an orchestration record. Authoritative persistence remains ADR-0004.
+
+## 4. Proposed Interface Contracts — Phase 2 Target
+
+These interfaces are implementation targets only. They are not runtime code and do not authorize implementation before Issue #58 approval.
 
 ```python
-# module: cv_agent.evaluation.types (Proposed — Phase 2 implementation target)
-
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Any, Mapping, NewType, Protocol, Sequence, runtime_checkable
+from typing import Any, Mapping, NewType, Protocol, Sequence
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from cv_agent.approval.types import ApprovalDecision, ApprovalRequest, OperationIdentity
 from cv_agent.capabilities import CapabilityId, ToolId
 from cv_agent.dataset.types import ContentHash, DatasetId, DatasetVersion
 from cv_agent.tools.types import ExecutionId, TargetId
 from cv_agent.training.types import CheckpointId, TrainingPrecision
+from cv_agent.tools.executor import ToolExecutor
 
-# Identifier syntax rules:
-# - EvaluationId, MetricId, BenchmarkId: conform to `[a-z0-9_.-]+(/[a-z0-9_.-]+)*` per ADR-0001 §3.1.
 EvaluationId = NewType("EvaluationId", str)
 MetricId = NewType("MetricId", str)
 BenchmarkId = NewType("BenchmarkId", str)
+ExperimentId = NewType("ExperimentId", str)
 
 
 class TaskType(str, Enum):
@@ -270,249 +355,179 @@ class TaskType(str, Enum):
     REPRESENTATION = "representation"
 
 
-class EvaluationTargetType(str, Enum):
-    LOCAL = "local"
-    REMOTE = "remote"
-    MCP_ENDPOINT = "mcp_endpoint"
+class HardwareClass(str, Enum):
+    CPU = "cpu"
+    NVIDIA_GPU = "nvidia_gpu"
+    JETSON = "jetson"
+    OTHER_ACCELERATOR = "other_accelerator"
 
 
-class EvaluationTarget(BaseModel):
-    """Target compute environment for evaluation execution per ADR-0005."""
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    target_id: str
-    target_type: EvaluationTargetType
-    device_name: str | None = None
-    cuda_compute_capability: str | None = None
-    description: str = ""
+class EvaluationVerdict(str, Enum):
+    PASSED = "passed"
+    FAILED_QUALITY = "failed_quality"
+    FAILED_SYSTEMS = "failed_systems"
+    INCONCLUSIVE = "inconclusive"
 
 
-class EvaluationStatus(str, Enum):
-    DRAFT = "draft"
-    VALIDATED = "validated"
-    RUNNING = "running"
-    COMPLETED = "completed"
-    FAILED = "failed"
-    ABORTED = "aborted"
+class StatisticalTestType(str, Enum):
+    PAIRED_T_TEST = "paired_t_test"
+    WILCOXON_SIGNED_RANK = "wilcoxon_signed_rank"
+    BOOTSTRAP_RESAMPLING = "bootstrap_resampling"
+    MCNEMAR_TEST = "mcnemar_test"
 
 
 class EvaluationDatasetBinding(BaseModel):
-    """Immutable binding to an authoritative dataset split per ADR-0009."""
-
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     dataset_id: DatasetId
     dataset_version: DatasetVersion
     dataset_manifest_hash: ContentHash
-    split_name: str = "test"
+    split_name: str
     slice_filters: Mapping[str, Any] = Field(default_factory=dict)
 
 
 class ModelArtifactReference(BaseModel):
-    """Immutable reference to the evaluated model artifact per ADR-0010."""
-
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     checkpoint_id: CheckpointId
     architecture_name: str
     weights_hash: ContentHash
     weights_uri: str
-    precision: TrainingPrecision = TrainingPrecision.FP32
-    input_resolution: tuple[int, int]  # (height, width)
+    precision: TrainingPrecision
+    input_resolution: tuple[int, int]
+
+
+class EvaluationTargetRequirements(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    required_hardware_class: HardwareClass | None = None
+    min_cuda_compute_capability: tuple[int, int] | None = None
 
 
 class MetricDefinition(BaseModel):
-    """Declarative, versioned specification of an evaluation metric."""
-
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     metric_id: MetricId
-    name: str  # e.g. "mAP@0.5:0.95", "top1_accuracy", "IDF1"
+    name: str
     task_type: TaskType
-    version: str = "v1"
+    version: str
     higher_is_better: bool = True
     parameters: Mapping[str, Any] = Field(default_factory=dict)
 
 
 class MetricResult(BaseModel):
-    """Quantitative outcome of an evaluated model quality metric."""
-
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     metric: MetricDefinition
     primary_value: float
     per_class_values: Mapping[str, float] = Field(default_factory=dict)
     confidence_interval: tuple[float, float] | None = None
-    curve_data: Mapping[str, tuple[float, ...]] = Field(default_factory=dict)
+    sample_count: int = Field(ge=0)
     metadata: Mapping[str, Any] = Field(default_factory=dict)
 
 
 class BenchmarkConfiguration(BaseModel):
-    """Configuration for hardware-aware systems performance measurement."""
-
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     benchmark_id: BenchmarkId
-    batch_sizes: tuple[int, ...] = (1,)
-    warmup_iterations: int = Field(ge=5, default=10)
-    measured_iterations: int = Field(ge=20, default=100)
-    precision: TrainingPrecision = TrainingPrecision.FP16_AMP
+    batch_sizes: tuple[int, ...]
+    warmup_iterations: int = Field(ge=5)
+    measured_iterations: int = Field(ge=20)
+    precision: TrainingPrecision
     measure_power: bool = False
     measure_memory: bool = True
+    target_requirements: EvaluationTargetRequirements
 
 
 class BenchmarkResult(BaseModel):
-    """Quantitative systems performance measurements on target accelerator."""
-
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     benchmark_id: BenchmarkId
     batch_size: int
     precision: TrainingPrecision
+    latency_min_ms: float
     latency_mean_ms: float
     latency_p50_ms: float
     latency_p90_ms: float
     latency_p95_ms: float
     latency_p99_ms: float
+    latency_max_ms: float
     throughput_fps: float
     peak_vram_gb: float
     cpu_utilization_pct: float
     gpu_utilization_pct: float
-    power_watts_avg: float | None = None
+    power_watts_avg: float | None
     device_name: str
-    target_id: str
-
-
-class ErrorAnalysisRecord(BaseModel):
-    """Structured diagnostic failure breakdown per [P§27]."""
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    total_samples: int
-    failed_samples_count: int
-    false_positive_count: int
-    false_negative_count: int
-    confusion_matrix: tuple[tuple[int, ...], ...] = Field(default_factory=tuple)
-    class_labels: tuple[str, ...] = Field(default_factory=tuple)
-    localization_errors: int = 0
-    classification_errors: int = 0
-    slice_performance: Mapping[str, float] = Field(default_factory=dict)
-    representative_failure_hashes: tuple[ContentHash, ...] = Field(
-        default_factory=tuple
-    )
-    diagnostics_summary: str
+    target_id: TargetId
 
 
 class BaselineComparisonResult(BaseModel):
-    """Explicit comparative analysis against an authoritative baseline [P§29.2]."""
-
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    baseline_experiment_id: str
-    candidate_experiment_id: str
-    quality_metric_deltas: Mapping[str, float]  # metric_name -> delta
+    baseline_experiment_id: ExperimentId
+    candidate_experiment_id: ExperimentId
+    comparable_evidence_ref: str
+    test_type: StatisticalTestType
+    test_version: str
+    sample_count: int = Field(ge=1)
+    confidence_level: float
+    p_value: float
+    statistically_significant: bool
+    quality_metric_deltas: Mapping[MetricId, float]
+    system_metric_deltas: Mapping[str, float] = Field(default_factory=dict)
     quality_improved: bool
-    latency_delta_ms: float
-    throughput_delta_fps: float
-    memory_delta_gb: float
     pareto_dominant: bool
-    summary: str
 
 
 class EvaluationEnvironmentRecord(BaseModel):
-    """Complete environment and reproducibility metadata per [P§25]."""
-
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     git_commit_sha: str
     git_is_dirty: bool
+    dataset_manifest_hash: ContentHash
+    weights_hash: ContentHash
+    metric_definition_versions: tuple[str, ...]
     python_version: str
     torch_version: str
     cuda_version: str | None
     driver_version: str | None
     target_hardware: str
-    seed: int | None = None
+    seed: int | None
 
 
 class EvaluationPlan(BaseModel):
-    """Authoritative, immutable evaluation experiment plan."""
-
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     evaluation_id: EvaluationId
-    experiment_id: str  # Foreign key to ADR-0004
+    experiment_id: ExperimentId
     created_at: datetime
     capability_id: CapabilityId
-
     dataset_binding: EvaluationDatasetBinding
     model_artifact: ModelArtifactReference
     task_type: TaskType
     metrics: tuple[MetricDefinition, ...]
-    benchmark_config: BenchmarkConfiguration | None = None
-    baseline_experiment_id: str | None = None
-    # None is permitted ONLY for root baseline experiments (see §3.11 Invariant #3).
-    # All other evaluation plans MUST provide a non-null value resolving to a
-    # completed experiment in the ADR-0004 ledger.
-    compute_target_id: str = "default_evaluator"
-    # WARNING: "default_evaluator" is a placeholder default that MUST be overridden
-    # before dispatch. The actual value must be a valid TargetId registered in the
-    # ADR-0005 ExecutionTargetRegistry. Dispatching an EvaluationPlan with this
-    # unresolved placeholder value to EvaluationRunner.run() MUST raise a
-    # TargetNotFoundError rather than silently creating an unresolvable job.
+    benchmark_config: BenchmarkConfiguration | None
+    baseline_experiment_id: ExperimentId | None
+    target_requirements: EvaluationTargetRequirements
     evaluation_requirements: Mapping[str, Any] = Field(default_factory=dict)
     reproducibility_requirements: Mapping[str, Any] = Field(default_factory=dict)
 
 
-class EvaluationExecution(BaseModel):
-    """Active execution handle and status record for an in-flight evaluation job."""
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    evaluation_id: EvaluationId
-    plan: EvaluationPlan
-    status: EvaluationStatus
-    started_at: datetime
-    target: EvaluationTarget
-    execution_id: ExecutionId | None = None
-    target_id: TargetId | None = None
-
-
 class EvaluationResult(BaseModel):
-    """Comprehensive, immutable evaluation outcome."""
-
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     evaluation_id: EvaluationId
     plan: EvaluationPlan
-    status: EvaluationStatus
+    verdict: EvaluationVerdict
     quality_metrics: tuple[MetricResult, ...]
     system_benchmarks: tuple[BenchmarkResult, ...] = Field(default_factory=tuple)
-    baseline_comparison: BaselineComparisonResult | None = None
-    error_analysis: ErrorAnalysisRecord | None = None
+    baseline_comparison: BaselineComparisonResult | None
+    error_analysis: "ErrorAnalysisRecord | None"
     environment: EvaluationEnvironmentRecord
     completed_at: datetime
 
 
-class EvaluationReport(BaseModel):
-    """Human-readable and structured summary artifact for project memory."""
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    report_id: str
-    evaluation_id: EvaluationId
-    title: str
-    markdown_content: str
-    primary_quality_summary: str
-    primary_systems_summary: str
-    baseline_verdict: str
-    generated_at: datetime
-
-
-@runtime_checkable
 class MetricCalculator(Protocol):
-    """Stateless protocol for computing task-specific quality metrics."""
-
     def compute(
         self,
         predictions: Any,
@@ -521,81 +536,133 @@ class MetricCalculator(Protocol):
     ) -> Sequence[MetricResult]: ...
 
 
-@runtime_checkable
 class BenchmarkRunner(Protocol):
-    """Protocol for executing hardware-aware latency and throughput benchmarks."""
-
     def run_benchmark(
         self,
         model_artifact: ModelArtifactReference,
         config: BenchmarkConfiguration,
-        target_id: str,
+        target_id: TargetId,
     ) -> Sequence[BenchmarkResult]: ...
 
 
-@runtime_checkable
 class ErrorAnalyzer(Protocol):
-    """Protocol for extracting diagnostic failure structures from predictions."""
-
     def analyze(
         self,
         predictions: Any,
         ground_truth: Any,
         dataset_binding: EvaluationDatasetBinding,
-    ) -> ErrorAnalysisRecord: ...
+    ) -> "ErrorAnalysisRecord": ...
 
 
-@runtime_checkable
 class EvaluationRunner(Protocol):
-    """High-level dispatch protocol coordinating execution via ADR-0005."""
-
     def validate_plan(self, plan: EvaluationPlan) -> bool: ...
 
     def execute(
         self,
         plan: EvaluationPlan,
+        operation_identity: OperationIdentity,
+        approval_request: ApprovalRequest,
+        approval_decision: ApprovalDecision,
         tool_id: ToolId,
+        tool_executor: ToolExecutor,
         target_id: TargetId | None = None,
     ) -> EvaluationResult: ...
+
+
+def extract_evaluation_operation_payload(
+    plan: EvaluationPlan,
+) -> Mapping[str, Any]: ...
+
+
+def parse_evaluation_result(tool_output: Any) -> EvaluationResult: ...
 ```
 
-## 5. Consequences
+The actual implementation must add validators for finite numbers, metric-domain constraints, percentile ordering, matrix dimensions, allowed URI schemes, baseline comparability, recursive immutability, and exact ADR-0003 approval/identity matching.
 
-### Positive
-- **Guaranteed Deployability (`[P§12]`, `[P§29.4]`):** Co-equal evaluation of model quality and systems performance ensures high-accuracy models are never recommended if they exceed target edge hardware latency or VRAM budgets.
-- **Objective Grounding over LLM Hype (`[P§29.3]`):** Pure quantitative evaluation eliminates speculative or narrative claims of model quality.
-- **Strict Baseline Enforcement (`[P§29.2]`):** Every candidate run must justify claims against an explicit baseline, eliminating unsubstantiated assertions of improvement.
-- **Actionable Diagnostic Depth (`[P§27]`):** Structured `ErrorAnalysisRecord` feeds directly into Reasoning (ADR-0008), providing concrete failure distributions (small objects, blur, occlusion, class confusion) for data-centric or architectural refinement.
-- **Total Reproducibility (`[P§25]`):** Explicit binding to ADR-0009 dataset manifest hashes, ADR-0010 checkpoint hashes, metric versions, and hardware environments guarantees reproducible evaluation results.
-- **Clean Subsystem Decoupling (`[P§34]`):** Evaluation owns measurement semantics; physical execution is delegated to ADR-0005, historical persistence to ADR-0004, and causal diagnosis to ADR-0008.
+## 5. Failure, Recovery, and Determinism
 
-### Negative / Tradeoffs
-- **Benchmarking Overhead:** Hardware benchmarking with multiple warmup iterations and repetitions adds latency to the evaluation phase.
-- **Multi-Hardware Dependency:** Accurate systems benchmarking requires access to configured physical targets (e.g. Jetson, NVIDIA GPU servers); evaluation on unconfigured targets reports "known but unavailable" per `D-022`.
+### 5.1 Fail-closed conditions
 
-### Neutral
-- Output records are formatted for seamless persistence into SQLite (`experiments.sqlite`) via ADR-0004 without ADR-0011 owning the database.
-- Integration with future optimization (ADR-0012) and monitoring (ADR-0013) subsystems uses the contracts defined here.
+Evaluation fails closed on missing or mismatched authoritative identity, approval, target authorization, dataset/model evidence, baseline evidence, metric validity, benchmark validity, unsupported statistical configuration, or malformed tool output.
 
-## 6. References
-- `docs/PROJECT.md`: §7 (CV knowledge scope), §12 (Evaluation philosophy), §13 (Hardware-aware engineering), §21 (Orchestration), §22 (MCP), §24 (Autonomous training), §25 (Experiment-driven development), §27 (Failure analysis), §29 (Philosophy), §34 (Modular architecture)
-- `docs/APPROVALS.md`: Gated actions and profiling rules
-- `docs/DATA.md`: Manifest-first content-addressed dataset specification
-- ADR-0001: Capability Registry (`D-011`)
-- ADR-0003: Orchestration State & Checkpointing (`D-020`)
-- ADR-0004: Project Memory & Experiment Ledger (`D-021`)
-- ADR-0005: Tools and MCP Execution Boundary (`D-023`)
-- ADR-0007: Skills Architecture & NVIDIA Discovery (`D-025`)
-- ADR-0008: Reasoning Subsystem (`D-026`)
-- ADR-0009: Dataset Subsystem (`D-029`)
-- ADR-0010: Training Subsystem (`D-030`)
+### 5.2 Recovery
+
+Evaluation does not define recovery states. If a dispatched external operation becomes uncertain, ADR-0003 owns the transition into reconciliation and determines whether it completed, was not submitted, failed, or remains unresolved. Evaluation only consumes an authoritative reconciled outcome.
+
+### 5.3 Determinism
+
+Given identical evaluation plan, authoritative dataset/model references, operation payload, metric-definition versions, baseline evidence, benchmark configuration, target identity, and deterministic seeds, evaluation calculation must produce identical serialized domain results. Any stochastic statistical method must record deterministic seed and algorithm/version parameters.
+
+## 6. Required Architectural Invariants
+
+The following sixteen invariants are non-negotiable:
+
+1. **ADR-0003 sole operation/approval authority.**
+2. **No local operation identity/hash/version/approval synthesis.**
+3. **No competing Evaluation execution lifecycle.**
+4. **No synthetic/default target identity.**
+5. **Target must be authorized by ADR-0003 scope or explicitly supplied and scope-verified.**
+6. **All physical execution delegates to ADR-0005.**
+7. **ActiveJobHandoff expiry is not execution failure; ADR-0003 owns reconciliation.**
+8. **Dataset identity and root checksum come from ADR-0009 authority and are verified.**
+9. **Model checkpoint identity and weights hash come from ADR-0010 authority and are verified.**
+10. **Every non-root evaluation has a completed comparable ADR-0004 baseline.**
+11. **Statistical significance is method/version/sample/evidence explicit and deterministic.**
+12. **Recursive defensive immutability is mandatory for published contracts.**
+13. **All numeric result domains are validated fail-closed; NaN/Inf are prohibited.**
+14. **Benchmark percentiles, throughput, resources, and target identity are validated.**
+15. **Evaluation results are immutable empirical records; ADR-0004 owns persistence.**
+16. **Reasoning consumes evidence but cannot override measured outputs or substitute narrative for measurement.**
 
 ## 7. Implementation Acceptance Criteria
 
-1. **Plan Validation & Immutability:** An `EvaluationPlan` enforces frozen validation (`frozen=True`, `extra='forbid'`), validates required metrics and task types, and binds authoritatively to `DatasetId`, `DatasetVersion`, `split_name`, and `weights_hash` per ADR-0009 and ADR-0010.
-2. **Co-Equal Quality and Systems Measurement:** `EvaluationResult` requires both `quality_metrics` and, when benchmark configuration is specified, `system_benchmarks` (latency percentiles, throughput FPS, VRAM), rejecting evaluations that assess quality without hardware deployability per `[P§12]`.
-3. **Mandatory Baseline Comparison:** If an evaluation specifies `baseline_experiment_id`, `BaselineComparisonResult` must compute quantitative metric deltas and Pareto dominance flags, prohibiting unsubstantiated claims of improvement per `[P§29.2]`, `[P§29.3]`.
-4. **Structured Error Analysis:** The evaluation engine extracts an evidence-based `ErrorAnalysisRecord` containing confusion matrices, failure counts, slice performances, and representative failure hashes for consumption by Reasoning (ADR-0008).
-5. **Hardware Benchmark Guardrails:** Systems benchmarking executes on configured execution targets with warmup iterations ($\ge 5$) and hardware-synchronized timers, reporting "known but unavailable" when target accelerators are unconfigured per `D-022`.
-6. **Transport and Execution Traceability:** `EvaluationExecution` binds to ADR-0005 execution tokens via `execution_id: ExecutionId | None` and `target_id: TargetId | None`, delegating physical execution through declared tools.
-7. **Immutable Result Handoff:** Completed evaluation outcomes package an immutable `EvaluationEnvironmentRecord` and serialize structured results for persistence into ADR-0004 `experiments.sqlite` without owning database storage.
+1. `EvaluationPlan` is immutable, recursively defensive, schema-strict, and contains no lifecycle state or synthetic target.
+2. `EvaluationRunner.execute()` requires authoritative ADR-0003 operation identity, approval request/decision, tool identity, target authorization, and `ToolExecutor`.
+3. Functional payload extraction delegates canonical hashing to ADR-0003 and excludes transient execution tokens.
+4. Static analysis proves Evaluation does not import or mutate ADR-0003 persistence/lifecycle internals or implement a second state machine.
+5. Dataset tests prove manifest identity/root checksum/split membership are verified through ADR-0009 authority.
+6. Model tests prove checkpoint identity/content-hash/URI metadata are verified through ADR-0010 authority.
+7. Target tests prove no default/synthetic target exists and unauthorized target overrides fail closed.
+8. Transport tests prove no direct subprocess/SSH/socket execution exists in `cv_agent/evaluation/`; all dispatch uses ADR-0005.
+9. Handoff tests prove expiry is not mapped to failure and unresolved external operations are delegated to ADR-0003 reconciliation.
+10. Baseline tests prove missing, incomplete, incompatible, or mismatched baselines fail closed except for an explicitly designated root baseline.
+11. Statistical-comparison tests prove method/version/sample-count/p-value/confidence semantics and deterministic seeded resampling.
+12. Metric/benchmark tests reject NaN/Inf, invalid metric ranges, invalid confidence intervals, invalid percentile order, non-positive throughput, negative resources, and malformed confusion matrices.
+13. Reproducibility tests prove immutable environment metadata, dataset/model hashes, metric versions, target identity, and seeds are retained.
+14. Cross-ADR static boundary tests prove Evaluation owns neither experiment persistence nor orchestration lifecycle/lease/fencing/recovery.
+15. Result-handoff tests prove `EvaluationResult` is immutable, verdict semantics are domain findings only, and no empirical value can be replaced by narrative text.
+16. Full project quality gates pass before implementation PR approval: tests, Ruff, format, mypy, build, pip-audit, and `git diff --check`.
+
+## 8. Consequences
+
+### Positive
+
+- Objective empirical evidence replaces narrative evaluation claims.
+- Model quality and deployability are evaluated together where required.
+- Dataset/model lineage remains tied to authoritative subsystem identities.
+- Approval and execution remain under ADR-0003/ADR-0005 authority.
+- Baseline comparisons become statistically explicit and reproducible.
+- Structured diagnostics provide evidence for ADR-0008 reasoning.
+
+### Tradeoffs
+
+- Evaluation contracts and validators are more strict and therefore reject malformed or incomplete evidence rather than silently proceeding.
+- Hardware benchmarking requires access to configured physical targets.
+- Statistical comparison requires sufficient comparable samples and evidence; some evaluations may legitimately become `INCONCLUSIVE`.
+
+## 9. References
+
+- `docs/PROJECT.md`: evaluation philosophy, hardware-aware engineering, experiment-driven development, failure analysis, modular architecture.
+- `docs/APPROVALS.md`: gated actions and profiling rules.
+- `docs/DATA.md`: manifest-first content-addressed dataset specification.
+- ADR-0001: Capability Registry (`D-011`).
+- ADR-0002: LLM Gateway (`D-012`).
+- ADR-0003: Orchestration State & Checkpointing (`D-020`).
+- ADR-0004: Project Memory & Experiment Ledger (`D-021`).
+- ADR-0005: Tools and MCP Execution Boundary (`D-023`).
+- ADR-0006: Knowledge & RAG (`D-024`).
+- ADR-0007: Skills Architecture & NVIDIA Discovery (`D-025`).
+- ADR-0008: Reasoning Subsystem (`D-026`).
+- ADR-0009: Dataset Subsystem (`D-029`).
+- ADR-0010: Training Subsystem (`D-030`).
+- Issue #58: Phase 2L ADR-0011 Architecture Review Gate.
