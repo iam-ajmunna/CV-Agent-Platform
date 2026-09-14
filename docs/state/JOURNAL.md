@@ -1154,17 +1154,18 @@ Added 8 new regression tests, expanding the Phase 2D contract test suite to 35 t
    - `cv_agent/skills/contracts.py`: Typed immutable contracts (`SkillDescriptor`, `TargetRequirements`, `HardwareClass`, `SkillResolution`, `SkillExecutionStatus`, `SkillExecutionResult`).
    - `cv_agent/skills/errors.py`: Normalized failure taxonomy per ADR-0007 §5.
    - `cv_agent/skills/registry.py`: `DefaultSkillRegistry` enforcing ADR-0001 capability authority and unique `SkillId`, plus ephemeral `DiscoveryCache` isolating runtime-discovered candidates from authoritative registry entries.
-   - `cv_agent/skills/resolver.py`: Deterministic `DefaultSkillResolver` evaluating target compatibility and tool dependencies.
+   - `cv_agent/skills/resolver.py`: `DefaultSkillResolver` evaluating target compatibility and tool dependencies.
    - `cv_agent/skills/executor.py`: Procedural `DefaultSkillExecutor` coordinating JSON Schema parameter validation, approval precondition gating, tool dispatch via ADR-0005, and async handoff detection.
    - `cv_agent/skills/catalog.py`: 10 authoritative declarative NVIDIA skills per ADR-0007 §3.4 and internal baseline skills.
    - `cv_agent/skills/__init__.py`: Clean public API export.
 3. Authored comprehensive test suite in `tests/test_skills_boundary.py` (32 tests) covering all 11 acceptance gates, negative/adversarial vectors, and deep immutability invariants. Total test suite increased from 314 to **346 passed** (0 warnings).
-4. Verified all local quality gates: Ruff check clean, Ruff format check clean (128 files), Mypy clean on `cv_agent` (66 source files, 0 issues), `git diff --check` clean.
+4. Verified all local quality gates: Ruff check clean, Ruff format clean (128 files), Mypy clean on `cv_agent` (66 source files, 0 issues), `git diff --check` clean.
 5. Authored Phase 2H implementation report in `docs/reports/ISSUE-49-PHASE-2H-REPORT.md` and updated `docs/state/STATUS.md`.
 
 **Why:** `[P§15]`, `[P§23]`, `[P§24]`, `[P§29.4]`, `[P§29.9]`, `[P§34]`, and frozen ADR-0007 (`D-025`, `D-040`). Implements the procedural expertise and external vendor discovery layer of the agent architecture, connecting high-level capabilities to discrete executable tools while preventing reasoning prompt bloat and prohibiting silent CPU fallback on unsupported hardware.
 
-**Broke:** Nothing broken. 346 pytest tests pass, 0 warnings. Full backward compatibility preserved.
+**Broke:** Python 3.10 CI initially failed on `asyncio.timeout` in `cv_agent/skills/executor.py` (`asyncio.timeout` was added in Python 3.11). Corrected via `asyncio.wait_for(...)` standard across Python 3.10–3.13, committed as `e7e29d5`.
 
-**Learned:** Anchoring procedural skills directly to authoritative ADR-0001 capabilities and reusing the domain availability state machine preserves clean architectural boundaries, preventing the skills layer from drifting into capability definition or competing lifecycle governance.
-**Left open:** Phase 2H implementation complete on `feature/ajmunna/phase-2h-skills-architecture`. Awaiting Official PM review, PR creation, and CI validation across Python 3.10–3.13.
+**Learned:** Anchoring procedural skills directly to authoritative ADR-0001 capabilities and reusing the domain availability state machine preserves clean architectural boundaries, preventing the skills layer from drifting into capability definition or competing lifecycle governance. `asyncio.wait_for` remains the reliable cross-version timeout mechanism across Python 3.10–3.13.
+
+**Left open:** PR #50 open and green across all matrix jobs (Python 3.10, 3.11, 3.12, 3.13). Awaiting Official PM adversarial review and squash merge to `main`.
