@@ -1319,3 +1319,31 @@ Remediated all 3 architectural blockers (B1, B2, B3) and 5 secondary findings id
 **Learned:** Rigorous adversarial testing at architectural boundaries caught semantic type leakage, Unicode canonical collision failure modes, and context reference spoofing that standard schema validators and typecheckers alone had allowed through.
 
 **Left open:** Phase 2I is complete and accepted. Awaiting Official PM instruction and milestone sequencing for Phase 2J (Dataset Subsystem Architecture / ADR-0009).
+
+---
+
+## 2026-09-14 — Phase 2J Dataset Subsystem Implementation (`feature/ajmunna/phase-2j-dataset-subsystem`)
+
+**Did:**
+1. Completed pre-implementation architecture gate review with Official PM; resolved blockers B1–B4 and adopted mandatory corrections on ADR-0003 4-tuple operation identity (I4) and policy-interpreted leakage auditing (B3).
+2. Added approved Pydantic v2 dependency (`pydantic>=2.0,<3`) to `pyproject.toml` per frozen ADR-0009 specification.
+3. Created short-lived work branch `feature/ajmunna/phase-2j-dataset-subsystem` cut from `main`.
+4. Implemented complete `cv_agent/dataset/` subsystem satisfying ADR-0009, `docs/DATA.md`, and all pre-implementation gates:
+   - `types.py`: Authoritative identifier types (`DatasetId`, `DatasetVersion`, `ContentHash`, `AnnotationVersion`, `GuidelineRef`) with validation functions enforcing strict canonical SemVer 2.0.0 (`^v...`, B1) and ADR-0001 §3.1 regex; enums (`StorageBackendType`, `SplitName`, `LeakageType`).
+   - `errors.py`: Normalized exception hierarchy (`DatasetError`, `DatasetNotFoundError`, `DatasetVersionConflictError`, `SplitContaminationError`, `SplitLeakageError`, `PayloadNotFoundError`, `PayloadCorruptionError`, `PayloadIntegrityError`, `InvalidGeometryError`, `PathTraversalError`, `DatasetApprovalRequiredError`).
+   - `contracts.py`: Immutable Pydantic v2 models (`ClassDefinition`, `CollectionConditions`, `LeakageCheckResult`, `DatasetLineage`, `SplitMembership`, `ItemMetadata`, `AnnotationManifest`, `DatasetManifest`) with `ConfigDict(frozen=True)`, split disjointness validation, cardinality enforcement, and custom serializers.
+   - `storage/`: `DatasetStore` Protocol, `LocalFSStore` content-addressed storage layout (`blobs/ab/cd/<hash>`) with streaming SHA-256 byte-integrity verification on put/get, atomic rename publication, read-only permissions (`0o444`), corruption detection, and path containment protection (B4, I6); lazy-import remote storage adapters (`S3Store`, `GCSStore`, `MinioStore`).
+   - `validation.py`: Deterministic canonical SHA-256 `payload_root_checksum` calculation (B2) and verification; annotation geometry validation gate (`validate_annotation_geometry`) enforcing non-negative coordinates, positive areas, image extent containment, class ID resolution, and polygon consistency (AC #8 / D-047).
+   - `leakage.py`: `StandardLeakageAuditor` evaluating all 5 leakage dimensions (`TEMPORAL`, `CAMERA_SITE`, `NEAR_DUPLICATE`, `SUBJECT_IDENTITY`, `ANNOTATION_ROUND`) dynamically interpreted from `split_policy` with `ItemMetadata` input model and fail-closed metadata checks (B3).
+   - `registry.py`: `FileSystemDatasetRegistry` implementing atomic publication pipeline (`validate -> verify root checksum -> verify store payloads -> verify 5-point audit -> atomic write to temp -> fsync -> rename -> chmod 0o444`, I2), write-once immutability, and ADR-0003 4-tuple operation identity enforcement for gated mutations (I4).
+   - `__init__.py`: Clean public API exports with sorted `__all__`.
+5. Authored comprehensive adversarial test suite in `tests/test_dataset_boundary.py` (30 tests) verifying all 12 architectural gates, B1–B4, I1–I6, geometry gates, disjointness, immutability, corruption detection, and atomic publication.
+6. Verified quality gates: full repository test suite passes at 427 items (397 baseline + 30 Phase 2J tests, 0 failures); Ruff check clean; Ruff format clean; Mypy clean on `cv_agent` across 83 source files; `git diff --check` clean. Recorded decision `D-055` in `docs/state/DECISIONS.md`.
+
+**Why:** `[P§7]`, `[P§25]`, `[P§26]`, `[P§27]`, `[P§29.5]`, `[P§34]`, and frozen ADR-0009 (`D-028`, `D-029`, `D-042`, `D-047`, `D-055`). Establishes data as an immutable, content-addressed, leakage-audited engineering artifact rather than an unversioned input file.
+
+**Broke:** Nothing broken. 427 tests pass across 19 test modules, all quality gates green.
+
+**Learned:** Interpreting leakage dimensions strictly from `manifest.split_policy` while enforcing fail-closed behavior on missing metadata achieves the ideal balance: datasets with specific requirements (temporal/camera/subject disjointness) cannot silently omit required metadata, while datasets with other policies (e.g. static image detection) are not artificially constrained.
+
+**Left open:** Opening PR on `feature/ajmunna/phase-2j-dataset-subsystem`, running CI matrix across Python 3.10–3.13, and requesting Official PM adversarial review.
