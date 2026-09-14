@@ -3,33 +3,32 @@
 > **Rewritten** every session. Describes **now**, never history — history lives in
 > `JOURNAL.md`. Hard cap: 60 lines. If it exceeds that, you are logging, not stating.
 
-**Updated:** 2026-09-14 · **Phase:** Phase 2J Third Review Remediation · **Health:** green
+**Updated:** 2026-09-14 · **Phase:** Phase 2J Accepted · **Health:** green
 
 ## Where we are
 
-Phase 2J (ADR-0009 Dataset Subsystem Architecture) remediated per Official PM third adversarial review on PR #53 (`feature/ajmunna/phase-2j-dataset-subsystem`):
-- Round 3 Blocker: Eliminated local synthesis / ad-hoc fallbacks for ADR-0003 operation identity in `FileSystemDatasetRegistry.require_mutation_approval()`.
-- Authoritative expected operation identity is now strictly required as a typed `OperationIdentity` model `(operation_id, operation_version, canonical_payload_hash, target_identity)`.
-- Approval check fails closed with `DatasetApprovalRequiredError` if authoritative expected identity is absent (verified by regression test).
-- ADR-0003 remains the sole authority for operation identity, versioning, and canonicalization.
-- Full 433-test suite passing (36 Phase 2J boundary tests, 0 failures).
-- All quality gates (Ruff check, format, Mypy on `cv_agent` across 83 source files, `git diff --check`, `python -m build`, `pip-audit`) clean.
+Phase 2J (ADR-0009 Dataset Subsystem Architecture) is implemented, adversarially reviewed, and merged to `main`:
+- PR #53 squash-merged as `24412a412b0fb47d9cc99549a07e9cc3d4e76ba9`.
+- Final Round-3 blocker closed: ADR-0003 OperationIdentity is externally supplied and mandatory; no local synthesis or ad-hoc canonical hash fallback remains.
+- Dataset subsystem provides frozen manifests, content-addressed storage, leakage auditing, split isolation, geometry validation, and atomic publication.
+- Full 433-test suite passed; all local quality/security gates and the Phase 2J CI matrix are green.
+- ADR-0003 remains authoritative for orchestration operation identity and canonicalization.
 
 ## In flight
 
 | Item | Issue | PR | State |
 |---|---|---|---|
-| Phase 2J Third Review Remediation | — | #53 | Round 3 blocker remediated; pushing commit for Official PM review |
+| Phase 2J | — | #53 | Accepted and merged |
 
 ## Next 3 actions
 
-1. Commit Round 3 remediations to `feature/ajmunna/phase-2j-dataset-subsystem`.
-2. Push branch to update PR #53 and trigger CI matrix execution.
-3. Monitor CI and await Official PM final review and merge authorization.
+1. Begin Phase 2K planning against the frozen ADR contracts.
+2. Preserve ADR-0009 ownership and cross-ADR boundaries during implementation.
+3. Continue main-only trunk governance with short-lived branches for future work.
 
 ## Blockers
 
-- None. PR #53 awaiting final PM review.
+- None.
 
 ## Scope guard
 
