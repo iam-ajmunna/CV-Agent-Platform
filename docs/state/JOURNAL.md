@@ -1114,4 +1114,27 @@ Added 8 new regression tests, expanding the Phase 2D contract test suite to 35 t
 
 **Learned:** True transactional filesystem storage requires pairing atomic write-and-replace (`mkstemp` + `fsync` + `rename`) with bidirectional rollback tracking (tracking both newly created unlinks and pre-existing content restorations) to ensure no state mutation survives an aborted transaction.
 
-**Left open:** Commit, push to `origin feature/ajmunna/phase-2g-knowledge-rag`, monitor GitHub Actions CI matrix across Python 3.10–3.13, and submit remediation report to Official PM for final acceptance.
+**Left open:** PR #48 hardened and submitted for final review.
+
+---
+
+## 2026-09-14 — Phase 2G ADR-0006 Knowledge & RAG Subsystem Formal Merge & Closure (main)
+
+**Did:**
+1. Received formal Official PM final review acceptance on Phase 2G / PR #48 (`324f3ee`) confirming all ADR-0006 requirements and all review findings (B1–B5, I4–I11) are resolved, with passing CI across Python 3.10–3.13 (`34818652492`).
+2. Executed instructed merge and repository closure sequence:
+   - PR #48 squash-merged into `main` as commit `6cc400fe6083b374833e36a12f44d023eeae2159`.
+   - Verified Issue #47 formally closed as completed.
+   - Deleted short-lived feature branch `feature/ajmunna/phase-2g-knowledge-rag` locally and on origin.
+   - Synchronized `main` locally.
+   - Recorded architectural decision `D-052` in `docs/state/DECISIONS.md` documenting hybrid indexing substrate, normalized scoring, freshness horizons, quarantine boundaries, crash-safe persistence, bidirectional rollback, and model-partition isolation.
+   - Synchronized rolling state in `docs/state/STATUS.md` (<= 60 lines, present tense).
+3. Verified all 314 tests passing with 0 warnings, Ruff check/format clean, Mypy clean on `cv_agent` (59 source files), and `git diff --check` clean.
+
+**Why:** `[P§16]`, `[P§17]`, `[P§18]`, `[P§19]`, `[P§20]`, `[P§29.3]`, `[P§29.7]`, `[P§34]`, and frozen ADR-0006 (`D-024`, `D-039`). Formally incorporates the Phase 2G runtime substrate into the authoritative `main` trunk and closes Issue #47 per the single-trunk operating model.
+
+**Broke:** Nothing broken. 314 tests pass across 16 test modules, all quality gates green.
+
+**Learned:** Combining collision-free model partition namespaces with crash-safe atomic replacement and bidirectional transactional rollback guarantees store integrity across model evolutions and unexpected process interrupts without compromising evidence immutability.
+
+**Left open:** Phase 2G formally closed. Next Phase 2 milestone or subsystem kickoff awaiting Official PM instruction.
