@@ -1563,3 +1563,36 @@ Remediated all eight architecture findings (B1–B8) from the Official PM review
 **Learned:** Code blocks in markdown documentation are subject to Ruff format checks in CI; keeping embedded Python signatures formatted to project line lengths prevents documentation-only PRs from failing quality gates.
 
 **Left open:** Merging PR #59 to `main`, freezing ADR-0011, and awaiting Official PM authorization for Phase 2L runtime implementation.
+
+---
+
+## 2026-09-15 — Phase 2L Evaluation Subsystem Runtime Implementation (Issue #60)
+
+**Did:**
+Implemented the complete Phase 2L Evaluation Subsystem adhering strictly to frozen ADR-0011, [P§25]–[P§29], and all cross-ADR boundary invariants:
+1. **Module Architecture (`cv_agent/evaluation/`):**
+   - `types.py`: Defined strongly-typed canonical identifiers (`EvaluationId`, `MetricId`, `BenchmarkId`, `ExperimentId`), task & hardware enums, domain measurement verdict (`EvaluationVerdict`), and closed statistical test methodology (`StatisticalTestType`).
+   - `errors.py`: Normalized exception hierarchy (`EvaluationError`, `EvaluationValidationError`, `EvaluationApprovalRequiredError`, `EvaluationExecutionError`, `MetricCalculationError`, `BaselineComparisonError`, `EvaluationLineageError`).
+   - `contracts.py`: Immutable, recursively-frozen Pydantic v2 domain models with fail-closed numerical validators (`EvaluationDatasetBinding`, `ModelArtifactReference`, `EvaluationTargetRequirements`, `MetricDefinition`, `MetricResult`, `BenchmarkConfiguration`, `BenchmarkResult`, `ErrorAnalysisRecord`, `BaselineComparisonResult`, `EvaluationEnvironmentRecord`, `EvaluationPlan`, `EvaluationResult`, `EvaluationReport`).
+   - `canonicalization.py`: Pure functional payload extraction (`extract_evaluation_operation_payload`) preserving plan identity, created timestamp, capability, dataset binding, model artifact, metrics, benchmarks, baseline experiment, target requirements, and deep-frozen requirement maps. Delegates payload hashing to ADR-0003 `compute_payload_hash()`.
+   - `metrics.py`: `MetricCalculator` protocol and `StandardMetricCalculator` computing versioned, multidimensional quality metrics with strict finite float checking and probability/rate boundary validation.
+   - `benchmarks.py`: `BenchmarkRunner` protocol and `DefaultBenchmarkRunner` computing latency percentiles, throughput, peak VRAM, and accelerator utilization with monotonic percentile enforcement ($0 \le \text{min} \le p_{50} \le p_{90} \le p_{95} \le p_{99} \le \text{max}$).
+   - `diagnostics.py`: `ErrorAnalyzer` protocol and `DefaultErrorAnalyzer` producing structured error breakdowns, confusion matrices (validating square shape matching class labels count), and slice performance tracking per [P§27].
+   - `comparison.py`: `BaselineComparator` protocol and `DefaultBaselineComparator` performing reproducible statistical comparisons against baselines per [P§29.2], computing p-values, confidence intervals, and Pareto dominance.
+   - `runner.py`: `EvaluationRunner` protocol, `DefaultEvaluationRunner`, and `parse_evaluation_result()` coordinating execution strictly via ADR-0003 approval verification (`verify_approval`) and ADR-0005 transport dispatch (`ToolInvocation` and `ActiveJobHandoff`). Strictly enforces zero local identity synthesis, zero local target synthesis, and mandatory `ToolExecutor`.
+   - `__init__.py`: Clean public API re-exports with sorted `__all__`.
+2. **29 Adversarial Boundary Tests (`tests/test_evaluation_boundary.py`):**
+   - Implemented all 26 mandatory boundary tests plus 3 additional structural/reproducibility tests covering: zero identity synthesis, approval replay prevention, canonical hash tamper rejection, target authorization / conflict rejection, target derivation from authorized scope when omitted, dataset & checkpoint lineage verification, calibration split isolation (Invariant 13), recursive immutability, numerical/benchmark validation, statistical comparison bounds, mandatory ToolExecutor, execution failure containment, ActiveJobHandoff expiry semantics, AST verification of zero orchestration SQLite state mutation, and AST verification of zero physical transport leakage.
+3. **Quality Gates & Full Suite Validation:**
+   - 491 total tests passing (exceeding $\ge 488$ quality threshold).
+   - Ruff linting and formatting clean.
+   - Mypy static type checking clean across all 104 source files.
+   - Packaging build and pip-audit clean.
+
+**Why:** Satisfies ADR-0011, [P§25] (reproducibility), [P§26] (dataset audit), [P§27] (diagnostics), [P§28] (slice performance), [P§29] (hardware-aware empirical measurement), ADR-0003 (approval & lifecycle authority), and ADR-0005 (execution transport).
+
+**Broke:** Initial Pydantic v2 schema generation encountered custom identifier types (`TargetId`, `CapabilityId`) without `arbitrary_types_allowed=True`, resolved by enabling it across evaluation models. `StandardMetricCalculator` initially checked only `isinstance(predictions, dict)` which failed on `mappingproxy` outputs from frozen tool results; resolved by checking `isinstance(predictions, (dict, Mapping))`.
+
+**Learned:** Deep-frozen tool results wrap structured outputs in `MappingProxyType`, which does not inherit from `dict`; runtime evaluators must inspect `collections.abc.Mapping` to transparently handle both mutable dicts and immutable mapping proxies.
+
+**Left open:** Opening PR linked to Issue #60, monitoring CI across Python 3.10–3.13, and presenting for Official PM adversarial review.

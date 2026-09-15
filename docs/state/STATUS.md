@@ -3,35 +3,34 @@
 > **Rewritten** every session. Describes **now**, never history — history lives in
 > `JOURNAL.md`. Hard cap: 60 lines. If it exceeds that, you are logging, not stating.
 
-**Updated:** 2026-09-15 · **Phase:** Phase 2L Architecture Review · **Health:** green
+**Updated:** 2026-09-15 · **Phase:** Phase 2L Runtime Implementation · **Health:** green
 
 ## Where we are
 
-Phase 2K (ADR-0010 Training Subsystem) is accepted and merged on `main` at `3758f25`; its short-lived implementation branch is retired. Phase 2L is now at the ADR-0011 architecture-remediation gate under Issue #58.
+Phase 2L (ADR-0011 Evaluation Subsystem) runtime implementation is complete on `feature/ajmunna/phase-2l-evaluation-subsystem` (base: `main @ 4266340`) under Issue #60.
 
-- ADR-0011 high-level evaluation responsibility is retained: deterministic model-quality and systems-performance measurement with authoritative dataset/model lineage.
-- Official PM review identified B1–B8; remediation amendments are implemented and verified in PR #59.
-- ADR-0003 remains the sole authority for operation identity, approval, lifecycle, leases/fencing, recovery, and external-operation state.
-- ADR-0005 remains the sole physical execution/transport boundary.
-- ADR-0004 remains the sole authoritative experiment-ledger persistence boundary.
-- No `cv_agent/evaluation/` runtime implementation is authorized until the amended ADR passes the second PM architecture review.
+- Complete `cv_agent/evaluation/` package implements types, contracts, canonicalization, metrics, benchmarks, diagnostics, comparison, and runner.
+- Evaluation conforms strictly to frozen ADR-0011 as a domain measurement layer rather than an orchestration lifecycle.
+- Zero local identity synthesis and zero local target synthesis are rigorously enforced.
+- Execution is dispatched via mandatory `ToolExecutor` and ADR-0005 `ActiveJobHandoff` with reconciliation owned by ADR-0003.
+- All 29 adversarial boundary tests pass; full test suite reaches 491 passing tests (exceeding >= 488 gate).
+- Ruff lint/format, Mypy, build, pip-audit, and diff hygiene are verified green.
 
 ## In flight
 
 | Item | Issue | PR | State |
 |---|---|---|---|
-| Phase 2L architecture remediation | #58 | #59 | Amended ADR passed PM review; CI rerun |
-
+| Phase 2L runtime implementation | #60 | — | Implemented & verified; ready for PR & adversarial PM review |
 
 ## Next 3 actions
 
-1. Validate the amended ADR-0011 against B1–B8 and frozen ADR-0001→ADR-0010 contracts.
-2. Submit the architecture-only amendment for second Official PM review.
-3. Authorize an implementation branch only after an APPROVED/FROZEN architecture disposition.
+1. Commit and push `feature/ajmunna/phase-2l-evaluation-subsystem`.
+2. Open implementation PR linked to Issue #60 and verify GitHub Actions CI matrix (Python 3.10–3.13).
+3. Present PR for Official PM adversarial architecture review.
 
 ## Blockers
 
-- Phase 2L runtime implementation is blocked pending architecture approval.
+- None. Implementation gate is OPEN and all quality gates pass locally.
 
 ## Scope guard
 
