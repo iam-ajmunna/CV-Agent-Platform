@@ -1596,3 +1596,38 @@ Implemented the complete Phase 2L Evaluation Subsystem adhering strictly to froz
 **Learned:** Deep-frozen tool results wrap structured outputs in `MappingProxyType`, which does not inherit from `dict`; runtime evaluators must inspect `collections.abc.Mapping` to transparently handle both mutable dicts and immutable mapping proxies.
 
 **Left open:** Opening PR linked to Issue #60, monitoring CI across Python 3.10–3.13, and presenting for Official PM adversarial review.
+
+---
+
+## 2026-09-16 — Phase 2L Benchmark Execution Boundary & Canonicalization Remediation (PR #61)
+
+**Did:**
+Remediated the Official PM adversarial review findings for PR #61 rejecting synthetic benchmark simulation:
+1. **Empirical Systems Benchmark Boundary (`DefaultBenchmarkRunner`):**
+   - Eliminated all mathematical simulation formulas, hardcoded device names ("NVIDIA GeForce RTX 4090"), and constant utilization/VRAM defaults.
+   - Wired mandatory ADR-0005 `ToolExecutor` dependency into `DefaultBenchmarkRunner.run_benchmark()` and `DefaultEvaluationRunner`.
+   - Genuinely executed benchmark tool invocations (`cv.benchmark.execute`) on the authorized `TargetId` for each configured batch size.
+   - Enforced empirical validation of `warmup_iterations` (`warmup_executed >= config.warmup_iterations`), failing closed if warmup is incomplete on target.
+   - Validated measured iteration samples to ensure strictly finite positive latency floats and sample size $\ge \text{measured\_iterations}$.
+   - Derived latency percentiles (min, mean, p50, p90, p95, p99, max) directly from observation samples via rank interpolation.
+   - Computed throughput strictly from observed work and elapsed measurement time ($(\text{batch\_size} \times N) / (\text{total\_time\_ms} / 1000.0)$).
+   - Extracted hardware metrics (`peak_vram_gb`, `cpu_utilization_pct`, `gpu_utilization_pct`, `power_watts_avg`) strictly from target telemetry or kept them explicitly `None` when unavailable.
+   - Enforced non-empty `device_name` extraction from target telemetry; local device name fabrication is strictly prohibited.
+2. **Canonicalization Field-Completeness Regression Protection:**
+   - Implemented automated reflection over `EvaluationPlan.model_fields.keys()`.
+   - Verified that every non-transient plan field is explicitly represented in the canonical payload.
+   - Verified that mutating any individual functional field alters the computed canonical payload hash, preventing silent authorization gaps.
+3. **Boundary Test Suite Expansion & Full Suite Quality Gates:**
+   - Added 9 new adversarial boundary tests (Tests 30–38) covering mandatory `ToolExecutor`, ADR-0005 dispatch, incomplete warmup failure, insufficient samples failure, non-positive latency failure, missing device name failure, empirical percentile/throughput calculations, telemetry `None` preservation, and canonicalization field-completeness.
+   - All 38 boundary tests pass (38/38).
+   - Full test suite expanded to 500 passing tests (500/500, up from 491).
+   - Ruff linting, Ruff formatting, Mypy (104 files), package build, and pip-audit all verified 100% clean.
+
+**Why:** Addresses Official PM architectural blocker on PR #61 requiring empirical on-target systems evaluation rather than syntactically valid fabricated numbers, satisfying ADR-0011, [P§13], [P§25], and [P§29.4].
+
+**Broke:** Initially, `BenchmarkResult` schema mandated non-null floats for peak VRAM and utilization, which forced callers to fabricate numbers when telemetry was unavailable. Remediated by updating `BenchmarkResult` fields to `float | None = None` while strictly validating finite ranges whenever present. Updated `BaselineComparator` to safely compute memory delta only when `peak_vram_gb` is non-null on both baseline and candidate.
+
+**Learned:** In an evaluation subsystem, syntactically and numerically valid simulated outputs are an anti-pattern that conceals execution gaps; all metrics must derive directly from empirical telemetry or remain explicitly absent (`None`).
+
+**Left open:** Pushing remediated commit to `feature/ajmunna/phase-2l-evaluation-subsystem`, verifying CI checks on PR #61, and resubmitting to Official PM for final adversarial review.
+

@@ -122,11 +122,11 @@ class DefaultBaselineComparator:
 
             latency_delta = round(c_bench.latency_mean_ms - b_bench.latency_mean_ms, 3)
             throughput_delta = round(c_bench.throughput_fps - b_bench.throughput_fps, 2)
-            memory_delta = round(c_bench.peak_vram_gb - b_bench.peak_vram_gb, 3)
-
             sys_deltas[f"latency_mean_ms_b{primary_b}"] = latency_delta
             sys_deltas[f"throughput_fps_b{primary_b}"] = throughput_delta
-            sys_deltas[f"peak_vram_gb_b{primary_b}"] = memory_delta
+            if c_bench.peak_vram_gb is not None and b_bench.peak_vram_gb is not None:
+                memory_delta = round(c_bench.peak_vram_gb - b_bench.peak_vram_gb, 3)
+                sys_deltas[f"peak_vram_gb_b{primary_b}"] = memory_delta
 
         # Pareto dominance: quality improved and no systems regression
         pareto_dominant = (

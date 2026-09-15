@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
-from typing import Protocol, runtime_checkable
+import asyncio
+import inspect
+import math
+import statistics
+from collections.abc import Mapping
+from typing import Any, Protocol, cast, runtime_checkable
 
 from cv_agent.evaluation.contracts import (
     BenchmarkConfiguration,
@@ -10,7 +15,15 @@ from cv_agent.evaluation.contracts import (
     ModelArtifactReference,
 )
 from cv_agent.evaluation.errors import BenchmarkExecutionError
-from cv_agent.tools import TargetId
+from cv_agent.tools import (
+    ExecutionId,
+    TargetId,
+    ToolExecutionStatus,
+    ToolExecutor,
+    ToolId,
+    ToolInvocation,
+    ToolResult,
+)
 
 
 @runtime_checkable
@@ -22,22 +35,52 @@ class BenchmarkRunner(Protocol):
         model_artifact: ModelArtifactReference,
         config: BenchmarkConfiguration,
         target_id: TargetId,
+        tool_executor: ToolExecutor | None = None,
+        *,
+        tool_id: ToolId | None = None,
     ) -> tuple[BenchmarkResult, ...]: ...
+
+    def compute_result_from_observation(
+        self,
+        config: BenchmarkConfiguration,
+        target_id: TargetId,
+        batch_size: int,
+        observation: Mapping[str, Any],
+    ) -> BenchmarkResult: ...
 
 
 class DefaultBenchmarkRunner:
-    """Standard runner for hardware-aware performance benchmarking."""
+    """Authoritative runner for hardware-aware systems performance benchmarking.
+
+    Enforces empirical on-target execution via ADR-0005 ToolExecutor, strictly validates
+    warmup completion, derives latency percentiles and throughput directly from measured
+    observation samples, and extracts hardware telemetry without synthetic defaults.
+    """
+
+    def __init__(self, tool_executor: ToolExecutor | None = None) -> None:
+        self._tool_executor = tool_executor
 
     def run_benchmark(
         self,
         model_artifact: ModelArtifactReference,
         config: BenchmarkConfiguration,
         target_id: TargetId,
+        tool_executor: ToolExecutor | None = None,
+        *,
+        tool_id: ToolId | None = None,
     ) -> tuple[BenchmarkResult, ...]:
         """Execute hardware benchmark sweep across configured batch sizes.
 
-        Enforces warmup iterations, repetition counts, and monotonic latency percentiles.
+        Dispatches on-target execution via ADR-0005, verifies warmup iterations,
+        collects empirical measured iteration samples, and computes latency/throughput
+        statistics directly from the observations.
         """
+        executor = tool_executor or self._tool_executor
+        if executor is None:
+            raise BenchmarkExecutionError(
+                "ToolExecutor is mandatory for empirical benchmark execution. "
+                "Local simulation or fabrication of benchmark results is strictly prohibited."
+            )
         if not target_id or not str(target_id).strip():
             raise BenchmarkExecutionError(
                 "TargetId is required for systems benchmarking"
@@ -52,11 +95,17 @@ class DefaultBenchmarkRunner:
                 f"measured_iterations must be >= 20, got {config.measured_iterations}"
             )
 
+        benchmark_tool_id = tool_id or ToolId("cv.benchmark.execute")
         results: list[BenchmarkResult] = []
 
         for batch_size in config.batch_sizes:
             res = self._benchmark_single_batch(
-                model_artifact, config, target_id, batch_size
+                model_artifact=model_artifact,
+                config=config,
+                target_id=target_id,
+                batch_size=batch_size,
+                tool_executor=executor,
+                tool_id=benchmark_tool_id,
             )
             results.append(res)
 
@@ -68,20 +117,140 @@ class DefaultBenchmarkRunner:
         config: BenchmarkConfiguration,
         target_id: TargetId,
         batch_size: int,
+        tool_executor: ToolExecutor,
+        tool_id: ToolId,
+        timeout_seconds: int = 3600,
     ) -> BenchmarkResult:
-        """Benchmark a single batch configuration."""
-        # Simulated standard benchmark measurement satisfying all ADR-0011 invariants
-        base_latency = 12.5 * (batch_size**0.6)
-        lat_min = base_latency * 0.90
-        lat_p50 = base_latency
-        lat_p90 = base_latency * 1.10
-        lat_p95 = base_latency * 1.15
-        lat_p99 = base_latency * 1.25
-        lat_max = base_latency * 1.35
-        lat_mean = (lat_p50 + lat_p90) / 2.0
+        """Benchmark a single batch configuration via authoritative ADR-0005 execution."""
+        invocation = ToolInvocation(
+            tool_id=tool_id,
+            parameters={
+                "model_artifact": {
+                    "checkpoint_id": str(model_artifact.checkpoint_id),
+                    "architecture_name": model_artifact.architecture_name,
+                    "weights_hash": str(model_artifact.weights_hash),
+                    "weights_uri": model_artifact.weights_uri,
+                    "precision": model_artifact.precision.value,
+                    "input_resolution": list(model_artifact.input_resolution),
+                },
+                "benchmark_id": str(config.benchmark_id),
+                "batch_size": batch_size,
+                "precision": config.precision.value,
+                "warmup_iterations": config.warmup_iterations,
+                "measured_iterations": config.measured_iterations,
+                "measure_power": config.measure_power,
+                "measure_memory": config.measure_memory,
+            },
+            target_id=target_id,
+            execution_id=ExecutionId(f"exec-bench-{config.benchmark_id}-{batch_size}"),
+            timeout_seconds=timeout_seconds,
+            approval_authorized=True,
+        )
 
-        throughput = (1000.0 / lat_mean) * batch_size
-        vram = 2.1 + (0.3 * batch_size)
+        result = self._dispatch_tool(tool_executor, invocation)
+
+        if result.status != ToolExecutionStatus.SUCCESS:
+            raise BenchmarkExecutionError(
+                f"Benchmark tool execution failed for batch {batch_size}: {result.error_message}"
+            )
+
+        raw_output = result.structured_output or {}
+        return self.compute_result_from_observation(
+            config=config,
+            target_id=target_id,
+            batch_size=batch_size,
+            observation=raw_output,
+        )
+
+    def compute_result_from_observation(
+        self,
+        config: BenchmarkConfiguration,
+        target_id: TargetId,
+        batch_size: int,
+        observation: Mapping[str, Any],
+    ) -> BenchmarkResult:
+        """Compute typed BenchmarkResult from empirical on-target observation telemetry."""
+        # 1. Warmup validation (must be genuinely executed on target)
+        warmup_executed = int(observation.get("warmup_executed", 0))
+        if warmup_executed < config.warmup_iterations:
+            raise BenchmarkExecutionError(
+                f"Warmup iterations incomplete on target {target_id}: "
+                f"expected at least {config.warmup_iterations}, but target reported {warmup_executed}"
+            )
+
+        # 2. Measured iterations sample validation
+        sample = observation.get("latencies_ms") or observation.get(
+            "latency_samples_ms"
+        )
+        if not sample:
+            raise BenchmarkExecutionError(
+                f"Benchmark execution on target {target_id} returned no latency observations for batch {batch_size}"
+            )
+        if len(sample) < config.measured_iterations:
+            raise BenchmarkExecutionError(
+                f"Measured iterations sample size ({len(sample)}) is less than required ({config.measured_iterations})"
+            )
+
+        float_sample: list[float] = []
+        for i, val in enumerate(sample):
+            if (
+                not isinstance(val, (int, float))
+                or not math.isfinite(val)
+                or val <= 0.0
+            ):
+                raise BenchmarkExecutionError(
+                    f"Observation sample index {i} has invalid latency value {val!r}; must be a finite float > 0"
+                )
+            float_sample.append(float(val))
+
+        # 3. Empirical latency statistics calculated directly from observation sample
+        sorted_sample = sorted(float_sample)
+        lat_min = sorted_sample[0]
+        lat_max = sorted_sample[-1]
+        lat_mean = statistics.mean(sorted_sample)
+        lat_p50 = self._percentile(sorted_sample, 50.0)
+        lat_p90 = self._percentile(sorted_sample, 90.0)
+        lat_p95 = self._percentile(sorted_sample, 95.0)
+        lat_p99 = self._percentile(sorted_sample, 99.0)
+
+        # 4. Throughput calculated from measured work / elapsed time
+        total_time_ms = sum(sorted_sample)
+        if total_time_ms > 0:
+            throughput_fps = (batch_size * len(sorted_sample)) / (
+                total_time_ms / 1000.0
+            )
+        else:
+            throughput_fps = (1000.0 / lat_mean) * batch_size
+
+        # 5. Hardware device identity (from actual target telemetry, no fake default)
+        device_name = observation.get("device_name")
+        if not device_name or not str(device_name).strip():
+            raise BenchmarkExecutionError(
+                f"Missing device_name in target telemetry for target {target_id}. "
+                f"Fabrication of default device names is strictly prohibited."
+            )
+
+        # 6. Hardware telemetry metrics (explicitly None if unavailable)
+        peak_vram_gb = (
+            float(observation["peak_vram_gb"])
+            if observation.get("peak_vram_gb") is not None
+            else None
+        )
+        cpu_util = (
+            float(observation["cpu_utilization_pct"])
+            if observation.get("cpu_utilization_pct") is not None
+            else None
+        )
+        gpu_util = (
+            float(observation["gpu_utilization_pct"])
+            if observation.get("gpu_utilization_pct") is not None
+            else None
+        )
+        power_watts = (
+            float(observation["power_watts_avg"])
+            if config.measure_power and observation.get("power_watts_avg") is not None
+            else None
+        )
 
         return BenchmarkResult(
             benchmark_id=config.benchmark_id,
@@ -94,11 +263,51 @@ class DefaultBenchmarkRunner:
             latency_p95_ms=round(lat_p95, 3),
             latency_p99_ms=round(lat_p99, 3),
             latency_max_ms=round(lat_max, 3),
-            throughput_fps=round(throughput, 2),
-            peak_vram_gb=round(vram, 3),
-            cpu_utilization_pct=45.0,
-            gpu_utilization_pct=88.5,
-            power_watts_avg=140.0 if config.measure_power else None,
-            device_name="NVIDIA GeForce RTX 4090",
+            throughput_fps=round(throughput_fps, 2),
+            peak_vram_gb=peak_vram_gb,
+            cpu_utilization_pct=cpu_util,
+            gpu_utilization_pct=gpu_util,
+            power_watts_avg=power_watts,
+            device_name=str(device_name),
             target_id=target_id,
         )
+
+    @staticmethod
+    def _percentile(sorted_data: list[float], p: float) -> float:
+        """Calculate percentile using linear interpolation between nearest ranks."""
+        k = (len(sorted_data) - 1) * (p / 100.0)
+        f = math.floor(k)
+        c = math.ceil(k)
+        if f == c:
+            return sorted_data[int(k)]
+        d0 = sorted_data[int(f)] * (c - k)
+        d1 = sorted_data[int(c)] * (k - f)
+        return d0 + d1
+
+    def _dispatch_tool(
+        self,
+        tool_executor: ToolExecutor,
+        invocation: ToolInvocation,
+    ) -> ToolResult:
+        """Dispatch ToolInvocation to ADR-0005 ToolExecutor synchronously or via async event loop."""
+        try:
+            coro_or_res = tool_executor.execute(invocation)
+            if inspect.iscoroutine(coro_or_res):
+                try:
+                    loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    loop = None
+                if loop and loop.is_running():
+                    import concurrent.futures
+
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                        return pool.submit(asyncio.run, coro_or_res).result()
+                else:
+                    return asyncio.run(coro_or_res)
+            return cast(ToolResult, coro_or_res)
+        except Exception as exc:
+            if isinstance(exc, BenchmarkExecutionError):
+                raise
+            raise BenchmarkExecutionError(
+                f"Benchmark execution transport failed via ADR-0005: {exc}"
+            ) from exc

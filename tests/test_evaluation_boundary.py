@@ -18,7 +18,7 @@ from __future__ import annotations
 import ast
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -36,6 +36,7 @@ from cv_agent.dataset import (
 )
 from cv_agent.dataset.types import ContentHash
 from cv_agent.domain import CapabilityId
+from cv_agent.evaluation.benchmarks import DefaultBenchmarkRunner
 from cv_agent.evaluation.canonicalization import (
     extract_evaluation_operation_payload,
 )
@@ -56,6 +57,7 @@ from cv_agent.evaluation.contracts import (
 from cv_agent.evaluation.diagnostics import DefaultErrorAnalyzer
 from cv_agent.evaluation.errors import (
     BaselineComparisonError,
+    BenchmarkExecutionError,
     EvaluationApprovalRequiredError,
     EvaluationError,
     EvaluationValidationError,
@@ -261,16 +263,48 @@ def _make_valid_dataset_manifest(
     )
 
 
+def _make_mock_benchmark_observations(
+    warmup_executed: int = 10,
+    n_samples: int = 50,
+    base_latency: float = 12.5,
+    device_name: str = "NVIDIA RTX A6000",
+) -> dict[str, Any]:
+    return {
+        "warmup_executed": warmup_executed,
+        "latencies_ms": [base_latency + (i * 0.05) for i in range(n_samples)],
+        "device_name": device_name,
+        "peak_vram_gb": 4.2,
+        "cpu_utilization_pct": 35.0,
+        "gpu_utilization_pct": 78.0,
+        "power_watts_avg": 165.0,
+    }
+
+
 def _make_mock_executor(
     status: ToolExecutionStatus = ToolExecutionStatus.SUCCESS,
     error_message: str | None = None,
+    benchmark_observations: dict[str, Any] | None = None,
 ) -> Any:
+    default_bench = _make_mock_benchmark_observations()
+    bench_data = (
+        benchmark_observations if benchmark_observations is not None else default_bench
+    )
+
     class _MockExecutor:
         def __init__(self) -> None:
             self.invocations: list[ToolInvocation] = []
 
         async def execute(self, invocation: ToolInvocation) -> ToolResult:
             self.invocations.append(invocation)
+            if invocation.tool_id == ToolId("cv.benchmark.execute"):
+                return ToolResult(
+                    tool_id=invocation.tool_id,
+                    execution_id=invocation.execution_id,
+                    target_id=invocation.target_id,
+                    status=status,
+                    error_message=error_message,
+                    structured_output=bench_data,
+                )
             return ToolResult(
                 tool_id=invocation.tool_id,
                 execution_id=invocation.execution_id,
@@ -1006,3 +1040,347 @@ def test_reproducibility_environment_packaging() -> None:
     assert result.quality_metrics[0].primary_value == 0.82
     assert result.environment.git_commit_sha == "0" * 40
     assert result.environment.python_version == "3.11.0"
+
+
+# =============================================================================
+# Test 30: BenchmarkRunner requires mandatory ToolExecutor
+# =============================================================================
+def test_benchmark_runner_requires_mandatory_tool_executor() -> None:
+    """Verify DefaultBenchmarkRunner rejects execution without authoritative ToolExecutor."""
+    runner = DefaultBenchmarkRunner(tool_executor=None)
+    plan = _make_valid_plan()
+    assert plan.benchmark_config is not None
+
+    with pytest.raises(BenchmarkExecutionError, match="ToolExecutor is mandatory"):
+        runner.run_benchmark(
+            model_artifact=plan.model_artifact,
+            config=plan.benchmark_config,
+            target_id=TargetId("target-01"),
+            tool_executor=None,
+        )
+
+    # Missing or None TargetId also fails closed
+    mock_exec = _make_mock_executor()
+    with pytest.raises(BenchmarkExecutionError, match="TargetId is required"):
+        runner.run_benchmark(
+            model_artifact=plan.model_artifact,
+            config=plan.benchmark_config,
+            target_id=cast(TargetId, None),
+            tool_executor=mock_exec,
+        )
+
+
+# =============================================================================
+# Test 31: Benchmark execution delegates on-target via ADR-0005
+# =============================================================================
+def test_benchmark_runner_executes_on_target_via_adr0005() -> None:
+    """Verify BenchmarkRunner dispatches ToolInvocation per batch size with accurate params."""
+    mock_exec = _make_mock_executor()
+    runner = DefaultBenchmarkRunner(tool_executor=mock_exec)
+    plan = _make_valid_plan()
+    assert plan.benchmark_config is not None
+
+    target = TargetId("target-a100")
+    results = runner.run_benchmark(
+        model_artifact=plan.model_artifact,
+        config=plan.benchmark_config,
+        target_id=target,
+    )
+
+    # config has batch sizes (1, 4)
+    assert len(results) == 2
+    assert len(mock_exec.invocations) == 2
+    for inv, expected_bs in zip(mock_exec.invocations, (1, 4), strict=True):
+        assert inv.tool_id == ToolId("cv.benchmark.execute")
+        assert inv.target_id == target
+        assert inv.parameters["batch_size"] == expected_bs
+        assert (
+            inv.parameters["model_artifact"]["checkpoint_id"]
+            == plan.model_artifact.checkpoint_id
+        )
+        assert (
+            inv.parameters["warmup_iterations"]
+            == plan.benchmark_config.warmup_iterations
+        )
+        assert (
+            inv.parameters["measured_iterations"]
+            == plan.benchmark_config.measured_iterations
+        )
+
+
+# =============================================================================
+# Test 32: Incomplete warmup iterations fails closed
+# =============================================================================
+def test_benchmark_runner_incomplete_warmup_fails_closed() -> None:
+    """Verify target telemetry with warmup_executed < warmup_iterations is rejected."""
+    plan = _make_valid_plan()
+    assert plan.benchmark_config is not None
+
+    mock_exec = _make_mock_executor(
+        benchmark_observations={
+            "warmup_executed": 4,  # Required: 10
+            "latencies_ms": [10.0] * 50,
+            "device_name": "NVIDIA RTX A6000",
+        }
+    )
+    runner = DefaultBenchmarkRunner(tool_executor=mock_exec)
+    with pytest.raises(BenchmarkExecutionError, match="Warmup iterations incomplete"):
+        runner.run_benchmark(
+            model_artifact=plan.model_artifact,
+            config=plan.benchmark_config,
+            target_id=TargetId("target-01"),
+        )
+
+
+# =============================================================================
+# Test 33: Insufficient measured iterations fails closed
+# =============================================================================
+def test_benchmark_runner_insufficient_samples_fails_closed() -> None:
+    """Verify target telemetry with fewer observations than measured_iterations fails closed."""
+    plan = _make_valid_plan()
+    assert plan.benchmark_config is not None
+
+    mock_exec = _make_mock_executor(
+        benchmark_observations={
+            "warmup_executed": 10,
+            "latencies_ms": [10.0] * 19,  # Required: 50
+            "device_name": "NVIDIA RTX A6000",
+        }
+    )
+    runner = DefaultBenchmarkRunner(tool_executor=mock_exec)
+    with pytest.raises(
+        BenchmarkExecutionError, match="sample size .* is less than required"
+    ):
+        runner.run_benchmark(
+            model_artifact=plan.model_artifact,
+            config=plan.benchmark_config,
+            target_id=TargetId("target-01"),
+        )
+
+
+# =============================================================================
+# Test 34: Non-positive or non-finite latency observations fail closed
+# =============================================================================
+def test_benchmark_runner_non_positive_or_non_finite_latency_fails_closed() -> None:
+    """Verify observation sample containing zero, negative, NaN, or Inf values is rejected."""
+    runner = DefaultBenchmarkRunner()
+    plan = _make_valid_plan()
+    assert plan.benchmark_config is not None
+
+    invalid_samples = [
+        [10.0, 0.0] + [10.0] * 48,
+        [10.0, -2.5] + [10.0] * 48,
+        [10.0, float("nan")] + [10.0] * 48,
+        [10.0, float("inf")] + [10.0] * 48,
+    ]
+
+    for sample in invalid_samples:
+        obs = {
+            "warmup_executed": 10,
+            "latencies_ms": sample,
+            "device_name": "NVIDIA RTX A6000",
+        }
+        with pytest.raises(BenchmarkExecutionError, match="invalid latency value"):
+            runner.compute_result_from_observation(
+                config=plan.benchmark_config,
+                target_id=TargetId("target-01"),
+                batch_size=1,
+                observation=obs,
+            )
+
+
+# =============================================================================
+# Test 35: Missing or empty device_name in target telemetry fails closed
+# =============================================================================
+def test_benchmark_runner_missing_device_name_fails_closed() -> None:
+    """Verify target telemetry missing device_name fails closed without fabricating defaults."""
+    runner = DefaultBenchmarkRunner()
+    plan = _make_valid_plan()
+    assert plan.benchmark_config is not None
+
+    for bad_device in [None, "", "   "]:
+        obs = {
+            "warmup_executed": 10,
+            "latencies_ms": [10.0] * 50,
+            "device_name": bad_device,
+        }
+        with pytest.raises(
+            BenchmarkExecutionError, match="Missing device_name in target telemetry"
+        ):
+            runner.compute_result_from_observation(
+                config=plan.benchmark_config,
+                target_id=TargetId("target-01"),
+                batch_size=1,
+                observation=obs,
+            )
+
+
+# =============================================================================
+# Test 36: Empirical percentiles and throughput calculated strictly from observations
+# =============================================================================
+def test_benchmark_runner_empirical_percentiles_and_throughput_calculation() -> None:
+    """Verify latency percentiles and throughput derive directly from empirical samples."""
+    runner = DefaultBenchmarkRunner()
+    plan = _make_valid_plan()
+    assert plan.benchmark_config is not None
+
+    # 100 observations from 10.0 to 109.0 ms
+    samples = [10.0 + i for i in range(100)]
+    total_time_ms = sum(samples)
+    batch_size = 4
+
+    obs = {
+        "warmup_executed": 10,
+        "latencies_ms": samples,
+        "device_name": "NVIDIA A100-SXM4-80GB",
+        "peak_vram_gb": 6.8,
+        "cpu_utilization_pct": 28.5,
+        "gpu_utilization_pct": 92.0,
+        "power_watts_avg": 275.0,
+    }
+
+    bench_cfg = plan.benchmark_config.model_copy(update={"measure_power": True})
+    result = runner.compute_result_from_observation(
+        config=bench_cfg,
+        target_id=TargetId("cluster-node-01"),
+        batch_size=batch_size,
+        observation=obs,
+    )
+
+    assert result.latency_min_ms == 10.0
+    assert result.latency_max_ms == 109.0
+    assert result.latency_mean_ms == pytest.approx(59.5, abs=0.01)
+    assert result.latency_p50_ms == pytest.approx(59.5, abs=0.01)
+    assert result.latency_p90_ms == pytest.approx(99.1, abs=0.01)
+    assert result.latency_p95_ms == pytest.approx(104.05, abs=0.01)
+    assert result.latency_p99_ms == pytest.approx(108.01, abs=0.01)
+
+    expected_throughput = (batch_size * 100) / (total_time_ms / 1000.0)
+    assert result.throughput_fps == pytest.approx(
+        round(expected_throughput, 2), abs=0.01
+    )
+    assert result.device_name == "NVIDIA A100-SXM4-80GB"
+    assert result.peak_vram_gb == 6.8
+    assert result.cpu_utilization_pct == 28.5
+    assert result.gpu_utilization_pct == 92.0
+    assert result.power_watts_avg == 275.0
+
+
+# =============================================================================
+# Test 37: Unavailable hardware telemetry remains strictly None
+# =============================================================================
+def test_benchmark_runner_unavailable_metrics_remain_none() -> None:
+    """Verify hardware metrics missing from target telemetry remain explicitly None."""
+    runner = DefaultBenchmarkRunner()
+    plan = _make_valid_plan()
+    assert plan.benchmark_config is not None
+
+    obs = {
+        "warmup_executed": 10,
+        "latencies_ms": [15.0] * 50,
+        "device_name": "Apple M2 Max",
+        # Telemetry absent:
+        "peak_vram_gb": None,
+        "cpu_utilization_pct": None,
+        "gpu_utilization_pct": None,
+        "power_watts_avg": None,
+    }
+
+    result = runner.compute_result_from_observation(
+        config=plan.benchmark_config,
+        target_id=TargetId("metal-dev-01"),
+        batch_size=1,
+        observation=obs,
+    )
+
+    assert result.device_name == "Apple M2 Max"
+    assert result.peak_vram_gb is None
+    assert result.cpu_utilization_pct is None
+    assert result.gpu_utilization_pct is None
+    assert result.power_watts_avg is None
+
+
+# =============================================================================
+# Test 38: Canonicalization field-completeness regression test
+# =============================================================================
+def test_canonical_payload_field_completeness_regression() -> None:
+    """Verify every functional field on EvaluationPlan is extracted and alters payload hash."""
+    base_plan = _make_valid_plan()
+    base_payload = extract_evaluation_operation_payload(base_plan)
+    base_hash = compute_payload_hash(base_payload)
+
+    # Permitted transient execution fields excluded from canonical operation hash
+    transient_fields = {"created_at"}
+
+    plan_fields = set(EvaluationPlan.model_fields.keys())
+    assert plan_fields.issuperset(
+        {
+            "evaluation_id",
+            "experiment_id",
+            "capability_id",
+            "dataset_binding",
+            "model_artifact",
+            "task_type",
+            "metrics",
+            "benchmark_config",
+            "baseline_experiment_id",
+            "target_requirements",
+            "evaluation_requirements",
+            "reproducibility_requirements",
+        }
+    )
+
+    # Verify all non-transient fields are explicitly present in the canonical payload
+    for field_name in plan_fields - transient_fields:
+        assert field_name in base_payload, (
+            f"Functional field '{field_name}' on EvaluationPlan is missing from canonical payload! "
+            f"Every field affecting evaluation execution must be explicitly represented."
+        )
+
+    # Adversarially mutate each functional field and verify hash changes
+    mutations: dict[str, Any] = {
+        "evaluation_id": EvaluationId("eval-mutated-999"),
+        "experiment_id": ExperimentId("exp-mutated-999"),
+        "capability_id": CapabilityId("cv.eval.custom_detector"),
+        "dataset_binding": EvaluationDatasetBinding(
+            dataset_id=DatasetId("coco-mutated"),
+            dataset_version=DatasetVersion("v2.0.0"),
+            dataset_manifest_hash=ContentHash("f" * 64),
+            split_name="val",
+        ),
+        "model_artifact": ModelArtifactReference(
+            checkpoint_id=CheckpointId("ckpt-mutated"),
+            architecture_name="yolov9",
+            weights_hash=ContentHash("f" * 64),
+            weights_uri="file:///models/yolov9.pt",
+            precision=TrainingPrecision.FP16_AMP,
+            input_resolution=(1280, 1280),
+        ),
+        "task_type": TaskType.CLASSIFICATION,
+        "metrics": (
+            MetricDefinition(
+                metric_id=MetricId("top1-acc"),
+                name="Top-1 Accuracy",
+                task_type=TaskType.CLASSIFICATION,
+                version="v1.0",
+                higher_is_better=True,
+            ),
+        ),
+        "benchmark_config": None,
+        "baseline_experiment_id": ExperimentId("exp-base-mutated"),
+        "target_requirements": EvaluationTargetRequirements(
+            required_hardware_class=HardwareClass.JETSON,
+        ),
+        "evaluation_requirements": {"max_inference_time_sec": 300},
+        "reproducibility_requirements": {"deterministic_cuda": True},
+    }
+
+    for field_name, mutated_val in mutations.items():
+        mutated_plan = base_plan.model_copy(update={field_name: mutated_val})
+        mutated_payload = extract_evaluation_operation_payload(mutated_plan)
+        mutated_hash = compute_payload_hash(mutated_payload)
+
+        assert mutated_hash != base_hash, (
+            f"Mutating field '{field_name}' did not change the canonical payload hash! "
+            f"Silent authorization gap detected."
+        )

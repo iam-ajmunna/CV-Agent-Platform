@@ -242,16 +242,16 @@ class BenchmarkResult(BaseModel):
     latency_p99_ms: float = Field(ge=0.0)
     latency_max_ms: float = Field(ge=0.0)
     throughput_fps: float = Field(gt=0.0)
-    peak_vram_gb: float = Field(ge=0.0)
-    cpu_utilization_pct: float = Field(ge=0.0)
-    gpu_utilization_pct: float = Field(ge=0.0)
+    peak_vram_gb: float | None = None
+    cpu_utilization_pct: float | None = None
+    gpu_utilization_pct: float | None = None
     power_watts_avg: float | None = None
     device_name: str
     target_id: TargetId
 
     @model_validator(mode="after")
     def _validate_percentiles_and_finiteness(self) -> BenchmarkResult:
-        # Check finite floats
+        # Check finite floats for mandatory metrics
         for field_name in [
             "latency_min_ms",
             "latency_mean_ms",
@@ -261,16 +261,35 @@ class BenchmarkResult(BaseModel):
             "latency_p99_ms",
             "latency_max_ms",
             "throughput_fps",
-            "peak_vram_gb",
-            "cpu_utilization_pct",
-            "gpu_utilization_pct",
         ]:
             _ensure_finite_float(getattr(self, field_name), field_name)
+
+        if self.peak_vram_gb is not None:
+            _ensure_finite_float(self.peak_vram_gb, "peak_vram_gb")
+            if self.peak_vram_gb < 0.0:
+                raise ValueError("peak_vram_gb must be non-negative")
+
+        if self.cpu_utilization_pct is not None:
+            _ensure_finite_float(self.cpu_utilization_pct, "cpu_utilization_pct")
+            if not (0.0 <= self.cpu_utilization_pct <= 100.0):
+                raise ValueError(
+                    f"cpu_utilization_pct must be between 0.0 and 100.0, got {self.cpu_utilization_pct}"
+                )
+
+        if self.gpu_utilization_pct is not None:
+            _ensure_finite_float(self.gpu_utilization_pct, "gpu_utilization_pct")
+            if not (0.0 <= self.gpu_utilization_pct <= 100.0):
+                raise ValueError(
+                    f"gpu_utilization_pct must be between 0.0 and 100.0, got {self.gpu_utilization_pct}"
+                )
 
         if self.power_watts_avg is not None:
             _ensure_finite_float(self.power_watts_avg, "power_watts_avg")
             if self.power_watts_avg < 0.0:
                 raise ValueError("power_watts_avg must be non-negative")
+
+        if not self.device_name or not str(self.device_name).strip():
+            raise ValueError("device_name cannot be empty")
 
         # Monotonic percentiles invariant:
         # 0 <= min <= p50 <= p90 <= p95 <= p99 <= max
@@ -287,11 +306,6 @@ class BenchmarkResult(BaseModel):
                 f"(min={self.latency_min_ms}, p50={self.latency_p50_ms}, "
                 f"p90={self.latency_p90_ms}, p95={self.latency_p95_ms}, "
                 f"p99={self.latency_p99_ms}, max={self.latency_max_ms})"
-            )
-
-        if self.gpu_utilization_pct > 100.0:
-            raise ValueError(
-                f"gpu_utilization_pct cannot exceed 100.0, got {self.gpu_utilization_pct}"
             )
 
         return self

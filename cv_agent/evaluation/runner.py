@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from typing import Any, Protocol, cast, runtime_checkable
 
 from cv_agent.dataset import DatasetManifest, OperationIdentity
+from cv_agent.evaluation.benchmarks import BenchmarkRunner, DefaultBenchmarkRunner
 from cv_agent.evaluation.canonicalization import (
     compute_evaluation_payload_hash,
     extract_evaluation_operation_payload,
@@ -19,13 +20,13 @@ from cv_agent.evaluation.contracts import (
     EvaluationPlan,
     EvaluationResult,
 )
-from cv_agent.evaluation.diagnostics import DefaultErrorAnalyzer
+from cv_agent.evaluation.diagnostics import DefaultErrorAnalyzer, ErrorAnalyzer
 from cv_agent.evaluation.errors import (
     EvaluationApprovalRequiredError,
     EvaluationError,
     EvaluationValidationError,
 )
-from cv_agent.evaluation.metrics import StandardMetricCalculator
+from cv_agent.evaluation.metrics import MetricCalculator, StandardMetricCalculator
 from cv_agent.evaluation.types import EvaluationVerdict
 from cv_agent.orchestration import ApprovalDecision, ApprovalRequest, ApprovalStatus
 from cv_agent.tools import (
@@ -87,9 +88,15 @@ class EvaluationRunner(Protocol):
 class DefaultEvaluationRunner:
     """Standard evaluation runner coordinating plan validation, approval verification, and ADR-0005 dispatch."""
 
-    def __init__(self) -> None:
-        self.metric_calculator = StandardMetricCalculator()
-        self.error_analyzer = DefaultErrorAnalyzer()
+    def __init__(
+        self,
+        metric_calculator: MetricCalculator | None = None,
+        error_analyzer: ErrorAnalyzer | None = None,
+        benchmark_runner: BenchmarkRunner | None = None,
+    ) -> None:
+        self.metric_calculator = metric_calculator or StandardMetricCalculator()
+        self.error_analyzer = error_analyzer or DefaultErrorAnalyzer()
+        self.benchmark_runner = benchmark_runner or DefaultBenchmarkRunner()
 
     def validate_plan(
         self,
@@ -400,13 +407,16 @@ class DefaultEvaluationRunner:
             )
 
         # Parse tool result into immutable EvaluationResult
-        return self._build_evaluation_result(plan, resolved_target_id, result)
+        return self._build_evaluation_result(
+            plan, resolved_target_id, result, tool_executor=tool_executor
+        )
 
     def _build_evaluation_result(
         self,
         plan: EvaluationPlan,
         target_id: TargetId,
         tool_result: ToolResult,
+        tool_executor: ToolExecutor | None = None,
     ) -> EvaluationResult:
         """Assemble typed EvaluationResult from execution outputs."""
         output_data = tool_result.structured_output or {}
@@ -421,26 +431,40 @@ class DefaultEvaluationRunner:
         # 2. System benchmarks (if benchmark_config is declared)
         benchmarks: list[BenchmarkResult] = []
         if plan.benchmark_config is not None:
-            for b_size in plan.benchmark_config.batch_sizes:
-                base_lat = 10.0 * (b_size**0.5)
-                benchmarks.append(
-                    BenchmarkResult(
-                        benchmark_id=plan.benchmark_config.benchmark_id,
-                        batch_size=b_size,
-                        precision=plan.benchmark_config.precision,
-                        latency_min_ms=round(base_lat * 0.9, 2),
-                        latency_mean_ms=round(base_lat * 1.05, 2),
-                        latency_p50_ms=round(base_lat, 2),
-                        latency_p90_ms=round(base_lat * 1.1, 2),
-                        latency_p95_ms=round(base_lat * 1.15, 2),
-                        latency_p99_ms=round(base_lat * 1.2, 2),
-                        latency_max_ms=round(base_lat * 1.3, 2),
-                        throughput_fps=round((1000.0 / base_lat) * b_size, 2),
-                        peak_vram_gb=2.5,
-                        cpu_utilization_pct=40.0,
-                        gpu_utilization_pct=85.0,
-                        device_name="Target Device",
+            raw_benchmarks = output_data.get("system_benchmarks")
+            raw_observations = output_data.get("benchmark_observations")
+            if raw_benchmarks is not None:
+                for b in raw_benchmarks:
+                    if isinstance(b, BenchmarkResult):
+                        benchmarks.append(b)
+                    elif isinstance(b, dict):
+                        benchmarks.append(BenchmarkResult.model_validate(b))
+            elif raw_observations is not None:
+                if isinstance(raw_observations, list):
+                    for obs in raw_observations:
+                        bs = int(
+                            obs.get("batch_size", plan.benchmark_config.batch_sizes[0])
+                        )
+                        benchmarks.append(
+                            self.benchmark_runner.compute_result_from_observation(
+                                plan.benchmark_config, target_id, bs, obs
+                            )
+                        )
+                elif isinstance(raw_observations, dict):
+                    for bs_str, obs in raw_observations.items():
+                        bs = int(bs_str)
+                        benchmarks.append(
+                            self.benchmark_runner.compute_result_from_observation(
+                                plan.benchmark_config, target_id, bs, obs
+                            )
+                        )
+            elif tool_executor is not None:
+                benchmarks.extend(
+                    self.benchmark_runner.run_benchmark(
+                        model_artifact=plan.model_artifact,
+                        config=plan.benchmark_config,
                         target_id=target_id,
+                        tool_executor=tool_executor,
                     )
                 )
 
