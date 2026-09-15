@@ -20,13 +20,13 @@ Phase 2L (ADR-0011 Evaluation Subsystem) runtime implementation is complete on `
 
 | Item | Issue | PR | State |
 |---|---|---|---|
-| Phase 2L runtime implementation | #60 | — | Implemented & verified; ready for PR & adversarial PM review |
+| Phase 2L runtime implementation | #60 | #61 | Implemented; CI 5/5 green; ready for PM adversarial review |
 
 ## Next 3 actions
 
-1. Commit and push `feature/ajmunna/phase-2l-evaluation-subsystem`.
-2. Open implementation PR linked to Issue #60 and verify GitHub Actions CI matrix (Python 3.10–3.13).
-3. Present PR for Official PM adversarial architecture review.
+1. Present PR #61 for Official PM adversarial architecture review.
+2. Address any review findings or complete squash-merge upon approval.
+3. Advance to the next roadmap milestone after Phase 2L merge.
 
 ## Blockers
 
