@@ -86,6 +86,7 @@ from cv_agent.tools import (
     ActiveJobHandoff,
     TargetId,
     ToolExecutionStatus,
+    ToolExecutor,
     ToolId,
     ToolInvocation,
     ToolResult,
@@ -268,6 +269,8 @@ def _make_mock_benchmark_observations(
     n_samples: int = 50,
     base_latency: float = 12.5,
     device_name: str = "NVIDIA RTX A6000",
+    timing_synchronized: bool = True,
+    timing_source: str = "cuda_event",
 ) -> dict[str, Any]:
     return {
         "warmup_executed": warmup_executed,
@@ -277,6 +280,8 @@ def _make_mock_benchmark_observations(
         "cpu_utilization_pct": 35.0,
         "gpu_utilization_pct": 78.0,
         "power_watts_avg": 165.0,
+        "timing_synchronized": timing_synchronized,
+        "timing_source": timing_source,
     }
 
 
@@ -296,7 +301,9 @@ def _make_mock_executor(
 
         async def execute(self, invocation: ToolInvocation) -> ToolResult:
             self.invocations.append(invocation)
-            if invocation.tool_id == ToolId("cv.benchmark.execute"):
+            if invocation.tool_id == ToolId("cv.benchmark.execute") or str(
+                invocation.execution_id
+            ).startswith("exec-bench"):
                 return ToolResult(
                     tool_id=invocation.tool_id,
                     execution_id=invocation.execution_id,
@@ -1047,7 +1054,7 @@ def test_reproducibility_environment_packaging() -> None:
 # =============================================================================
 def test_benchmark_runner_requires_mandatory_tool_executor() -> None:
     """Verify DefaultBenchmarkRunner rejects execution without authoritative ToolExecutor."""
-    runner = DefaultBenchmarkRunner(tool_executor=None)
+    runner = DefaultBenchmarkRunner()
     plan = _make_valid_plan()
     assert plan.benchmark_config is not None
 
@@ -1056,7 +1063,8 @@ def test_benchmark_runner_requires_mandatory_tool_executor() -> None:
             model_artifact=plan.model_artifact,
             config=plan.benchmark_config,
             target_id=TargetId("target-01"),
-            tool_executor=None,
+            tool_executor=cast(ToolExecutor, None),
+            tool_id=ToolId("cv.benchmark.execute"),
         )
 
     # Missing or None TargetId also fails closed
@@ -1067,6 +1075,7 @@ def test_benchmark_runner_requires_mandatory_tool_executor() -> None:
             config=plan.benchmark_config,
             target_id=cast(TargetId, None),
             tool_executor=mock_exec,
+            tool_id=ToolId("cv.benchmark.execute"),
         )
 
 
@@ -1076,7 +1085,7 @@ def test_benchmark_runner_requires_mandatory_tool_executor() -> None:
 def test_benchmark_runner_executes_on_target_via_adr0005() -> None:
     """Verify BenchmarkRunner dispatches ToolInvocation per batch size with accurate params."""
     mock_exec = _make_mock_executor()
-    runner = DefaultBenchmarkRunner(tool_executor=mock_exec)
+    runner = DefaultBenchmarkRunner()
     plan = _make_valid_plan()
     assert plan.benchmark_config is not None
 
@@ -1085,6 +1094,8 @@ def test_benchmark_runner_executes_on_target_via_adr0005() -> None:
         model_artifact=plan.model_artifact,
         config=plan.benchmark_config,
         target_id=target,
+        tool_executor=mock_exec,
+        tool_id=ToolId("cv.benchmark.execute"),
     )
 
     # config has batch sizes (1, 4)
@@ -1121,14 +1132,18 @@ def test_benchmark_runner_incomplete_warmup_fails_closed() -> None:
             "warmup_executed": 4,  # Required: 10
             "latencies_ms": [10.0] * 50,
             "device_name": "NVIDIA RTX A6000",
+            "timing_synchronized": True,
+            "timing_source": "cuda_event",
         }
     )
-    runner = DefaultBenchmarkRunner(tool_executor=mock_exec)
+    runner = DefaultBenchmarkRunner()
     with pytest.raises(BenchmarkExecutionError, match="Warmup iterations incomplete"):
         runner.run_benchmark(
             model_artifact=plan.model_artifact,
             config=plan.benchmark_config,
             target_id=TargetId("target-01"),
+            tool_executor=mock_exec,
+            tool_id=ToolId("cv.benchmark.execute"),
         )
 
 
@@ -1145,9 +1160,11 @@ def test_benchmark_runner_insufficient_samples_fails_closed() -> None:
             "warmup_executed": 10,
             "latencies_ms": [10.0] * 19,  # Required: 50
             "device_name": "NVIDIA RTX A6000",
+            "timing_synchronized": True,
+            "timing_source": "cuda_event",
         }
     )
-    runner = DefaultBenchmarkRunner(tool_executor=mock_exec)
+    runner = DefaultBenchmarkRunner()
     with pytest.raises(
         BenchmarkExecutionError, match="sample size .* is less than required"
     ):
@@ -1155,6 +1172,8 @@ def test_benchmark_runner_insufficient_samples_fails_closed() -> None:
             model_artifact=plan.model_artifact,
             config=plan.benchmark_config,
             target_id=TargetId("target-01"),
+            tool_executor=mock_exec,
+            tool_id=ToolId("cv.benchmark.execute"),
         )
 
 
@@ -1237,6 +1256,8 @@ def test_benchmark_runner_empirical_percentiles_and_throughput_calculation() -> 
         "cpu_utilization_pct": 28.5,
         "gpu_utilization_pct": 92.0,
         "power_watts_avg": 275.0,
+        "timing_synchronized": True,
+        "timing_source": "cuda_event",
     }
 
     bench_cfg = plan.benchmark_config.model_copy(update={"measure_power": True})
@@ -1264,6 +1285,8 @@ def test_benchmark_runner_empirical_percentiles_and_throughput_calculation() -> 
     assert result.cpu_utilization_pct == 28.5
     assert result.gpu_utilization_pct == 92.0
     assert result.power_watts_avg == 275.0
+    assert result.timing_synchronized is True
+    assert result.timing_source == "cuda_event"
 
 
 # =============================================================================
@@ -1284,6 +1307,8 @@ def test_benchmark_runner_unavailable_metrics_remain_none() -> None:
         "cpu_utilization_pct": None,
         "gpu_utilization_pct": None,
         "power_watts_avg": None,
+        "timing_synchronized": True,
+        "timing_source": "metal_shared_event",
     }
 
     result = runner.compute_result_from_observation(
@@ -1298,6 +1323,8 @@ def test_benchmark_runner_unavailable_metrics_remain_none() -> None:
     assert result.cpu_utilization_pct is None
     assert result.gpu_utilization_pct is None
     assert result.power_watts_avg is None
+    assert result.timing_synchronized is True
+    assert result.timing_source == "metal_shared_event"
 
 
 # =============================================================================
@@ -1384,3 +1411,232 @@ def test_canonical_payload_field_completeness_regression() -> None:
             f"Mutating field '{field_name}' did not change the canonical payload hash! "
             f"Silent authorization gap detected."
         )
+
+
+# =============================================================================
+# Test 39: BenchmarkRunner requires mandatory ToolId without fallback (B1)
+# =============================================================================
+def test_benchmark_runner_requires_mandatory_tool_id_without_fallback() -> None:
+    """Verify DefaultBenchmarkRunner fails closed when ToolId is absent; zero local synthesis."""
+    runner = DefaultBenchmarkRunner()
+    plan = _make_valid_plan()
+    assert plan.benchmark_config is not None
+    mock_exec = _make_mock_executor()
+
+    # None ToolId fails closed
+    with pytest.raises(BenchmarkExecutionError, match="ToolId is mandatory"):
+        runner.run_benchmark(
+            model_artifact=plan.model_artifact,
+            config=plan.benchmark_config,
+            target_id=TargetId("target-01"),
+            tool_executor=mock_exec,
+            tool_id=cast(ToolId, None),
+        )
+
+    # Blank/empty ToolId fails closed
+    with pytest.raises(BenchmarkExecutionError, match="ToolId is mandatory"):
+        runner.run_benchmark(
+            model_artifact=plan.model_artifact,
+            config=plan.benchmark_config,
+            target_id=TargetId("target-01"),
+            tool_executor=mock_exec,
+            tool_id=cast(ToolId, "   "),
+        )
+
+
+# =============================================================================
+# Test 40: Benchmark dispatch strictly propagates authorization status (B2)
+# =============================================================================
+def test_benchmark_runner_propagates_approval_authorized_flag() -> None:
+    """Verify BenchmarkRunner does not manufacture approval_authorized=True locally.
+
+    Authorization flag must originate from authoritative ADR-0003 verification.
+    """
+    mock_exec = _make_mock_executor()
+    runner = DefaultBenchmarkRunner()
+    plan = _make_valid_plan()
+    assert plan.benchmark_config is not None
+
+    # 1. Unspecified/default approval_authorized must be False
+    runner.run_benchmark(
+        model_artifact=plan.model_artifact,
+        config=plan.benchmark_config,
+        target_id=TargetId("target-a100"),
+        tool_executor=mock_exec,
+        tool_id=ToolId("cv.benchmark.execute"),
+    )
+    for inv in mock_exec.invocations:
+        assert inv.approval_authorized is False, (
+            "Benchmark runner manufactured approval_authorized=True locally!"
+        )
+
+    # 2. Explicitly passed approval_authorized=True is propagated
+    mock_exec.invocations.clear()
+    runner.run_benchmark(
+        model_artifact=plan.model_artifact,
+        config=plan.benchmark_config,
+        target_id=TargetId("target-a100"),
+        tool_executor=mock_exec,
+        tool_id=ToolId("cv.benchmark.execute"),
+        approval_authorized=True,
+    )
+    for inv in mock_exec.invocations:
+        assert inv.approval_authorized is True
+
+    # 3. High-level runner prepare_invocation defaults to False
+    eval_runner = DefaultEvaluationRunner()
+    inv_default = eval_runner.prepare_invocation(
+        plan, ToolId("cv.eval.execute"), TargetId("target-01")
+    )
+    assert inv_default.approval_authorized is False
+
+    # 4. execute() verifies ADR-0003 approval and passes approval_authorized=True
+    mock_exec.invocations.clear()
+    op_id, app_req, app_dec = _make_approval_context(plan)
+    eval_runner.execute(
+        plan=plan,
+        operation_identity=op_id,
+        approval_request=app_req,
+        approval_decision=app_dec,
+        tool_id=ToolId("cv.eval.execute"),
+        tool_executor=mock_exec,
+        target_id=TargetId("gpu-cluster-01"),
+    )
+    # The evaluation execution was dispatched with approval_authorized=True
+    assert mock_exec.invocations[0].approval_authorized is True
+
+
+# =============================================================================
+# Test 41: Accelerator benchmark missing timing synchronization fails closed (B3)
+# =============================================================================
+def test_benchmark_runner_accelerator_missing_timing_synchronization_fails_closed() -> (
+    None
+):
+    """Verify asynchronous accelerator benchmarks fail closed when synchronization is missing or False."""
+    runner = DefaultBenchmarkRunner()
+    plan = _make_valid_plan()
+    assert plan.benchmark_config is not None
+
+    # Missing timing_synchronized
+    obs_missing = {
+        "warmup_executed": 10,
+        "latencies_ms": [10.0] * 50,
+        "device_name": "NVIDIA A100-SXM4-80GB",
+        "timing_source": "cuda_event",
+    }
+    with pytest.raises(
+        BenchmarkExecutionError,
+        match="Hardware-synchronized timing is required for asynchronous accelerator measurements",
+    ):
+        runner.compute_result_from_observation(
+            config=plan.benchmark_config,
+            target_id=TargetId("target-gpu"),
+            batch_size=1,
+            observation=obs_missing,
+        )
+
+    # Explicitly False timing_synchronized
+    obs_false = {
+        "warmup_executed": 10,
+        "latencies_ms": [10.0] * 50,
+        "device_name": "NVIDIA A100-SXM4-80GB",
+        "timing_synchronized": False,
+        "timing_source": "cuda_event",
+    }
+    with pytest.raises(
+        BenchmarkExecutionError,
+        match="Hardware-synchronized timing is required for asynchronous accelerator measurements",
+    ):
+        runner.compute_result_from_observation(
+            config=plan.benchmark_config,
+            target_id=TargetId("target-gpu"),
+            batch_size=1,
+            observation=obs_false,
+        )
+
+
+# =============================================================================
+# Test 42: Accelerator benchmark invalid timing source fails closed (B3)
+# =============================================================================
+def test_benchmark_runner_accelerator_invalid_timing_source_fails_closed() -> None:
+    """Verify asynchronous accelerator benchmarks reject unsynchronized, empty, or missing timing sources."""
+    runner = DefaultBenchmarkRunner()
+    plan = _make_valid_plan()
+    assert plan.benchmark_config is not None
+
+    invalid_sources = [
+        None,
+        "",
+        "   ",
+        "unsynchronized",
+        "wall_clock_async",
+        "none",
+        "unknown",
+    ]
+
+    for bad_source in invalid_sources:
+        obs = {
+            "warmup_executed": 10,
+            "latencies_ms": [10.0] * 50,
+            "device_name": "NVIDIA A100-SXM4-80GB",
+            "timing_synchronized": True,
+            "timing_source": bad_source,
+        }
+        with pytest.raises(BenchmarkExecutionError):
+            runner.compute_result_from_observation(
+                config=plan.benchmark_config,
+                target_id=TargetId("target-gpu"),
+                batch_size=1,
+                observation=obs,
+            )
+
+
+# =============================================================================
+# Test 43: Accelerator timing synchronization attestation is preserved (B3)
+# =============================================================================
+def test_benchmark_runner_timing_synchronization_attestation_preserved() -> None:
+    """Verify hardware synchronization attestation is faithfully preserved in BenchmarkResult."""
+    runner = DefaultBenchmarkRunner()
+    plan = _make_valid_plan()
+    assert plan.benchmark_config is not None
+
+    # Accelerator target
+    obs_gpu = {
+        "warmup_executed": 10,
+        "latencies_ms": [10.0] * 50,
+        "device_name": "NVIDIA GeForce RTX 4090",
+        "timing_synchronized": True,
+        "timing_source": "cuda_event",
+    }
+    res_gpu = runner.compute_result_from_observation(
+        config=plan.benchmark_config,
+        target_id=TargetId("target-rtx4090"),
+        batch_size=1,
+        observation=obs_gpu,
+    )
+    assert res_gpu.timing_synchronized is True
+    assert res_gpu.timing_source == "cuda_event"
+
+    # CPU target does not require accelerator synchronization
+    cpu_config = plan.benchmark_config.model_copy(
+        update={
+            "target_requirements": EvaluationTargetRequirements(
+                required_hardware_class=HardwareClass.CPU,
+            )
+        }
+    )
+    obs_cpu = {
+        "warmup_executed": 10,
+        "latencies_ms": [25.0] * 50,
+        "device_name": "Intel Xeon Platinum 8480+",
+        "timing_synchronized": True,
+        "timing_source": "cpu_perf_counter",
+    }
+    res_cpu = runner.compute_result_from_observation(
+        config=cpu_config,
+        target_id=TargetId("target-cpu"),
+        batch_size=1,
+        observation=obs_cpu,
+    )
+    assert res_cpu.timing_synchronized is True
+    assert res_cpu.timing_source == "cpu_perf_counter"

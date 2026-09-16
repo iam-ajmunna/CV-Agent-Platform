@@ -22,6 +22,7 @@ from cv_agent.evaluation.contracts import (
 )
 from cv_agent.evaluation.diagnostics import DefaultErrorAnalyzer, ErrorAnalyzer
 from cv_agent.evaluation.errors import (
+    BenchmarkExecutionError,
     EvaluationApprovalRequiredError,
     EvaluationError,
     EvaluationValidationError,
@@ -68,6 +69,7 @@ class EvaluationRunner(Protocol):
         tool_id: ToolId,
         target_id: TargetId,
         *,
+        approval_authorized: bool = False,
         execution_id: ExecutionId | None = None,
         timeout_seconds: int = 86400,
     ) -> ToolInvocation: ...
@@ -82,6 +84,7 @@ class EvaluationRunner(Protocol):
         tool_executor: ToolExecutor,
         *,
         target_id: TargetId | None = None,
+        benchmark_tool_id: ToolId | None = None,
     ) -> EvaluationResult: ...
 
 
@@ -214,6 +217,7 @@ class DefaultEvaluationRunner:
         tool_id: ToolId,
         target_id: TargetId,
         *,
+        approval_authorized: bool = False,
         execution_id: ExecutionId | None = None,
         timeout_seconds: int = 86400,
     ) -> ToolInvocation:
@@ -238,7 +242,7 @@ class DefaultEvaluationRunner:
             target_id=target_id,
             execution_id=exec_id,
             timeout_seconds=timeout_seconds,
-            approval_authorized=True,
+            approval_authorized=approval_authorized,
         )
 
     def verify_approval(
@@ -355,6 +359,7 @@ class DefaultEvaluationRunner:
         tool_executor: ToolExecutor,
         *,
         target_id: TargetId | None = None,
+        benchmark_tool_id: ToolId | None = None,
     ) -> EvaluationResult:
         """Execute evaluation plan by verifying approval and delegating execution transport to ADR-0005.
 
@@ -397,7 +402,10 @@ class DefaultEvaluationRunner:
             )
 
         invocation = self.prepare_invocation(
-            plan, tool_id, target_id=resolved_target_id
+            plan,
+            tool_id,
+            target_id=resolved_target_id,
+            approval_authorized=True,
         )
         result = self._dispatch_invocation(tool_executor, invocation)
 
@@ -408,7 +416,13 @@ class DefaultEvaluationRunner:
 
         # Parse tool result into immutable EvaluationResult
         return self._build_evaluation_result(
-            plan, resolved_target_id, result, tool_executor=tool_executor
+            plan,
+            resolved_target_id,
+            result,
+            tool_executor=tool_executor,
+            tool_id=tool_id,
+            benchmark_tool_id=benchmark_tool_id,
+            approval_authorized=True,
         )
 
     def _build_evaluation_result(
@@ -417,6 +431,9 @@ class DefaultEvaluationRunner:
         target_id: TargetId,
         tool_result: ToolResult,
         tool_executor: ToolExecutor | None = None,
+        tool_id: ToolId | None = None,
+        benchmark_tool_id: ToolId | None = None,
+        approval_authorized: bool = False,
     ) -> EvaluationResult:
         """Assemble typed EvaluationResult from execution outputs."""
         output_data = tool_result.structured_output or {}
@@ -459,12 +476,20 @@ class DefaultEvaluationRunner:
                             )
                         )
             elif tool_executor is not None:
+                effective_tool_id = benchmark_tool_id or tool_id
+                if effective_tool_id is None:
+                    raise BenchmarkExecutionError(
+                        "tool_id is mandatory for benchmark execution. "
+                        "Local synthesis of ToolId is strictly prohibited."
+                    )
                 benchmarks.extend(
                     self.benchmark_runner.run_benchmark(
                         model_artifact=plan.model_artifact,
                         config=plan.benchmark_config,
                         target_id=target_id,
                         tool_executor=tool_executor,
+                        tool_id=effective_tool_id,
+                        approval_authorized=approval_authorized,
                     )
                 )
 
@@ -513,5 +538,5 @@ def parse_evaluation_result(tool_output: Any, plan: EvaluationPlan) -> Evaluatio
         structured_output=tool_output if isinstance(tool_output, dict) else {},
     )
     return runner._build_evaluation_result(
-        plan, TargetId("target-parsed"), dummy_result
+        plan, TargetId("target-parsed"), dummy_result, tool_id=dummy_result.tool_id
     )

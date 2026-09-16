@@ -1631,3 +1631,41 @@ Remediated the Official PM adversarial review findings for PR #61 rejecting synt
 
 **Left open:** Pushing remediated commit to `feature/ajmunna/phase-2l-evaluation-subsystem`, verifying CI checks on PR #61, and resubmitting to Official PM for final adversarial review.
 
+---
+
+## 2026-09-16 — Phase 2L Second Review Remediation: B1, B2, B3 Fixes (PR #61)
+
+**Did:**
+Remediated all three architectural blockers identified in the Official PM's second adversarial review of PR #61:
+1. **B1 — Elimination of Local `ToolId` Synthesis:**
+   - Updated `BenchmarkRunner.run_benchmark()` protocol and `DefaultBenchmarkRunner.run_benchmark()` to require `tool_id: ToolId` and `tool_executor: ToolExecutor` as mandatory positional arguments.
+   - Deleted all fallback synthesis (`benchmark_tool_id = tool_id or ToolId("cv.benchmark.execute")`) in `cv_agent/evaluation/benchmarks.py`.
+   - Added fail-closed checks raising `BenchmarkExecutionError` when `tool_id` is None or empty.
+2. **B2 — Elimination of Local Authorization Assertion (`approval_authorized`):**
+   - Refactored `DefaultBenchmarkRunner._benchmark_single_batch()` to accept `approval_authorized: bool = False` and strictly propagate it to `ToolInvocation(..., approval_authorized=approval_authorized)` rather than locally manufacturing `True`.
+   - Updated `DefaultEvaluationRunner.prepare_invocation()` to default `approval_authorized=False`.
+   - Forwarded authoritative `approval_authorized=True` from `DefaultEvaluationRunner.execute()` into `prepare_invocation()` and `_build_evaluation_result()` strictly after successful verification of ADR-0003 approval credentials (`self.verify_approval()`).
+   - Wired `benchmark_tool_id` / `tool_id` and verified `approval_authorized` into benchmark execution dispatch in `DefaultEvaluationRunner._build_evaluation_result()`.
+3. **B3 — Hardware-Synchronized Timing for Accelerators (ADR-0011 §3.13):**
+   - Added `timing_synchronized: bool = True` and `timing_source: str | None = None` fields to `BenchmarkResult` contract with non-empty validation on `timing_source`.
+   - Implemented `_is_accelerator_target()` in `benchmarks.py` checking declared hardware classes (`NVIDIA_GPU`, `JETSON`, `OTHER_ACCELERATOR`), compute capability requirements, and target hardware telemetry.
+   - Enforced fail-closed validation on accelerator measurements requiring `timing_synchronized is True` and a valid, non-blank, non-unsynchronized `timing_source` (rejecting `"unsynchronized"`, `"wall_clock_async"`, `"none"`, etc.).
+   - Faithfully preserved `timing_synchronized` and `timing_source` in the resulting `BenchmarkResult`.
+4. **Boundary Test Suite Expansion & Quality Gates:**
+   - Added 5 new adversarial boundary tests (Tests 39–43) in `tests/test_evaluation_boundary.py`:
+     - Test 39: Mandatory `ToolId` without fallback (B1).
+     - Test 40: Dispatch authorization flag propagation without local manufacturing (B2).
+     - Test 41: Accelerator benchmark missing/false timing synchronization fails closed (B3).
+     - Test 42: Accelerator benchmark invalid/unsynchronized timing source fails closed (B3).
+     - Test 43: Accelerator and CPU timing synchronization attestation preservation (B3).
+   - All 43 boundary tests pass (43/43).
+   - Full test suite passes: 505/505 tests green.
+   - Verified all quality gates: Ruff check, Ruff format, Mypy (104 files), build, pip-audit, and git diff --check.
+
+**Why:** Addresses Official PM review disposition `REQUEST CHANGES` for PR #61, ensuring strict compliance with ADR-0001 / ADR-0005 tool authority, ADR-0003 approval lifecycle boundary, and frozen ADR-0011 §3.13 hardware-synchronized accelerator timing invariant.
+
+**Broke:** Nothing broken. Backward compatibility maintained with existing tests by supplying resolved `ToolId` and mock telemetry timing attestations.
+
+**Learned:** Subsystems must never manufacture authority flags like `approval_authorized=True` or synthesize external identities like `ToolId`. Authorization and identity must flow strictly downwards from the authoritative verification boundary.
+
+**Left open:** Pushing remediated commit to `feature/ajmunna/phase-2l-evaluation-subsystem`, monitoring CI matrix across Python 3.10–3.13, and presenting for Official PM final approval to merge.

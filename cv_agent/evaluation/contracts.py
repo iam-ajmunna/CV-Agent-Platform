@@ -248,6 +248,8 @@ class BenchmarkResult(BaseModel):
     power_watts_avg: float | None = None
     device_name: str
     target_id: TargetId
+    timing_synchronized: bool = True
+    timing_source: str | None = None
 
     @model_validator(mode="after")
     def _validate_percentiles_and_finiteness(self) -> BenchmarkResult:
@@ -290,6 +292,9 @@ class BenchmarkResult(BaseModel):
 
         if not self.device_name or not str(self.device_name).strip():
             raise ValueError("device_name cannot be empty")
+
+        if self.timing_source is not None and not str(self.timing_source).strip():
+            raise ValueError("timing_source cannot be empty when specified")
 
         # Monotonic percentiles invariant:
         # 0 <= min <= p50 <= p90 <= p95 <= p99 <= max

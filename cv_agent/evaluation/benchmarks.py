@@ -15,6 +15,7 @@ from cv_agent.evaluation.contracts import (
     ModelArtifactReference,
 )
 from cv_agent.evaluation.errors import BenchmarkExecutionError
+from cv_agent.evaluation.types import HardwareClass
 from cv_agent.tools import (
     ExecutionId,
     TargetId,
@@ -26,6 +27,42 @@ from cv_agent.tools import (
 )
 
 
+def _is_accelerator_target(
+    config: BenchmarkConfiguration, observation: Mapping[str, Any]
+) -> bool:
+    """Determine whether benchmark target is an asynchronous accelerator per ADR-0011 §3.13."""
+    req = config.target_requirements
+    if (
+        req.required_hardware_class is not None
+        and req.required_hardware_class != HardwareClass.CPU
+    ):
+        return True
+    if req.min_cuda_compute_capability is not None:
+        return True
+    hw_cls = str(observation.get("hardware_class", "")).lower()
+    if hw_cls in {"nvidia_gpu", "jetson", "other_accelerator", "gpu", "accelerator"}:
+        return True
+    dev_name = str(observation.get("device_name", "")).lower()
+    gpu_keywords = (
+        "nvidia",
+        "cuda",
+        "geforce",
+        "rtx",
+        "gtx",
+        "tesla",
+        "a100",
+        "h100",
+        "v100",
+        "t4",
+        "jetson",
+        "radeon",
+        "rocm",
+        "metal",
+        "apple m",
+    )
+    return any(k in dev_name for k in gpu_keywords)
+
+
 @runtime_checkable
 class BenchmarkRunner(Protocol):
     """Protocol for executing hardware-aware latency and throughput benchmarks."""
@@ -35,9 +72,11 @@ class BenchmarkRunner(Protocol):
         model_artifact: ModelArtifactReference,
         config: BenchmarkConfiguration,
         target_id: TargetId,
-        tool_executor: ToolExecutor | None = None,
+        tool_executor: ToolExecutor,
+        tool_id: ToolId,
         *,
-        tool_id: ToolId | None = None,
+        approval_authorized: bool = False,
+        timeout_seconds: int = 3600,
     ) -> tuple[BenchmarkResult, ...]: ...
 
     def compute_result_from_observation(
@@ -65,9 +104,11 @@ class DefaultBenchmarkRunner:
         model_artifact: ModelArtifactReference,
         config: BenchmarkConfiguration,
         target_id: TargetId,
-        tool_executor: ToolExecutor | None = None,
+        tool_executor: ToolExecutor,
+        tool_id: ToolId,
         *,
-        tool_id: ToolId | None = None,
+        approval_authorized: bool = False,
+        timeout_seconds: int = 3600,
     ) -> tuple[BenchmarkResult, ...]:
         """Execute hardware benchmark sweep across configured batch sizes.
 
@@ -75,11 +116,15 @@ class DefaultBenchmarkRunner:
         collects empirical measured iteration samples, and computes latency/throughput
         statistics directly from the observations.
         """
-        executor = tool_executor or self._tool_executor
-        if executor is None:
+        if tool_executor is None:
             raise BenchmarkExecutionError(
                 "ToolExecutor is mandatory for empirical benchmark execution. "
                 "Local simulation or fabrication of benchmark results is strictly prohibited."
+            )
+        if tool_id is None or not str(tool_id).strip():
+            raise BenchmarkExecutionError(
+                "ToolId is mandatory for empirical benchmark execution. "
+                "Local synthesis of ToolId is strictly prohibited."
             )
         if not target_id or not str(target_id).strip():
             raise BenchmarkExecutionError(
@@ -95,7 +140,6 @@ class DefaultBenchmarkRunner:
                 f"measured_iterations must be >= 20, got {config.measured_iterations}"
             )
 
-        benchmark_tool_id = tool_id or ToolId("cv.benchmark.execute")
         results: list[BenchmarkResult] = []
 
         for batch_size in config.batch_sizes:
@@ -104,8 +148,10 @@ class DefaultBenchmarkRunner:
                 config=config,
                 target_id=target_id,
                 batch_size=batch_size,
-                tool_executor=executor,
-                tool_id=benchmark_tool_id,
+                tool_executor=tool_executor,
+                tool_id=tool_id,
+                approval_authorized=approval_authorized,
+                timeout_seconds=timeout_seconds,
             )
             results.append(res)
 
@@ -119,6 +165,8 @@ class DefaultBenchmarkRunner:
         batch_size: int,
         tool_executor: ToolExecutor,
         tool_id: ToolId,
+        *,
+        approval_authorized: bool = False,
         timeout_seconds: int = 3600,
     ) -> BenchmarkResult:
         """Benchmark a single batch configuration via authoritative ADR-0005 execution."""
@@ -144,7 +192,7 @@ class DefaultBenchmarkRunner:
             target_id=target_id,
             execution_id=ExecutionId(f"exec-bench-{config.benchmark_id}-{batch_size}"),
             timeout_seconds=timeout_seconds,
-            approval_authorized=True,
+            approval_authorized=approval_authorized,
         )
 
         result = self._dispatch_tool(tool_executor, invocation)
@@ -252,6 +300,45 @@ class DefaultBenchmarkRunner:
             else None
         )
 
+        # 7. Hardware-synchronized timing validation (ADR-0011 §3.13)
+        # Asynchronous accelerator measurements strictly require hardware-synchronized timing
+        is_accelerator = _is_accelerator_target(config, observation)
+        raw_timing_sync = observation.get("timing_synchronized")
+        raw_timing_source = observation.get("timing_source")
+
+        if is_accelerator:
+            if raw_timing_sync is not True:
+                raise BenchmarkExecutionError(
+                    f"Hardware-synchronized timing is required for asynchronous accelerator measurements on target {target_id} "
+                    f"per ADR-0011 §3.13, but timing_synchronized is {raw_timing_sync!r}. "
+                    f"Target telemetry must attest timing_synchronized=True."
+                )
+            if not raw_timing_source or not str(raw_timing_source).strip():
+                raise BenchmarkExecutionError(
+                    f"Authoritative timing_source is required for accelerator measurements on target {target_id} "
+                    f"per ADR-0011 §3.13, but got {raw_timing_source!r}. "
+                    f"Valid synchronization source (e.g. 'cuda_event', 'cuda_stream_synchronize') is mandatory."
+                )
+            source_normalized = str(raw_timing_source).strip().lower()
+            if source_normalized in {
+                "unsynchronized",
+                "wall_clock_async",
+                "none",
+                "unknown",
+                "async_wall_clock",
+            }:
+                raise BenchmarkExecutionError(
+                    f"Accelerator timing source {raw_timing_source!r} on target {target_id} is unsynchronized. "
+                    f"ADR-0011 §3.13 requires hardware-synchronized timing (e.g. 'cuda_event')."
+                )
+
+        timing_synchronized = (
+            bool(raw_timing_sync) if raw_timing_sync is not None else True
+        )
+        timing_source = (
+            str(raw_timing_source).strip() if raw_timing_source is not None else None
+        )
+
         return BenchmarkResult(
             benchmark_id=config.benchmark_id,
             batch_size=batch_size,
@@ -270,6 +357,8 @@ class DefaultBenchmarkRunner:
             power_watts_avg=power_watts,
             device_name=str(device_name),
             target_id=target_id,
+            timing_synchronized=timing_synchronized,
+            timing_source=timing_source,
         )
 
     @staticmethod
