@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import uuid
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from typing import Any, Protocol, cast, runtime_checkable
 
@@ -28,7 +29,7 @@ from cv_agent.evaluation.errors import (
     EvaluationValidationError,
 )
 from cv_agent.evaluation.metrics import MetricCalculator, StandardMetricCalculator
-from cv_agent.evaluation.types import EvaluationVerdict
+from cv_agent.evaluation.types import EvaluationVerdict, HardwareClass
 from cv_agent.orchestration import ApprovalDecision, ApprovalRequest, ApprovalStatus
 from cv_agent.tools import (
     ExecutionId,
@@ -453,9 +454,24 @@ class DefaultEvaluationRunner:
             if raw_benchmarks is not None:
                 for b in raw_benchmarks:
                     if isinstance(b, BenchmarkResult):
-                        benchmarks.append(b)
-                    elif isinstance(b, dict):
-                        benchmarks.append(BenchmarkResult.model_validate(b))
+                        bench_obj = b
+                    elif isinstance(b, (dict, Mapping)):
+                        bench_obj = BenchmarkResult.model_validate(b)
+                    else:
+                        raise BenchmarkExecutionError(
+                            f"Invalid benchmark item in system_benchmarks: {b!r}"
+                        )
+                    req = plan.benchmark_config.target_requirements
+                    plan_is_accel = (
+                        req.required_hardware_class is not None
+                        and req.required_hardware_class != HardwareClass.CPU
+                    ) or (req.min_cuda_compute_capability is not None)
+                    if plan_is_accel and bench_obj.timing_synchronized is not True:
+                        raise BenchmarkExecutionError(
+                            f"Hardware-synchronized timing is required for accelerator benchmark on target {target_id} "
+                            f"per ADR-0011 §3.13, but timing_synchronized is {bench_obj.timing_synchronized!r}."
+                        )
+                    benchmarks.append(bench_obj)
             elif raw_observations is not None:
                 if isinstance(raw_observations, list):
                     for obs in raw_observations:

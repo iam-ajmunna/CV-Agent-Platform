@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
+from pydantic import ValidationError
 
 from cv_agent.dataset import (
     AnnotationVersion,
@@ -780,6 +781,8 @@ def test_benchmark_latency_monotonic_percentiles() -> None:
             gpu_utilization_pct=75.0,
             device_name="RTX 4090",
             target_id=TargetId("target-01"),
+            timing_synchronized=True,
+            timing_source="cuda_event",
         )
 
 
@@ -806,6 +809,8 @@ def test_benchmark_strictly_positive_throughput() -> None:
             gpu_utilization_pct=75.0,
             device_name="RTX 4090",
             target_id=TargetId("target-01"),
+            timing_synchronized=True,
+            timing_source="cuda_event",
         )
 
 
@@ -1640,3 +1645,188 @@ def test_benchmark_runner_timing_synchronization_attestation_preserved() -> None
     )
     assert res_cpu.timing_synchronized is True
     assert res_cpu.timing_source == "cpu_perf_counter"
+
+
+# =============================================================================
+# Test 44: Raw BenchmarkResult without timing attestation is rejected (Fail-Closed Contract)
+# =============================================================================
+def test_raw_benchmark_result_without_timing_attestation_rejected() -> None:
+    """Verify raw BenchmarkResult construction and model_validate fail closed without timing attestation."""
+    base_data = {
+        "benchmark_id": BenchmarkId("bench-attest-001"),
+        "batch_size": 1,
+        "precision": TrainingPrecision.FP16_AMP,
+        "latency_min_ms": 10.0,
+        "latency_mean_ms": 12.0,
+        "latency_p50_ms": 12.0,
+        "latency_p90_ms": 14.0,
+        "latency_p95_ms": 15.0,
+        "latency_p99_ms": 16.0,
+        "latency_max_ms": 18.0,
+        "throughput_fps": 83.3,
+        "device_name": "Intel Xeon Platinum",
+        "target_id": TargetId("target-cpu"),
+    }
+
+    # 1. Missing both timing_synchronized and timing_source
+    with pytest.raises(ValidationError):
+        BenchmarkResult.model_validate(base_data)
+
+    # 2. Missing timing_source only
+    with pytest.raises(ValidationError):
+        BenchmarkResult.model_validate({**base_data, "timing_synchronized": True})
+
+    # 3. Missing timing_synchronized only
+    with pytest.raises(ValidationError):
+        BenchmarkResult.model_validate({**base_data, "timing_source": "host_timer"})
+
+    # 4. Empty or whitespace timing_source
+    for bad_source in ["", "   "]:
+        with pytest.raises((ValidationError, ValueError)):
+            BenchmarkResult.model_validate(
+                {**base_data, "timing_synchronized": True, "timing_source": bad_source}
+            )
+
+    # 5. Direct constructor invocation without timing attestation fails closed
+    with pytest.raises(ValidationError):
+        BenchmarkResult(
+            benchmark_id=BenchmarkId("bench-attest-001"),
+            batch_size=1,
+            precision=TrainingPrecision.FP16_AMP,
+            latency_min_ms=10.0,
+            latency_mean_ms=12.0,
+            latency_p50_ms=12.0,
+            latency_p90_ms=14.0,
+            latency_p95_ms=15.0,
+            latency_p99_ms=16.0,
+            latency_max_ms=18.0,
+            throughput_fps=83.3,
+            device_name="Intel Xeon Platinum",
+            target_id=TargetId("target-cpu"),
+        )  # type: ignore[call-arg]
+
+
+# =============================================================================
+# Test 45: Accelerator result cannot obtain timing_synchronized=True through model defaults
+# =============================================================================
+def test_accelerator_cannot_obtain_timing_synchronized_through_model_defaults() -> None:
+    """Verify BenchmarkResult contract has no default for timing_synchronized and rejects unsynchronized accelerators."""
+    # 1. Schema-level guarantee: fields have no default values and are required
+    assert BenchmarkResult.model_fields["timing_synchronized"].is_required()
+    assert BenchmarkResult.model_fields["timing_source"].is_required()
+
+    # 2. Accelerator measurement cannot set timing_synchronized=False
+    accelerator_devices = [
+        "NVIDIA A100-SXM4-80GB",
+        "NVIDIA GeForce RTX 4090",
+        "Tesla V100-SXM2-32GB",
+        "NVIDIA H100 PCIe",
+        "NVIDIA Jetson AGX Orin",
+        "Apple M2 Max",
+    ]
+    for dev in accelerator_devices:
+        with pytest.raises(
+            ValueError,
+            match="Hardware-synchronized timing \\(timing_synchronized=True\\) is mandatory for accelerator measurements",
+        ):
+            BenchmarkResult(
+                benchmark_id=BenchmarkId("bench-accel-fail"),
+                batch_size=1,
+                precision=TrainingPrecision.FP16_AMP,
+                latency_min_ms=5.0,
+                latency_mean_ms=6.0,
+                latency_p50_ms=6.0,
+                latency_p90_ms=7.0,
+                latency_p95_ms=7.5,
+                latency_p99_ms=8.0,
+                latency_max_ms=9.0,
+                throughput_fps=166.7,
+                device_name=dev,
+                target_id=TargetId("target-gpu"),
+                timing_synchronized=False,
+                timing_source="cuda_event",
+            )
+
+    # 3. Accelerator measurement rejects unsynchronized timing sources
+    for bad_source in [
+        "unsynchronized",
+        "wall_clock_async",
+        "none",
+        "unknown",
+        "async_wall_clock",
+        "async",
+        "wall_clock",
+    ]:
+        with pytest.raises(
+            ValueError,
+            match="is unsynchronized. Hardware-synchronized timing is required",
+        ):
+            BenchmarkResult(
+                benchmark_id=BenchmarkId("bench-accel-fail"),
+                batch_size=1,
+                precision=TrainingPrecision.FP16_AMP,
+                latency_min_ms=5.0,
+                latency_mean_ms=6.0,
+                latency_p50_ms=6.0,
+                latency_p90_ms=7.0,
+                latency_p95_ms=7.5,
+                latency_p99_ms=8.0,
+                latency_max_ms=9.0,
+                throughput_fps=166.7,
+                device_name="NVIDIA RTX 4090",
+                target_id=TargetId("target-gpu"),
+                timing_synchronized=True,
+                timing_source=bad_source,
+            )
+
+
+# =============================================================================
+# Test 46: Raw benchmarks ingestion path enforces synchronization and fails closed
+# =============================================================================
+def test_raw_benchmarks_ingestion_path_enforces_synchronization_fails_closed() -> None:
+    """Verify DefaultEvaluationRunner._build_evaluation_result rejects raw benchmark dicts lacking valid timing attestation."""
+    runner = DefaultEvaluationRunner()
+    plan = _make_valid_plan()
+    assert plan.benchmark_config is not None
+
+    class _RawBenchmarksExecutor:
+        def execute(self, invocation: ToolInvocation) -> ToolResult:
+            # Provide raw benchmark dict lacking timing_synchronized and timing_source
+            raw_dict = {
+                "benchmark_id": "bench-001",
+                "batch_size": 1,
+                "precision": "fp16_amp",
+                "latency_min_ms": 10.0,
+                "latency_mean_ms": 12.0,
+                "latency_p50_ms": 12.0,
+                "latency_p90_ms": 14.0,
+                "latency_p95_ms": 15.0,
+                "latency_p99_ms": 16.0,
+                "latency_max_ms": 18.0,
+                "throughput_fps": 83.3,
+                "device_name": "NVIDIA A100",
+                "target_id": "target-01",
+                # Timing attestation omitted!
+            }
+            return ToolResult(
+                tool_id=invocation.tool_id,
+                execution_id=invocation.execution_id,
+                target_id=invocation.target_id,
+                status=ToolExecutionStatus.SUCCESS,
+                structured_output={
+                    "predictions": {"val-map50": 0.745},
+                    "ground_truth": {"val-map50": 0.745},
+                    "system_benchmarks": [raw_dict],
+                },
+            )
+
+    op_id, app_req, app_dec = _make_approval_context(plan)
+    with pytest.raises(ValidationError):
+        runner.execute(
+            plan=plan,
+            operation_identity=op_id,
+            approval_request=app_req,
+            approval_decision=app_dec,
+            tool_id=ToolId("eval.evaluator"),
+            tool_executor=_RawBenchmarksExecutor(),  # type: ignore[arg-type]
+        )

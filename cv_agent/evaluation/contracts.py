@@ -248,8 +248,8 @@ class BenchmarkResult(BaseModel):
     power_watts_avg: float | None = None
     device_name: str
     target_id: TargetId
-    timing_synchronized: bool = True
-    timing_source: str | None = None
+    timing_synchronized: bool
+    timing_source: str
 
     @model_validator(mode="after")
     def _validate_percentiles_and_finiteness(self) -> BenchmarkResult:
@@ -293,8 +293,52 @@ class BenchmarkResult(BaseModel):
         if not self.device_name or not str(self.device_name).strip():
             raise ValueError("device_name cannot be empty")
 
-        if self.timing_source is not None and not str(self.timing_source).strip():
-            raise ValueError("timing_source cannot be empty when specified")
+        if not self.timing_source or not str(self.timing_source).strip():
+            raise ValueError("timing_source cannot be empty")
+
+        source_normalized = str(self.timing_source).strip().lower()
+        if source_normalized in {
+            "unsynchronized",
+            "wall_clock_async",
+            "none",
+            "unknown",
+            "async_wall_clock",
+            "async",
+            "wall_clock",
+        }:
+            raise ValueError(
+                f"timing_source {self.timing_source!r} is unsynchronized. "
+                "Hardware-synchronized timing is required per ADR-0011 §3.13."
+            )
+
+        dev_lower = str(self.device_name).strip().lower()
+        gpu_keywords = (
+            "nvidia",
+            "cuda",
+            "geforce",
+            "rtx",
+            "gtx",
+            "tesla",
+            "a100",
+            "h100",
+            "v100",
+            "t4",
+            "l4",
+            "jetson",
+            "radeon",
+            "rocm",
+            "metal",
+            "apple m",
+            "accelerator",
+            "tpu",
+            "npu",
+        )
+        is_accelerator = any(k in dev_lower for k in gpu_keywords)
+        if is_accelerator and self.timing_synchronized is not True:
+            raise ValueError(
+                f"Hardware-synchronized timing (timing_synchronized=True) is mandatory for "
+                f"accelerator measurements ({self.device_name!r}) per ADR-0011 §3.13"
+            )
 
         # Monotonic percentiles invariant:
         # 0 <= min <= p50 <= p90 <= p95 <= p99 <= max

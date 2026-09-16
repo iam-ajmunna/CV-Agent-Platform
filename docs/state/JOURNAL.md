@@ -1669,3 +1669,36 @@ Remediated all three architectural blockers identified in the Official PM's seco
 **Learned:** Subsystems must never manufacture authority flags like `approval_authorized=True` or synthesize external identities like `ToolId`. Authorization and identity must flow strictly downwards from the authoritative verification boundary.
 
 **Left open:** Pushing remediated commit to `feature/ajmunna/phase-2l-evaluation-subsystem`, monitoring CI matrix across Python 3.10–3.13, and presenting for Official PM final approval to merge.
+
+---
+
+## 2026-09-16 — Phase 2L Evaluation Subsystem Final Timing Attestation Contract Blocker Remediated (PR #61)
+
+**Did:** Resolved the Official PM's final review blocker on PR #61 (`feature/ajmunna/phase-2l-evaluation-subsystem`, Issue #60) regarding fail-closed timing attestation at the `BenchmarkResult` contract boundary and raw benchmark ingestion path:
+1. **Mandatory Contract Boundary Timing Attestation:**
+   - Modified `BenchmarkResult` in `cv_agent/evaluation/contracts.py` to declare `timing_synchronized: bool` and `timing_source: str` without default values (eliminating `timing_synchronized: bool = True` and `timing_source: str | None = None`).
+   - Updated `@model_validator(mode="after")` in `BenchmarkResult`:
+     - Mandatory non-empty `timing_source`.
+     - Rejection of unsynchronized timing sources (`"unsynchronized"`, `"wall_clock_async"`, `"none"`, `"unknown"`, `"async_wall_clock"`, `"async"`, `"wall_clock"`).
+     - Strict enforcement that measurements on accelerators (`NVIDIA`, `CUDA`, `RTX`, `Tesla`, `A100`, `H100`, `Jetson`, `Apple M`, etc.) must have `timing_synchronized is True`.
+2. **Raw Benchmarks Ingestion Path Hardening:**
+   - Updated `DefaultEvaluationRunner._build_evaluation_result()` in `cv_agent/evaluation/runner.py` to validate `raw_benchmarks` through `BenchmarkResult.model_validate()` supporting dicts and `Mapping` instances.
+   - Enforced plan-level target requirement accelerator check against `bench_obj.timing_synchronized is True`, eliminating any bypass around the empirical observation validator.
+3. **Architecture Contract Synchronization:**
+   - Updated `ADR-0011-evaluation-subsystem.md` §5 interface definition for `BenchmarkResult` to declare `timing_synchronized: bool` and `timing_source: str`.
+4. **Adversarial Regression Test Expansion:**
+   - Added Tests 44–46 in `tests/test_evaluation_boundary.py`:
+     - Test 44: Raw `BenchmarkResult` construction / `model_validate()` without timing attestation fails closed with `ValidationError`.
+     - Test 45: Accelerator result cannot obtain `timing_synchronized=True` through model defaults (verifying required field schema and fail-closed rejection of `timing_synchronized=False` / unsynchronized sources on accelerators).
+     - Test 46: Raw benchmarks ingestion path via `runner.execute()` enforces synchronization and fails closed when attestation is missing.
+   - All 46 adversarial boundary tests pass (46/46).
+   - Full test suite passes: 508/508 tests green.
+   - Verified all quality gates: Ruff check, Ruff format, Mypy (104 files), and git diff.
+
+**Why:** Enforces frozen ADR-0011 §3.13 and `[P§29.4]` hardware-aware deployability requirements at the immutable type boundary, guaranteeing that neither direct constructor calls nor deserialized raw telemetry can circumvent accelerator synchronization validation.
+
+**Broke:** Nothing broken. Updated existing synthetic benchmark unit tests to supply explicit, validated timing attestations.
+
+**Learned:** Data contracts for empirical hardware metrics must enforce safety invariants at their own schema and model validation boundary, not merely in operational helper functions. Making fields mandatory with no defaults ensures fail-closed behavior across all ingestion and deserialization vectors.
+
+**Left open:** Push commit to PR #61, verify CI matrix across Python 3.10–3.13, and await Official PM final merge approval.

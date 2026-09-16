@@ -336,7 +336,9 @@ class DefaultBenchmarkRunner:
             bool(raw_timing_sync) if raw_timing_sync is not None else True
         )
         timing_source = (
-            str(raw_timing_source).strip() if raw_timing_source is not None else None
+            str(raw_timing_source).strip()
+            if raw_timing_source is not None and str(raw_timing_source).strip()
+            else ("cuda_event" if is_accelerator else "host_timer")
         )
 
         return BenchmarkResult(
