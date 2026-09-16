@@ -3,35 +3,33 @@
 > **Rewritten** every session. Describes **now**, never history — history lives in
 > `JOURNAL.md`. Hard cap: 60 lines. If it exceeds that, you are logging, not stating.
 
-**Updated:** 2026-09-15 · **Phase:** Phase 2L Architecture Review · **Health:** green
+**Updated:** 2026-09-16 · **Phase:** Phase 2L Final Blocker Remediated · **Health:** green
 
 ## Where we are
 
-Phase 2K (ADR-0010 Training Subsystem) is accepted and merged on `main` at `3758f25`; its short-lived implementation branch is retired. Phase 2L is now at the ADR-0011 architecture-remediation gate under Issue #58.
+Phase 2L (ADR-0011 Evaluation Subsystem) final review blocker (fail-closed timing attestation on `BenchmarkResult` contract) is remediated on `feature/ajmunna/phase-2l-evaluation-subsystem` (base: `main @ 4266340`) under Issue #60 / PR #61.
 
-- ADR-0011 high-level evaluation responsibility is retained: deterministic model-quality and systems-performance measurement with authoritative dataset/model lineage.
-- Official PM review identified B1–B8; remediation amendments are implemented and verified in PR #59.
-- ADR-0003 remains the sole authority for operation identity, approval, lifecycle, leases/fencing, recovery, and external-operation state.
-- ADR-0005 remains the sole physical execution/transport boundary.
-- ADR-0004 remains the sole authoritative experiment-ledger persistence boundary.
-- No `cv_agent/evaluation/` runtime implementation is authorized until the amended ADR passes the second PM architecture review.
+- `BenchmarkResult` contract defines mandatory `timing_synchronized: bool` and `timing_source: str` with zero default values.
+- Contract model validator enforces non-empty `timing_source`, rejects unsynchronized timing sources, and requires `timing_synchronized is True` for accelerator measurements per ADR-0011 §3.13.
+- `DefaultEvaluationRunner._build_evaluation_result()` raw benchmarks ingestion path enforces validation through the immutable contract and accelerator target requirements without bypass.
+- All 46 adversarial boundary tests pass; full test suite reaches 508 passing tests.
+- Ruff lint/format, Mypy (104 files), build wheel/sdist, pip-audit, and git diff are verified green.
 
 ## In flight
 
 | Item | Issue | PR | State |
 |---|---|---|---|
-| Phase 2L architecture remediation | #58 | #59 | Amended ADR passed PM review; CI rerun |
-
+| Phase 2L runtime implementation & final blocker remediation | #60 | #61 | Remediated contract attestation; 508/508 tests pass; ready for PM approval |
 
 ## Next 3 actions
 
-1. Validate the amended ADR-0011 against B1–B8 and frozen ADR-0001→ADR-0010 contracts.
-2. Submit the architecture-only amendment for second Official PM review.
-3. Authorize an implementation branch only after an APPROVED/FROZEN architecture disposition.
+1. Present remediated PR #61 for Official PM final merge approval.
+2. Complete squash-merge to `main` upon PM approval and delete task branch.
+3. Advance to Phase 2M / ADR-0012 Optimization & Deployment Subsystem.
 
 ## Blockers
 
-- Phase 2L runtime implementation is blocked pending architecture approval.
+- None. Final timing attestation contract blocker is resolved; all quality gates are green.
 
 ## Scope guard
 

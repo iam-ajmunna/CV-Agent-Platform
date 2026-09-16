@@ -444,6 +444,8 @@ class BenchmarkResult(BaseModel):
     power_watts_avg: float | None
     device_name: str
     target_id: TargetId
+    timing_synchronized: bool
+    timing_source: str
 
 
 class ErrorAnalysisRecord(BaseModel):
