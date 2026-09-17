@@ -18,6 +18,7 @@ from cv_agent.evaluation.contracts import (
 )
 from cv_agent.optimization.errors import (
     CalibrationLeakageError,
+    DeploymentValidationError,
     OptimizationValidationError,
 )
 from cv_agent.optimization.types import (
@@ -99,9 +100,9 @@ class CalibrationDatasetBinding(BaseModel):
         if not split_lower:
             raise ValueError("split_name cannot be empty")
 
-        if split_lower in {"test", "evaluation", "eval", "val_test"}:
+        if split_lower != "calibration":
             raise CalibrationLeakageError(
-                f"Calibration dataset split {self.split_name!r} overlaps with evaluation/test splits. "
+                f"Calibration dataset split must strictly be 'calibration', got {self.split_name!r}. "
                 "Per ADR-0009 Invariant 13 and ADR-0012 §3.1, INT8 PTQ calibration must strictly use "
                 "a dedicated 'calibration' split to prevent data leakage."
             )
@@ -328,6 +329,55 @@ class DeploymentPlan(BaseModel):
         return self
 
 
+VALID_DEPLOYMENT_TRANSITIONS: dict[DeploymentStatus, set[DeploymentStatus]] = {
+    DeploymentStatus.DRAFT: {DeploymentStatus.VALIDATED, DeploymentStatus.STAGING},
+    DeploymentStatus.VALIDATED: {
+        DeploymentStatus.AWAITING_APPROVAL,
+        DeploymentStatus.STAGING,
+    },
+    DeploymentStatus.AWAITING_APPROVAL: {
+        DeploymentStatus.APPROVED,
+        DeploymentStatus.REJECTED,
+    },
+    DeploymentStatus.APPROVED: {DeploymentStatus.STAGING},
+    DeploymentStatus.STAGING: {DeploymentStatus.VERIFYING, DeploymentStatus.FAILED},
+    DeploymentStatus.VERIFYING: {DeploymentStatus.ACTIVE, DeploymentStatus.FAILED},
+    DeploymentStatus.ACTIVE: {
+        DeploymentStatus.SUPERSEDED,
+        DeploymentStatus.ROLLBACK_INITIATED,
+        DeploymentStatus.ROLLED_BACK,
+        DeploymentStatus.OPERATOR_REQUIRED,
+    },
+    DeploymentStatus.ROLLBACK_INITIATED: {
+        DeploymentStatus.ROLLED_BACK,
+        DeploymentStatus.OPERATOR_REQUIRED,
+        DeploymentStatus.FAILED,
+    },
+    DeploymentStatus.FAILED: {
+        DeploymentStatus.ROLLBACK_INITIATED,
+        DeploymentStatus.OPERATOR_REQUIRED,
+    },
+    DeploymentStatus.ROLLED_BACK: set(),
+    DeploymentStatus.SUPERSEDED: {
+        DeploymentStatus.ACTIVE,
+    },
+    DeploymentStatus.REJECTED: set(),
+    DeploymentStatus.OPERATOR_REQUIRED: set(),
+}
+
+
+def validate_deployment_transition(
+    current: DeploymentStatus, target: DeploymentStatus
+) -> None:
+    """Validate that a deployment status transition conforms to the ADR-0012 state machine."""
+    allowed = VALID_DEPLOYMENT_TRANSITIONS.get(current, set())
+    if target not in allowed:
+        raise DeploymentValidationError(
+            f"Invalid deployment lifecycle transition from {current.value!r} to {target.value!r}. "
+            f"Allowed transitions from {current.value!r}: {sorted(s.value for s in allowed)}"
+        )
+
+
 class DeploymentRecord(BaseModel):
     """Authoritative lifecycle and status record of a deployment per ADR-0012 §3.6."""
 
@@ -343,3 +393,54 @@ class DeploymentRecord(BaseModel):
     superseded_at: datetime | None = None
     rolled_back_at: datetime | None = None
     failure_details: str | None = None
+
+    @model_validator(mode="after")
+    def _populate_target_id(self) -> DeploymentRecord:
+        if (
+            self.target_id is None
+            and self.plan is not None
+            and getattr(self.plan, "target", None) is not None
+        ):
+            object.__setattr__(self, "target_id", self.plan.target.target_id)
+        return self
+
+    def with_transition(
+        self,
+        new_status: DeploymentStatus,
+        *,
+        readiness_result: ReadinessProbeResult | None = None,
+        execution_id: ExecutionId | None = None,
+        target_id: TargetId | None = None,
+        activated_at: datetime | None = None,
+        superseded_at: datetime | None = None,
+        rolled_back_at: datetime | None = None,
+        failure_details: str | None = None,
+    ) -> DeploymentRecord:
+        """Return a new DeploymentRecord with validated status transition per ADR-0012 §3.6."""
+        validate_deployment_transition(self.status, new_status)
+        return DeploymentRecord(
+            deployment_id=self.deployment_id,
+            plan=self.plan,
+            status=new_status,
+            readiness_result=(
+                readiness_result
+                if readiness_result is not None
+                else self.readiness_result
+            ),
+            execution_id=(
+                execution_id if execution_id is not None else self.execution_id
+            ),
+            target_id=target_id if target_id is not None else self.target_id,
+            activated_at=(
+                activated_at if activated_at is not None else self.activated_at
+            ),
+            superseded_at=(
+                superseded_at if superseded_at is not None else self.superseded_at
+            ),
+            rolled_back_at=(
+                rolled_back_at if rolled_back_at is not None else self.rolled_back_at
+            ),
+            failure_details=(
+                failure_details if failure_details is not None else self.failure_details
+            ),
+        )

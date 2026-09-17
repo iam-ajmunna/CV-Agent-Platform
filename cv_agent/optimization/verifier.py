@@ -6,7 +6,7 @@ from typing import Protocol, runtime_checkable
 
 from cv_agent.evaluation.comparison import BaselineComparator, DefaultBaselineComparator
 from cv_agent.evaluation.contracts import EvaluationResult
-from cv_agent.evaluation.types import ExperimentId
+from cv_agent.evaluation.types import EvaluationVerdict, ExperimentId
 from cv_agent.optimization.contracts import (
     OptimizationPlan,
     OptimizationResult,
@@ -56,30 +56,148 @@ class DefaultOptimizationVerifier:
             raise OptimizationValidationError(
                 f"Artifact plan_id {artifact.plan_id!r} does not match OptimizationPlan {plan.plan_id!r}"
             )
+        if str(artifact.source_checkpoint_id) != str(plan.source_checkpoint_id):
+            raise OptimizationValidationError(
+                f"Artifact source_checkpoint_id {artifact.source_checkpoint_id!r} does not match plan {plan.source_checkpoint_id!r}"
+            )
 
-        # 2. Statistical Baseline Comparison via ADR-0011
-        comparator = baseline_comparator or self.baseline_comparator
+        # 2. Admissible Evaluation Verdicts (B9: Fail-closed on non-passed verdicts)
+        if baseline_evaluation.verdict != EvaluationVerdict.PASSED:
+            raise OptimizationVerificationError(
+                f"Baseline evaluation verdict must be PASSED, got {baseline_evaluation.verdict.value!r}"
+            )
+        if candidate_evaluation.verdict != EvaluationVerdict.PASSED:
+            raise OptimizationVerificationError(
+                f"Candidate evaluation verdict must be PASSED, got {candidate_evaluation.verdict.value!r}"
+            )
 
-        # 3. Primary metric accuracy retention calculation
+        # 3. Verification Dataset Binding equality across baseline, candidate, and plan (B9)
+        target_ds = plan.verification_dataset_binding
+        for eval_label, eval_obj in (
+            ("baseline", baseline_evaluation),
+            ("candidate", candidate_evaluation),
+        ):
+            ds = eval_obj.plan.dataset_binding
+            if str(ds.dataset_id) != str(target_ds.dataset_id):
+                raise OptimizationVerificationError(
+                    f"{eval_label.capitalize()} evaluation dataset_id {ds.dataset_id!r} does not match "
+                    f"OptimizationPlan verification_dataset_binding {target_ds.dataset_id!r}"
+                )
+            if str(ds.dataset_version) != str(target_ds.dataset_version):
+                raise OptimizationVerificationError(
+                    f"{eval_label.capitalize()} evaluation dataset_version {ds.dataset_version!r} does not match "
+                    f"OptimizationPlan verification_dataset_binding {target_ds.dataset_version!r}"
+                )
+            if str(ds.split_name) != str(target_ds.split_name):
+                raise OptimizationVerificationError(
+                    f"{eval_label.capitalize()} evaluation split_name {ds.split_name!r} does not match "
+                    f"OptimizationPlan verification_dataset_binding {target_ds.split_name!r}"
+                )
+            if str(ds.dataset_manifest_hash) != str(target_ds.dataset_manifest_hash):
+                raise OptimizationVerificationError(
+                    f"{eval_label.capitalize()} evaluation dataset_manifest_hash {ds.dataset_manifest_hash!r} does not match "
+                    f"OptimizationPlan verification_dataset_binding {target_ds.dataset_manifest_hash!r}"
+                )
+
+        # 4. Model / Artifact binding verification
+        base_model = baseline_evaluation.plan.model_artifact
+        if str(base_model.checkpoint_id) != str(plan.source_checkpoint_id):
+            raise OptimizationVerificationError(
+                f"Baseline evaluation model checkpoint {base_model.checkpoint_id!r} does not match "
+                f"plan source_checkpoint_id {plan.source_checkpoint_id!r}"
+            )
+        if str(base_model.weights_hash) != str(plan.source_weights_hash):
+            raise OptimizationVerificationError(
+                f"Baseline evaluation weights hash {base_model.weights_hash!r} does not match "
+                f"plan source_weights_hash {plan.source_weights_hash!r}"
+            )
+
+        cand_model = candidate_evaluation.plan.model_artifact
+        allowed_candidate_ckpts = {
+            str(artifact.artifact_id),
+            str(artifact.plan_id),
+            str(artifact.source_checkpoint_id),
+        }
+        if str(cand_model.checkpoint_id) not in allowed_candidate_ckpts:
+            raise OptimizationVerificationError(
+                f"Candidate evaluation model checkpoint {cand_model.checkpoint_id!r} does not match "
+                f"candidate artifact {artifact.artifact_id!r}"
+            )
+        allowed_candidate_hashes = {
+            str(artifact.artifact_hash),
+            str(plan.source_weights_hash),
+        }
+        if str(cand_model.weights_hash) not in allowed_candidate_hashes:
+            raise OptimizationVerificationError(
+                f"Candidate evaluation weights hash {cand_model.weights_hash!r} does not match "
+                f"candidate artifact hash {artifact.artifact_hash!r}"
+            )
+
+        # 5. Hardware / Target environment binding verification
+        base_hw = baseline_evaluation.environment.target_hardware
+        cand_hw = candidate_evaluation.environment.target_hardware
+        if base_hw != cand_hw:
+            raise OptimizationVerificationError(
+                f"Hardware environment mismatch: baseline executed on {base_hw!r}, "
+                f"candidate executed on {cand_hw!r}"
+            )
+        target_platform_str = str(plan.target_platform).strip()
+        norm_plan_platform = (
+            target_platform_str.lower().replace("_", " ").replace("-", " ")
+        )
+        norm_base_hw = base_hw.lower().replace("_", " ").replace("-", " ")
+        if (
+            target_platform_str
+            and norm_plan_platform not in norm_base_hw
+            and norm_base_hw not in norm_plan_platform
+        ):
+            raise OptimizationVerificationError(
+                f"Evaluation hardware {base_hw!r} does not match plan target_platform {plan.target_platform!r}"
+            )
+
+        # 6. Benchmark timing synchronization check (B9)
+        for b in baseline_evaluation.system_benchmarks:
+            if not b.timing_synchronized:
+                raise OptimizationVerificationError(
+                    f"Baseline benchmark {b.benchmark_id} timing is not hardware-synchronized. "
+                    "Synchronized timing is mandatory per ADR-0011 §3.13."
+                )
+        for b in candidate_evaluation.system_benchmarks:
+            if not b.timing_synchronized:
+                raise OptimizationVerificationError(
+                    f"Candidate benchmark {b.benchmark_id} timing is not hardware-synchronized. "
+                    "Synchronized timing is mandatory per ADR-0011 §3.13."
+                )
+
+        # 7. Deterministic primary metric selection (B9)
         cand_map = {
             m.metric.name: m.primary_value for m in candidate_evaluation.quality_metrics
         }
         base_map = {
             m.metric.name: m.primary_value for m in baseline_evaluation.quality_metrics
         }
-
-        # Select primary metric (e.g. "map50", "accuracy", "f1", or first available common metric)
-        common_metrics = [name for name in cand_map if name in base_map]
+        common_metrics = set(cand_map.keys()).intersection(base_map.keys())
         if not common_metrics:
             raise OptimizationVerificationError(
                 "No overlapping quality metrics between candidate and baseline evaluation"
             )
 
-        primary_metric_name = common_metrics[0]
-        for candidate_key in ["map50", "mAP50", "mAP", "accuracy", "f1"]:
-            if candidate_key in common_metrics:
-                primary_metric_name = candidate_key
-                break
+        primary_metric_name: str
+        if "primary_metric_name" in plan.parameters:
+            req_metric = str(plan.parameters["primary_metric_name"])
+            if req_metric not in common_metrics:
+                raise OptimizationVerificationError(
+                    f"Required primary_metric_name {req_metric!r} declared in plan.parameters "
+                    f"is not present in both evaluations. Overlapping: {sorted(common_metrics)}"
+                )
+            primary_metric_name = req_metric
+        else:
+            standard_candidates = ["map50", "mAP50", "mAP", "accuracy", "f1"]
+            primary_metric_name = min(common_metrics)
+            for cand_name in standard_candidates:
+                if cand_name in common_metrics:
+                    primary_metric_name = cand_name
+                    break
 
         cand_val = cand_map[primary_metric_name]
         base_val = base_map[primary_metric_name]
@@ -87,7 +205,8 @@ class DefaultOptimizationVerifier:
         accuracy_drop = base_val - cand_val
         retention_ratio = (cand_val / base_val) if base_val > 0.0 else 1.0
 
-        # 4. Statistical Baseline Comparison via ADR-0011
+        # 8. Statistical Baseline Comparison via ADR-0011
+        comparator = baseline_comparator or self.baseline_comparator
         comparison = comparator.compare(
             candidate_metrics=candidate_evaluation.quality_metrics,
             baseline_metrics=baseline_evaluation.quality_metrics,
@@ -97,33 +216,37 @@ class DefaultOptimizationVerifier:
             baseline_exp_id=ExperimentId(str(baseline_evaluation.evaluation_id)),
         )
 
-        # 5. Systems speedup and memory reduction calculation
+        # 9. Systems speedup and memory reduction calculation (B9: Deterministic batch matching)
         speedup_ratio = 1.0
-        if (
-            candidate_evaluation.system_benchmarks
-            and baseline_evaluation.system_benchmarks
-        ):
-            cand_fps = candidate_evaluation.system_benchmarks[0].throughput_fps
-            base_fps = baseline_evaluation.system_benchmarks[0].throughput_fps
-            if base_fps > 0.0:
-                speedup_ratio = cand_fps / base_fps
-
         memory_reduction_ratio = 0.0
-        if (
-            candidate_evaluation.system_benchmarks
-            and baseline_evaluation.system_benchmarks
-        ):
-            cand_vram = candidate_evaluation.system_benchmarks[0].peak_vram_gb
-            base_vram = baseline_evaluation.system_benchmarks[0].peak_vram_gb
-            if (
-                cand_vram is not None
-                and base_vram is not None
-                and base_vram > 0.0
-                and cand_vram <= base_vram
-            ):
-                memory_reduction_ratio = round(1.0 - (cand_vram / base_vram), 4)
 
-        # 6. Evaluate accuracy drop tolerance guardrail
+        base_bench_by_batch = {
+            b.batch_size: b for b in baseline_evaluation.system_benchmarks
+        }
+        cand_bench_by_batch = {
+            b.batch_size: b for b in candidate_evaluation.system_benchmarks
+        }
+        common_batches = sorted(
+            set(base_bench_by_batch.keys()).intersection(cand_bench_by_batch.keys())
+        )
+
+        if common_batches:
+            matched_batch = 1 if 1 in common_batches else common_batches[0]
+            b_base = base_bench_by_batch[matched_batch]
+            b_cand = cand_bench_by_batch[matched_batch]
+            if b_base.throughput_fps > 0.0:
+                speedup_ratio = b_cand.throughput_fps / b_base.throughput_fps
+            if (
+                b_base.peak_vram_gb is not None
+                and b_cand.peak_vram_gb is not None
+                and b_base.peak_vram_gb > 0.0
+                and b_cand.peak_vram_gb <= b_base.peak_vram_gb
+            ):
+                memory_reduction_ratio = round(
+                    1.0 - (b_cand.peak_vram_gb / b_base.peak_vram_gb), 4
+                )
+
+        # 10. Evaluate accuracy drop tolerance guardrail
         verification_passed = accuracy_drop <= plan.max_accuracy_drop_tolerance
 
         if not verification_passed:

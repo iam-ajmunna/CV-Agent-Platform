@@ -7,28 +7,27 @@
 
 ## Where we are
 
-Phase 2M (ADR-0012 Optimization & Deployment Subsystem) runtime package and adversarial test suite are implemented on `feature/ajmunna/phase-2m-optimization-subsystem` (cut from `main @ 32cd533`) under Issue #62.
+Phase 2M (ADR-0012 Optimization & Deployment Subsystem) adversarial review blockers (B1–B10) from Official PM Review #5237441698 are completely remediated on `feature/ajmunna/phase-2m-optimization-subsystem` (PR #63).
 
-- Runtime package `cv_agent/optimization/` fully implemented with contracts, canonicalization, ModelOptimizer, OptimizationVerifier, and DeploymentManager.
-- Strict authority boundaries enforced: ADR-0003 4-tuple approval verification, ADR-0005 execution transport delegation, ADR-0009 calibration split isolation (Invariant 13), ADR-0010 checkpoint lineage, and ADR-0011 empirical post-optimization verification.
-- Complete adversarial boundary test suite: 37/37 passing in `tests/test_optimization_boundary.py` (545/545 full suite passing).
-- Clean quality gates: ruff check clean, ruff format clean, mypy clean (112 source files), git diff --check clean.
+- Remediated all 10 blockers: mandatory checkpoint manifest (B1), strict calibration split gate & manifest (B2), zero synthetic compilation metadata (B3), zero fabricated telemetry (B4), mandatory external target_id across all operations (B5), ADR-0003 4-tuple approval cross-validation (B6), full lifecycle transitions with explicit VERIFYING state (B7), OPERATOR_REQUIRED audit record & target lockout (B8), verifier lineage cross-checking (B9), and Pydantic AfterValidator regex enforcement on identifiers (B10).
+- Complete adversarial boundary test suite: 68/68 passing in `tests/test_optimization_boundary.py` (576/576 full repository test suite passing).
+- Clean quality gates: ruff check clean, ruff format clean, mypy clean (111 source files cv_agent, 112 with test suite), git diff --check clean.
 
 ## In flight
 
 | Item | Issue | PR | State |
 |---|---|---|---|
-| Phase 2M Optimization & Deployment Subsystem runtime | #62 | #63 | Open · CI green · Awaiting PM Review |
+| Phase 2M Optimization & Deployment Subsystem runtime & blocker fixes | #62 | #63 | Remediated · 68 boundary / 576 full tests passing · Awaiting PM re-review |
 
 ## Next 3 actions
 
-1. Monitor GitHub Actions CI workflow for PR #63.
-2. Undergo Official PM adversarial review on PR #63.
-3. Squash-merge to `main`, synchronize ledger (D-058), and close Phase 2M.
+1. Push blocker remediation commits to PR #63 and verify GitHub Actions CI.
+2. Request Official PM re-review and merge approval on PR #63.
+3. Squash-merge to `main`, record D-059, and transition to Phase 2N.
 
 ## Blockers
 
-- None. Implementation and local verification complete; ready for PR and CI.
+- None. All 10 adversarial review blockers (B1–B10) are resolved with regression tests.
 
 ## Scope guard
 

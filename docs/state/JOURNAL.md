@@ -1738,3 +1738,28 @@ Remediated all three architectural blockers identified in the Official PM's seco
 **Learned:** Data contracts in downstream subsystems must strictly conform to existing domain schemas and validation rules (e.g. `n_items` equaling split hash count in `DatasetManifest`, mandatory `EvaluationPlan` on `EvaluationResult`). Designing mock executors to implement the full async `ToolExecutor` protocol prevents typechecker friction across subsystems.
 
 **Left open:** Pushing `feature/ajmunna/phase-2m-optimization-subsystem` to remote origin, opening PR referencing Issue #62, and presenting to Official PM for adversarial review.
+
+---
+
+## 2026-09-17 — Phase 2M PM Adversarial Review Blockers Remediation (B1–B10, PR #63)
+
+**Did:** Fully remediated all 10 substantive blockers identified in Official PM Review #5237441698 on PR #63:
+1. **B1 (ADR-0010 Checkpoint Lineage):** Made `checkpoint_manifest: CheckpointManifest` mandatory on `ModelOptimizer.compile()` and verified `source_checkpoint_id` matches `checkpoint_manifest.checkpoint_id`.
+2. **B2 (ADR-0009 Invariant 13 Calibration Split & Manifest):** Restricted `split_name` in `CalibrationDatasetBinding` to strictly `"calibration"`; made `dataset_manifest: DatasetManifest` mandatory for PTQ compile and verified calibration split exists, has non-zero records, and matches dataset ID and version.
+3. **B3 (Zero Synthetic Compilation Metadata):** Eliminated mock defaults in `DefaultModelOptimizer.compile()`; requires `ToolResult.structured_output` to contain authoritative `artifact_uri`, `artifact_size_bytes`, and `runtime_format`, failing closed with `ModelOptimizationError` if missing or malformed.
+4. **B4 (Zero Fabricated Telemetry):** Eliminated synthetic latency/memory telemetry fallbacks in `DeploymentManager.verify_readiness()`; requires authoritative probe telemetry in tool result, failing closed with `ReadinessProbeFailureError` on absent or non-numeric metrics.
+5. **B5 (Mandatory External Target Binding):** Made `target_id: TargetId` mandatory across `stage()`, `verify_readiness()`, `activate()`, and `rollback()`, enforcing that target ID matches `plan.target.target_id` and the staged record's target.
+6. **B6 (ADR-0003 4-Tuple Approval Validation):** Hardened approval validation to cross-check `operation_id == OperationId("deployment.activate")`, `operation_version == "1.0.0"`, `target_identity == TargetIdentity(target_id)`, and `request_id == approval_decision.request_id` within `activation_approval`.
+7. **B7 (Deployment Lifecycle State Machine):** Implemented strict `VALID_DEPLOYMENT_TRANSITIONS` and `validate_deployment_transition()`; introduced `DeploymentStatus.VERIFYING` between `STAGING` and `ACTIVE`; enforced atomic transition via `DeploymentRecord.with_transition()`.
+8. **B8 (ADR-0012 Invariant 8 Operator Lockout):** Stored `DeploymentRecord` in `DeploymentStatus.OPERATOR_REQUIRED` on null predecessor rollback; enforced that targets in `OPERATOR_REQUIRED` state fail closed and lock out subsequent `stage()` and `activate()` calls until operator intervention.
+9. **B9 (ADR-0012 Invariant 5 Verification Gate Hardening):** Added cross-checks verifying candidate artifact matches evaluation, verification dataset matches baseline evaluation dataset, hardware platform strings match, candidate evaluation verdict is `EvaluationVerdict.PASSED`, benchmarks have synchronized timing attestations, and primary metric selection is deterministic.
+10. **B10 (Pydantic Primitive Validation):** Replaced standalone unattached validation functions in `cv_agent/optimization/types.py` with Pydantic `Annotated[str, AfterValidator(validate_*)]` on `OptimizationPlanId`, `OptimizedArtifactId`, and `DeploymentId`.
+11. **Regression Boundary Tests:** Added 31 dedicated adversarial regression tests for B1–B10 (expanding boundary suite from 37 to 68 tests, all passing). Full repository test suite: 576/576 passing.
+
+**Why:** `[P§8]`, `[P§9]`, `[P§13]`, `[P§14]`, `[P§15]`, `[P§21]`, `[P§22]`, `[P§24]`, `[P§25]`, `[P§28]`, `[P§29.4]`, `[P§34]` — ensures zero fail-open authority at contract boundaries, strictly eliminates all synthetic or locally generated metadata, and locks down deployment lifecycle integrity.
+
+**Broke:** Nothing broken. Updated existing boundary tests to provide mandatory manifests, target IDs, and valid approval 4-tuples. 576/576 repository tests passing.
+
+**Learned:** In contract boundaries, defensive fail-closed architecture requires that every field produced by remote execution tools be strictly validated against authoritative upstream manifests and runtime telemetry. Type aliasing alone without attached Pydantic validators leaves runtime deserialization open to malformed inputs.
+
+**Left open:** Push commit to PR #63, verify GitHub Actions CI matrix, and request Official PM re-review for merge approval.

@@ -7,40 +7,43 @@ from __future__ import annotations
 
 import re
 from enum import Enum
-from typing import NewType
+from typing import Annotated
+
+from pydantic import AfterValidator
 
 _IDENTIFIER_PATTERN = re.compile(r"^[a-z0-9_.-]+(/[a-z0-9_.-]+)*$")
 
-OptimizationPlanId = NewType("OptimizationPlanId", str)
-OptimizedArtifactId = NewType("OptimizedArtifactId", str)
-DeploymentId = NewType("DeploymentId", str)
 
-
-def validate_optimization_plan_id(value: str) -> OptimizationPlanId:
+def validate_optimization_plan_id(value: str) -> str:
     """Validate OptimizationPlanId conforms to canonical identifier syntax."""
     if not isinstance(value, str) or not _IDENTIFIER_PATTERN.match(value):
         raise ValueError(
             f"OptimizationPlanId {value!r} does not conform to canonical syntax '^[a-z0-9_.-]+(/[a-z0-9_.-]+)*$'"
         )
-    return OptimizationPlanId(value)
+    return value
 
 
-def validate_optimized_artifact_id(value: str) -> OptimizedArtifactId:
+def validate_optimized_artifact_id(value: str) -> str:
     """Validate OptimizedArtifactId conforms to canonical identifier syntax."""
     if not isinstance(value, str) or not _IDENTIFIER_PATTERN.match(value):
         raise ValueError(
             f"OptimizedArtifactId {value!r} does not conform to canonical syntax '^[a-z0-9_.-]+(/[a-z0-9_.-]+)*$'"
         )
-    return OptimizedArtifactId(value)
+    return value
 
 
-def validate_deployment_id(value: str) -> DeploymentId:
+def validate_deployment_id(value: str) -> str:
     """Validate DeploymentId conforms to canonical identifier syntax."""
     if not isinstance(value, str) or not _IDENTIFIER_PATTERN.match(value):
         raise ValueError(
             f"DeploymentId {value!r} does not conform to canonical syntax '^[a-z0-9_.-]+(/[a-z0-9_.-]+)*$'"
         )
-    return DeploymentId(value)
+    return value
+
+
+OptimizationPlanId = Annotated[str, AfterValidator(validate_optimization_plan_id)]
+OptimizedArtifactId = Annotated[str, AfterValidator(validate_optimized_artifact_id)]
+DeploymentId = Annotated[str, AfterValidator(validate_deployment_id)]
 
 
 class OptimizationTechnique(str, Enum):

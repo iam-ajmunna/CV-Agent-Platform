@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 
 class OptimizationError(Exception):
     """Base exception for all Optimization & Deployment Subsystem errors."""
@@ -34,9 +36,17 @@ class DeploymentApprovalRequiredError(OptimizationError):
 class ReadinessProbeFailureError(OptimizationError):
     """Raised when candidate deployment fails startup timeout, latency budget, or memory headroom."""
 
+    def __init__(self, message: str, failed_record: Any = None) -> None:
+        super().__init__(message)
+        self.failed_record = failed_record
+
 
 class RollbackExecutionError(OptimizationError):
     """Raised when deployment rollback fails or cannot be performed (e.g. escalating to OPERATOR_REQUIRED)."""
+
+    def __init__(self, message: str, record: Any = None) -> None:
+        super().__init__(message)
+        self.record = record
 
 
 class HardwareMismatchError(OptimizationError):

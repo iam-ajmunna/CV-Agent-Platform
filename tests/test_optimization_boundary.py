@@ -69,6 +69,7 @@ from cv_agent.optimization.contracts import (
     OptimizationResult,
     OptimizedModelArtifact,
     ReadinessProbeResult,
+    validate_deployment_transition,
 )
 from cv_agent.optimization.deployment import DefaultDeploymentManager
 from cv_agent.optimization.errors import (
@@ -393,16 +394,22 @@ def _make_approval_context(
     plan: DeploymentPlan,
     resource_scope: str | None = None,
     operation_version: int = 1,
+    target_identity: str | None = None,
+    policy_version: str = "1.0",
+    bound_payload_hash: str | None = None,
+    bound_resource_scope: str | None = None,
+    bound_policy_version: str | None = None,
 ) -> tuple[OperationIdentity, ApprovalRequest, ApprovalDecision]:
     extract_deployment_operation_payload(plan)
     canonical_hash = compute_deployment_payload_hash(plan)
     scope = resource_scope or f"target:{plan.target.target_id}"
+    tid = target_identity if target_identity is not None else str(plan.target.target_id)
 
     op_id = OperationIdentity(
         operation_id="op-dep-001",
         operation_version=str(operation_version),
         canonical_payload_hash=canonical_hash,
-        target_identity=scope,
+        target_identity=tid,
     )
 
     app_req = ApprovalRequest(
@@ -411,7 +418,7 @@ def _make_approval_context(
         operation_id=OperationId(value="op-dep-001"),
         operation_version=operation_version,
         canonical_payload_hash=canonical_hash,
-        policy_version="1.0",
+        policy_version=policy_version,
         action_type="deployment.activate",
         risk_level="HIGH",
         resource_scope=scope,
@@ -423,9 +430,9 @@ def _make_approval_context(
         decision=ApprovalStatus.APPROVED,
         principal="human_pm",
         resolved_at=datetime.now(timezone.utc),
-        bound_payload_hash=canonical_hash,
-        bound_resource_scope=scope,
-        bound_policy_version="1.0",
+        bound_payload_hash=bound_payload_hash or canonical_hash,
+        bound_resource_scope=bound_resource_scope or scope,
+        bound_policy_version=bound_policy_version or policy_version,
     )
 
     return op_id, app_req, app_dec
@@ -442,7 +449,18 @@ class _MockToolExecutor:
     ) -> None:
         self.status = status
         self.error_message = error_message
-        self.structured_output = structured_output or {}
+        if structured_output is not None:
+            self.structured_output = structured_output
+        else:
+            self.structured_output = {
+                "artifact_uri": "artifact://models/opt-plan-001/model.engine",
+                "artifact_size_bytes": 85000000,
+                "runtime_format": "tensorrt_engine",
+                "artifact_hash": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+                "startup_time_sec": 1.5,
+                "probe_latency_mean_ms": 15.0,
+                "vram_consumed_mb": 1024.0,
+            }
         self.invocations: list[ToolInvocation] = []
 
     async def execute(self, invocation: ToolInvocation) -> ToolResult:
@@ -603,11 +621,12 @@ def test_ptq_quantization_missing_calibration_binding_fails_closed() -> None:
 # Test 5: Calibration dataset split leakage rejected (ADR-0009 Invariant 13)
 # =============================================================================
 def test_calibration_split_leakage_rejected_invariant_13() -> None:
-    """Verify CalibrationDatasetBinding rejects test/evaluation splits to prevent data leakage."""
-    leakage_splits = ["test", "evaluation", "eval", "val_test"]
+    """Verify CalibrationDatasetBinding rejects non-calibration splits to prevent data leakage."""
+    leakage_splits = ["test", "evaluation", "eval", "val_test", "train", "val"]
     for bad_split in leakage_splits:
         with pytest.raises(
-            CalibrationLeakageError, match="overlaps with evaluation/test splits"
+            CalibrationLeakageError,
+            match="must strictly be 'calibration'",
         ):
             CalibrationDatasetBinding(
                 dataset_id=DatasetId("dataset-001"),
@@ -828,6 +847,7 @@ def test_dataset_manifest_hash_mismatch_fails_closed() -> None:
             target_id=TargetId("target-jetson-01"),
             tool_executor=_MockToolExecutor(),
             dataset_manifest=dataset_manifest,
+            checkpoint_manifest=_make_valid_checkpoint_manifest(),
         )
 
 
@@ -845,7 +865,7 @@ def test_dataset_manifest_missing_calibration_split_fails_closed() -> None:
     bad_manifest = _make_valid_dataset_manifest(has_calibration=False)
 
     with pytest.raises(
-        CalibrationLeakageError, match="Calibration split 'calibration' not declared"
+        CalibrationLeakageError, match="Calibration split 'calibration'"
     ):
         optimizer.compile(
             plan=plan,
@@ -853,6 +873,7 @@ def test_dataset_manifest_missing_calibration_split_fails_closed() -> None:
             target_id=TargetId("target-jetson-01"),
             tool_executor=_MockToolExecutor(),
             dataset_manifest=bad_manifest,
+            checkpoint_manifest=_make_valid_checkpoint_manifest(),
         )
 
 
@@ -863,6 +884,7 @@ def test_optimizer_compile_mandatory_tool_id_and_target_id() -> None:
     """Verify DefaultModelOptimizer requires mandatory tool_id and target_id without local fallback."""
     optimizer = DefaultModelOptimizer()
     plan = _make_valid_optimization_plan()
+    ckpt = _make_valid_checkpoint_manifest()
 
     for bad_id in [cast(ToolId, None), cast(ToolId, ""), cast(ToolId, "   ")]:
         with pytest.raises(OptimizationExecutionError, match="tool_id is mandatory"):
@@ -871,6 +893,7 @@ def test_optimizer_compile_mandatory_tool_id_and_target_id() -> None:
                 tool_id=bad_id,  # type: ignore[arg-type]
                 target_id=TargetId("target-01"),
                 tool_executor=_MockToolExecutor(),
+                checkpoint_manifest=ckpt,
             )
 
     for bad_target in [cast(TargetId, None), cast(TargetId, ""), cast(TargetId, "   ")]:
@@ -880,6 +903,7 @@ def test_optimizer_compile_mandatory_tool_id_and_target_id() -> None:
                 tool_id=ToolId("cv.optimize.compile"),
                 target_id=bad_target,  # type: ignore[arg-type]
                 tool_executor=_MockToolExecutor(),
+                checkpoint_manifest=ckpt,
             )
 
 
@@ -897,6 +921,7 @@ def test_optimizer_compile_mandatory_tool_executor() -> None:
             tool_id=ToolId("cv.optimize.compile"),
             target_id=TargetId("target-01"),
             tool_executor=None,  # type: ignore[arg-type]
+            checkpoint_manifest=_make_valid_checkpoint_manifest(),
         )
 
 
@@ -921,6 +946,7 @@ def test_optimizer_compile_execution_failure_fails_closed() -> None:
             tool_id=ToolId("cv.optimize.compile"),
             target_id=TargetId("target-jetson-01"),
             tool_executor=executor,
+            checkpoint_manifest=_make_valid_checkpoint_manifest(),
         )
 
 
@@ -1095,19 +1121,38 @@ def test_verifier_missing_overlapping_metrics_fails_closed() -> None:
 
 
 # =============================================================================
-# Test 22: Deployment staging mandatory tool_id and executor
+# Test 22: Deployment staging mandatory tool_id, target_id, and executor
 # =============================================================================
 def test_deployment_staging_mandatory_tool_id_and_executor() -> None:
-    """Verify DeploymentManager.stage requires tool_id and tool_executor without synthesis."""
+    """Verify DeploymentManager.stage requires tool_id, target_id, and tool_executor without synthesis."""
     manager = DefaultDeploymentManager()
     plan = _make_valid_deployment_plan()
 
     for bad_id in [cast(ToolId, None), cast(ToolId, ""), cast(ToolId, "   ")]:
         with pytest.raises(OptimizationExecutionError, match="tool_id is mandatory"):
-            manager.stage(plan=plan, tool_id=bad_id, tool_executor=_MockToolExecutor())  # type: ignore[arg-type]
+            manager.stage(
+                plan=plan,
+                tool_id=bad_id,  # type: ignore[arg-type]
+                tool_executor=_MockToolExecutor(),
+                target_id=plan.target.target_id,
+            )
+
+    for bad_target in [cast(TargetId, None), cast(TargetId, ""), cast(TargetId, "   ")]:
+        with pytest.raises(DeploymentValidationError, match="target_id is mandatory"):
+            manager.stage(
+                plan=plan,
+                tool_id=ToolId("cv.deploy.stage"),
+                tool_executor=_MockToolExecutor(),
+                target_id=bad_target,  # type: ignore[arg-type]
+            )
 
     with pytest.raises(OptimizationExecutionError, match="tool_executor is mandatory"):
-        manager.stage(plan=plan, tool_id=ToolId("cv.deploy.stage"), tool_executor=None)  # type: ignore[arg-type]
+        manager.stage(
+            plan=plan,
+            tool_id=ToolId("cv.deploy.stage"),
+            tool_executor=None,  # type: ignore[arg-type]
+            target_id=plan.target.target_id,
+        )
 
 
 # =============================================================================
@@ -1170,6 +1215,7 @@ def test_deployment_staging_unverified_optimization_result_rejected() -> None:
             plan=plan,
             tool_id=ToolId("cv.deploy.stage"),
             tool_executor=_MockToolExecutor(),
+            target_id=plan.target.target_id,
             optimization_result=failed_opt_res,
         )
 
@@ -1194,6 +1240,7 @@ def test_deployment_readiness_probe_requires_staging_state() -> None:
             record=record,
             tool_id=ToolId("cv.deploy.probe"),
             tool_executor=_MockToolExecutor(),
+            target_id=plan.target.target_id,
         )
 
 
@@ -1218,12 +1265,16 @@ def test_deployment_readiness_probe_startup_timeout_fails_closed() -> None:
         }
     )
 
-    with pytest.raises(ReadinessProbeFailureError, match="Startup timeout exceeded"):
+    with pytest.raises(
+        ReadinessProbeFailureError, match="Startup timeout exceeded"
+    ) as exc_info:
         manager.verify_readiness(
             record=record,
             tool_id=ToolId("cv.deploy.probe"),
             tool_executor=executor,
+            target_id=plan.target.target_id,
         )
+    assert exc_info.value.failed_record.status == DeploymentStatus.FAILED
 
 
 # =============================================================================
@@ -1247,12 +1298,16 @@ def test_deployment_readiness_probe_latency_budget_exceeded_fails_closed() -> No
         }
     )
 
-    with pytest.raises(ReadinessProbeFailureError, match="latency exceeded budget"):
+    with pytest.raises(
+        ReadinessProbeFailureError, match="latency exceeded budget"
+    ) as exc_info:
         manager.verify_readiness(
             record=record,
             tool_id=ToolId("cv.deploy.probe"),
             tool_executor=executor,
+            target_id=plan.target.target_id,
         )
+    assert exc_info.value.failed_record.status == DeploymentStatus.FAILED
 
 
 # =============================================================================
@@ -1278,12 +1333,14 @@ def test_deployment_readiness_probe_memory_headroom_exceeded_fails_closed() -> N
 
     with pytest.raises(
         ReadinessProbeFailureError, match="Memory headroom budget violated"
-    ):
+    ) as exc_info:
         manager.verify_readiness(
             record=record,
             tool_id=ToolId("cv.deploy.probe"),
             tool_executor=executor,
+            target_id=plan.target.target_id,
         )
+    assert exc_info.value.failed_record.status == DeploymentStatus.FAILED
 
 
 # =============================================================================
@@ -1297,13 +1354,14 @@ def test_deployment_activate_requires_passed_readiness_probe() -> None:
         deployment_id=plan.deployment_id,
         plan=plan,
         status=DeploymentStatus.STAGING,
-        readiness_result=None,  # No probe!
+        readiness_result=None,
     )
     op_id, app_req, app_dec = _make_approval_context(plan)
 
+    # 1. Calling activate on STAGING record fails closed (B7 state machine)
     with pytest.raises(
         DeploymentValidationError,
-        match="Deployment cannot be activated without passing readiness probing",
+        match="must be in VERIFYING state to be activated",
     ):
         manager.activate(
             record=record,
@@ -1312,6 +1370,25 @@ def test_deployment_activate_requires_passed_readiness_probe() -> None:
             approval_decision=app_dec,
             tool_id=ToolId("cv.deploy.activate"),
             tool_executor=_MockToolExecutor(),
+            target_id=plan.target.target_id,
+        )
+
+    # 2. Calling activate in VERIFYING state but without passed readiness fails closed
+    verifying_record = record.model_copy(
+        update={"status": DeploymentStatus.VERIFYING, "readiness_result": None}
+    )
+    with pytest.raises(
+        DeploymentValidationError,
+        match="Deployment cannot be activated without passing readiness probing",
+    ):
+        manager.activate(
+            record=verifying_record,
+            operation_identity=op_id,
+            approval_request=app_req,
+            approval_decision=app_dec,
+            tool_id=ToolId("cv.deploy.activate"),
+            tool_executor=_MockToolExecutor(),
+            target_id=plan.target.target_id,
         )
 
 
@@ -1332,7 +1409,7 @@ def test_deployment_activate_payload_hash_tamper_fails_closed() -> None:
     record = DeploymentRecord(
         deployment_id=plan.deployment_id,
         plan=plan,
-        status=DeploymentStatus.STAGING,
+        status=DeploymentStatus.VERIFYING,
         readiness_result=probe_ok,
     )
     op_id, app_req, app_dec = _make_approval_context(plan)
@@ -1354,6 +1431,7 @@ def test_deployment_activate_payload_hash_tamper_fails_closed() -> None:
             approval_decision=app_dec,
             tool_id=ToolId("cv.deploy.activate"),
             tool_executor=_MockToolExecutor(),
+            target_id=plan.target.target_id,
         )
 
 
@@ -1374,7 +1452,7 @@ def test_deployment_activate_resource_scope_conflict_fails_closed() -> None:
     record = DeploymentRecord(
         deployment_id=plan.deployment_id,
         plan=plan,
-        status=DeploymentStatus.STAGING,
+        status=DeploymentStatus.VERIFYING,
         readiness_result=probe_ok,
     )
     op_id, app_req, app_dec = _make_approval_context(
@@ -1382,7 +1460,8 @@ def test_deployment_activate_resource_scope_conflict_fails_closed() -> None:
     )
 
     with pytest.raises(
-        DeploymentApprovalRequiredError, match="conflicts with authorized scope target"
+        DeploymentApprovalRequiredError,
+        match="resource_scope.*does not match deployment",
     ):
         manager.activate(
             record=record,
@@ -1391,6 +1470,7 @@ def test_deployment_activate_resource_scope_conflict_fails_closed() -> None:
             approval_decision=app_dec,
             tool_id=ToolId("cv.deploy.activate"),
             tool_executor=_MockToolExecutor(),
+            target_id=plan.target.target_id,
         )
 
 
@@ -1411,7 +1491,7 @@ def test_deployment_activate_approval_decision_denied_fails_closed() -> None:
     record = DeploymentRecord(
         deployment_id=plan.deployment_id,
         plan=plan,
-        status=DeploymentStatus.STAGING,
+        status=DeploymentStatus.VERIFYING,
         readiness_result=probe_ok,
     )
     op_id, app_req, app_dec = _make_approval_context(plan)
@@ -1437,6 +1517,7 @@ def test_deployment_activate_approval_decision_denied_fails_closed() -> None:
             approval_decision=denied_dec,
             tool_id=ToolId("cv.deploy.activate"),
             tool_executor=_MockToolExecutor(),
+            target_id=plan.target.target_id,
         )
 
 
@@ -1446,20 +1527,42 @@ def test_deployment_activate_approval_decision_denied_fails_closed() -> None:
 def test_deployment_rollback_null_predecessor_escalates_to_operator_required() -> None:
     """Verify rollback of initial deployment with rollback_target_id=None escalates to OPERATOR_REQUIRED."""
     manager = DefaultDeploymentManager()
-    # Initial deployment has rollback_target_id = None
     plan = _make_valid_deployment_plan(rollback_target_id=None)
     record = DeploymentRecord(
         deployment_id=plan.deployment_id,
         plan=plan,
         status=DeploymentStatus.ACTIVE,
     )
+    active_deployments = {record.deployment_id: record}
 
-    with pytest.raises(RollbackExecutionError, match="Escalated to OPERATOR_REQUIRED"):
-        manager.rollback(
-            record=record,
-            reason="Real-time pipeline stream buffer stall",
-            tool_id=ToolId("cv.deploy.rollback"),
+    escalated, restored = manager.rollback(
+        record=record,
+        reason="Real-time pipeline stream buffer stall",
+        tool_id=ToolId("cv.deploy.rollback"),
+        tool_executor=_MockToolExecutor(),
+        target_id=plan.target.target_id,
+        active_deployments=active_deployments,
+    )
+
+    assert escalated.status == DeploymentStatus.OPERATOR_REQUIRED
+    assert restored is None
+    assert "OPERATOR_REQUIRED" in (escalated.failure_details or "")
+    assert (
+        active_deployments[record.deployment_id].status
+        == DeploymentStatus.OPERATOR_REQUIRED
+    )
+
+    # B8 lockout: target in OPERATOR_REQUIRED locks out future staging
+    new_plan = _make_valid_deployment_plan(deployment_id="dep-002")
+    with pytest.raises(
+        DeploymentValidationError, match="locked out by deployment.*OPERATOR_REQUIRED"
+    ):
+        manager.stage(
+            plan=new_plan,
+            tool_id=ToolId("cv.deploy.stage"),
             tool_executor=_MockToolExecutor(),
+            target_id=new_plan.target.target_id,
+            active_deployments=active_deployments,
         )
 
 
@@ -1497,6 +1600,7 @@ def test_deployment_rollback_restores_predecessor_manifest() -> None:
         reason="Edge latency spikes observed",
         tool_id=ToolId("cv.deploy.rollback"),
         tool_executor=executor,
+        target_id=cand_plan.target.target_id,
         active_deployments=active_deployments,
     )
 
@@ -1528,6 +1632,7 @@ def test_deployment_rollback_missing_predecessor_in_registry_fails_closed() -> N
             reason="Immediate failure",
             tool_id=ToolId("cv.deploy.rollback"),
             tool_executor=_MockToolExecutor(),
+            target_id=plan.target.target_id,
             active_deployments={},  # Predecessor missing!
         )
 
@@ -1601,3 +1706,932 @@ def test_zero_sqlite_or_db_mutations_in_optimization() -> None:
                 assert node.module != "sqlite3", (
                     f"Forbidden sqlite3 import in {py_file}"
                 )
+
+
+# =============================================================================
+# Phase 2M PM Adversarial Review #5237441698 Regression Suite (B1 - B10)
+# =============================================================================
+
+
+# --- B1: ADR-0010 Lineage Mandatory ---
+def test_b1_optimizer_requires_checkpoint_manifest() -> None:
+    """[B1] Verify DefaultModelOptimizer rejects compilation without CheckpointManifest."""
+    optimizer = DefaultModelOptimizer()
+    plan = _make_valid_optimization_plan()
+
+    with pytest.raises(
+        OptimizationValidationError, match="checkpoint_manifest is mandatory"
+    ):
+        optimizer.compile(
+            plan=plan,
+            tool_id=ToolId("cv.optimize.compile"),
+            target_id=TargetId("target-jetson-01"),
+            tool_executor=_MockToolExecutor(),
+            checkpoint_manifest=None,  # type: ignore[arg-type]
+        )
+
+
+def test_b1_optimizer_checkpoint_lineage_mismatch_fails_closed() -> None:
+    """[B1] Verify checkpoint ID or weights hash mismatch fails closed."""
+    optimizer = DefaultModelOptimizer()
+    plan = _make_valid_optimization_plan()
+
+    bad_ckpt_id = _make_valid_checkpoint_manifest().model_copy(
+        update={"checkpoint_id": CheckpointId("ckpt-mismatched-id")}
+    )
+    with pytest.raises(OptimizationValidationError, match="Checkpoint ID mismatch"):
+        optimizer.compile(
+            plan=plan,
+            tool_id=ToolId("cv.optimize.compile"),
+            target_id=TargetId("target-jetson-01"),
+            tool_executor=_MockToolExecutor(),
+            checkpoint_manifest=bad_ckpt_id,
+        )
+
+    bad_weights = _make_valid_checkpoint_manifest().model_copy(
+        update={
+            "weights_hash": ContentHash(
+                "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+            )
+        }
+    )
+    with pytest.raises(OptimizationValidationError, match="Weights hash mismatch"):
+        optimizer.compile(
+            plan=plan,
+            tool_id=ToolId("cv.optimize.compile"),
+            target_id=TargetId("target-jetson-01"),
+            tool_executor=_MockToolExecutor(),
+            checkpoint_manifest=bad_weights,
+        )
+
+
+# --- B2: ADR-0009 Calibration Binding Fail-Closed ---
+def test_b2_calibration_split_must_strictly_be_calibration() -> None:
+    """[B2] Verify CalibrationDatasetBinding rejects non-calibration splits."""
+    for bad_split in ["train", "val", "test", "holdout", "custom"]:
+        with pytest.raises(
+            CalibrationLeakageError, match="must strictly be 'calibration'"
+        ):
+            CalibrationDatasetBinding(
+                dataset_id=DatasetId("dataset-001"),
+                dataset_version=DatasetVersion("v1.0.0"),
+                dataset_manifest_hash=ContentHash("sha256:" + "1" * 64),
+                split_name=bad_split,
+            )
+
+
+def test_b2_calibration_manifest_mandatory_for_ptq_fails_closed() -> None:
+    """[B2] Verify DefaultModelOptimizer requires dataset_manifest for PTQ/INT8."""
+    optimizer = DefaultModelOptimizer()
+    plan = _make_valid_optimization_plan(
+        technique=OptimizationTechnique.PTQ_QUANTIZATION,
+        precision=OptimizationPrecision.INT8,
+    )
+    with pytest.raises(
+        CalibrationLeakageError,
+        match="dataset_manifest is mandatory",
+    ):
+        optimizer.compile(
+            plan=plan,
+            tool_id=ToolId("cv.optimize.compile"),
+            target_id=TargetId("target-jetson-01"),
+            tool_executor=_MockToolExecutor(),
+            checkpoint_manifest=_make_valid_checkpoint_manifest(),
+            dataset_manifest=None,
+        )
+
+
+def test_b2_calibration_manifest_empty_split_fails_closed() -> None:
+    """[B2] Verify DefaultModelOptimizer rejects manifest with empty calibration split."""
+    optimizer = DefaultModelOptimizer()
+    plan = _make_valid_optimization_plan(
+        technique=OptimizationTechnique.PTQ_QUANTIZATION,
+        precision=OptimizationPrecision.INT8,
+    )
+    empty_calib_manifest = _make_valid_dataset_manifest(has_calibration=False)
+    with pytest.raises(CalibrationLeakageError, match="has no items"):
+        optimizer.compile(
+            plan=plan,
+            tool_id=ToolId("cv.optimize.compile"),
+            target_id=TargetId("target-jetson-01"),
+            tool_executor=_MockToolExecutor(),
+            checkpoint_manifest=_make_valid_checkpoint_manifest(),
+            dataset_manifest=empty_calib_manifest,
+        )
+
+
+# --- B3: Authoritative Compilation Outputs, Zero Synthetic Metadata ---
+def test_b3_compilation_missing_artifact_uri_fails_closed() -> None:
+    """[B3] Verify compilation tool output missing artifact_uri fails closed."""
+    optimizer = DefaultModelOptimizer()
+    plan = _make_valid_optimization_plan()
+    executor = _MockToolExecutor(
+        structured_output={
+            "artifact_size_bytes": 85000000,
+            "runtime_format": "tensorrt_engine",
+        }
+    )
+    with pytest.raises(
+        OptimizationExecutionError, match="missing mandatory non-empty 'artifact_uri'"
+    ):
+        optimizer.compile(
+            plan=plan,
+            tool_id=ToolId("cv.optimize.compile"),
+            target_id=TargetId("target-jetson-01"),
+            tool_executor=executor,
+            checkpoint_manifest=_make_valid_checkpoint_manifest(),
+        )
+
+
+def test_b3_compilation_missing_artifact_size_bytes_fails_closed() -> None:
+    """[B3] Verify compilation tool output missing artifact_size_bytes fails closed."""
+    optimizer = DefaultModelOptimizer()
+    plan = _make_valid_optimization_plan()
+    executor = _MockToolExecutor(
+        structured_output={
+            "artifact_uri": "artifact://model.engine",
+            "runtime_format": "tensorrt_engine",
+        }
+    )
+    with pytest.raises(
+        OptimizationExecutionError,
+        match="missing mandatory.*'artifact_size_bytes'",
+    ):
+        optimizer.compile(
+            plan=plan,
+            tool_id=ToolId("cv.optimize.compile"),
+            target_id=TargetId("target-jetson-01"),
+            tool_executor=executor,
+            checkpoint_manifest=_make_valid_checkpoint_manifest(),
+        )
+
+
+def test_b3_compilation_missing_runtime_format_fails_closed() -> None:
+    """[B3] Verify compilation tool output missing runtime_format fails closed."""
+    optimizer = DefaultModelOptimizer()
+    plan = _make_valid_optimization_plan()
+    executor = _MockToolExecutor(
+        structured_output={
+            "artifact_uri": "artifact://model.engine",
+            "artifact_size_bytes": 85000000,
+        }
+    )
+    with pytest.raises(
+        OptimizationExecutionError,
+        match="missing mandatory non-empty 'runtime_format'",
+    ):
+        optimizer.compile(
+            plan=plan,
+            tool_id=ToolId("cv.optimize.compile"),
+            target_id=TargetId("target-jetson-01"),
+            tool_executor=executor,
+            checkpoint_manifest=_make_valid_checkpoint_manifest(),
+        )
+
+
+# --- B4: Authoritative Readiness Telemetry, Zero Synthetic Defaults ---
+def test_b4_readiness_probe_missing_telemetry_fails_closed() -> None:
+    """[B4] Verify readiness probing fails closed without synthetic defaults on missing metrics."""
+    manager = DefaultDeploymentManager()
+    plan = _make_valid_deployment_plan()
+    record = DeploymentRecord(
+        deployment_id=plan.deployment_id,
+        plan=plan,
+        status=DeploymentStatus.STAGING,
+    )
+
+    # Missing startup_time_sec
+    exec1 = _MockToolExecutor(
+        structured_output={"probe_latency_mean_ms": 15.0, "vram_consumed_mb": 1024.0}
+    )
+    with pytest.raises(
+        ReadinessProbeFailureError,
+        match="probe telemetry missing required metric 'startup_time_sec'",
+    ) as exc_info1:
+        manager.verify_readiness(
+            record=record,
+            tool_id=ToolId("cv.deploy.probe"),
+            tool_executor=exec1,
+            target_id=plan.target.target_id,
+        )
+    assert exc_info1.value.failed_record.status == DeploymentStatus.FAILED
+
+    # Missing probe_latency_mean_ms
+    exec2 = _MockToolExecutor(
+        structured_output={"startup_time_sec": 1.5, "vram_consumed_mb": 1024.0}
+    )
+    with pytest.raises(
+        ReadinessProbeFailureError,
+        match="probe telemetry missing required metric 'probe_latency_mean_ms'",
+    ) as exc_info2:
+        manager.verify_readiness(
+            record=record,
+            tool_id=ToolId("cv.deploy.probe"),
+            tool_executor=exec2,
+            target_id=plan.target.target_id,
+        )
+    assert exc_info2.value.failed_record.status == DeploymentStatus.FAILED
+
+    # Missing vram_consumed_mb
+    exec3 = _MockToolExecutor(
+        structured_output={"startup_time_sec": 1.5, "probe_latency_mean_ms": 15.0}
+    )
+    with pytest.raises(
+        ReadinessProbeFailureError,
+        match="probe telemetry missing required metric 'vram_consumed_mb'",
+    ) as exc_info3:
+        manager.verify_readiness(
+            record=record,
+            tool_id=ToolId("cv.deploy.probe"),
+            tool_executor=exec3,
+            target_id=plan.target.target_id,
+        )
+    assert exc_info3.value.failed_record.status == DeploymentStatus.FAILED
+
+
+def test_b4_readiness_probe_malformed_telemetry_fails_closed() -> None:
+    """[B4] Verify non-finite or negative telemetry metrics fail closed."""
+    manager = DefaultDeploymentManager()
+    plan = _make_valid_deployment_plan()
+    record = DeploymentRecord(
+        deployment_id=plan.deployment_id,
+        plan=plan,
+        status=DeploymentStatus.STAGING,
+    )
+
+    exec_nan = _MockToolExecutor(
+        structured_output={
+            "startup_time_sec": float("nan"),
+            "probe_latency_mean_ms": 15.0,
+            "vram_consumed_mb": 1024.0,
+        }
+    )
+    with pytest.raises(ReadinessProbeFailureError, match="must be a finite float"):
+        manager.verify_readiness(
+            record=record,
+            tool_id=ToolId("cv.deploy.probe"),
+            tool_executor=exec_nan,
+            target_id=plan.target.target_id,
+        )
+
+    exec_neg = _MockToolExecutor(
+        structured_output={
+            "startup_time_sec": 1.5,
+            "probe_latency_mean_ms": -1.0,
+            "vram_consumed_mb": 1024.0,
+        }
+    )
+    with pytest.raises(
+        ReadinessProbeFailureError, match="telemetry metrics must be non-negative"
+    ):
+        manager.verify_readiness(
+            record=record,
+            tool_id=ToolId("cv.deploy.probe"),
+            tool_executor=exec_neg,
+            target_id=plan.target.target_id,
+        )
+
+
+# --- B5: External TargetId Mandatory Across Operations ---
+def test_b5_external_target_id_mandatory_across_operations() -> None:
+    """[B5] Verify target_id is mandatory across stage, verify_readiness, activate, and rollback."""
+    manager = DefaultDeploymentManager()
+    plan = _make_valid_deployment_plan()
+    record_staging = DeploymentRecord(
+        deployment_id=plan.deployment_id,
+        plan=plan,
+        status=DeploymentStatus.STAGING,
+    )
+    record_verifying = DeploymentRecord(
+        deployment_id=plan.deployment_id,
+        plan=plan,
+        status=DeploymentStatus.VERIFYING,
+        readiness_result=ReadinessProbeResult(
+            passed=True,
+            startup_time_sec=1.0,
+            probe_latency_mean_ms=10.0,
+            vram_consumed_mb=1024.0,
+            probed_at=datetime.now(timezone.utc),
+        ),
+    )
+    record_active = DeploymentRecord(
+        deployment_id=plan.deployment_id,
+        plan=plan,
+        status=DeploymentStatus.ACTIVE,
+    )
+    op_id, app_req, app_dec = _make_approval_context(plan)
+
+    for bad_target in [cast(TargetId, None), cast(TargetId, ""), cast(TargetId, "   ")]:
+        with pytest.raises(DeploymentValidationError, match="target_id is mandatory"):
+            manager.stage(
+                plan=plan,
+                tool_id=ToolId("cv.deploy.stage"),
+                tool_executor=_MockToolExecutor(),
+                target_id=bad_target,  # type: ignore[arg-type]
+            )
+
+        with pytest.raises(DeploymentValidationError, match="target_id is mandatory"):
+            manager.verify_readiness(
+                record=record_staging,
+                tool_id=ToolId("cv.deploy.probe"),
+                tool_executor=_MockToolExecutor(),
+                target_id=bad_target,  # type: ignore[arg-type]
+            )
+
+        with pytest.raises(DeploymentValidationError, match="target_id is mandatory"):
+            manager.activate(
+                record=record_verifying,
+                operation_identity=op_id,
+                approval_request=app_req,
+                approval_decision=app_dec,
+                tool_id=ToolId("cv.deploy.activate"),
+                tool_executor=_MockToolExecutor(),
+                target_id=bad_target,  # type: ignore[arg-type]
+            )
+
+        with pytest.raises(DeploymentValidationError, match="target_id is mandatory"):
+            manager.rollback(
+                record=record_active,
+                reason="emergency rollback",
+                tool_id=ToolId("cv.deploy.rollback"),
+                tool_executor=_MockToolExecutor(),
+                target_id=bad_target,  # type: ignore[arg-type]
+            )
+
+
+def test_b5_external_target_id_mismatch_fails_closed() -> None:
+    """[B5] Verify target_id conflicting with plan or record fails closed."""
+    manager = DefaultDeploymentManager()
+    plan = _make_valid_deployment_plan()
+    diff_target = TargetId("target-different-server")
+    record = DeploymentRecord(
+        deployment_id=plan.deployment_id,
+        plan=plan,
+        status=DeploymentStatus.STAGING,
+    )
+
+    with pytest.raises(
+        DeploymentValidationError, match="conflicts with DeploymentPlan target"
+    ):
+        manager.stage(
+            plan=plan,
+            tool_id=ToolId("cv.deploy.stage"),
+            tool_executor=_MockToolExecutor(),
+            target_id=diff_target,
+        )
+
+    with pytest.raises(DeploymentValidationError, match="conflicts with record target"):
+        manager.verify_readiness(
+            record=record,
+            tool_id=ToolId("cv.deploy.probe"),
+            tool_executor=_MockToolExecutor(),
+            target_id=diff_target,
+        )
+
+
+# --- B6: Strict ADR-0003 4-Tuple Approval Cross-Checking ---
+def test_b6_approval_operation_id_mismatch_fails_closed() -> None:
+    """[B6] Verify OperationIdentity operation_id mismatch against ApprovalRequest fails closed."""
+    manager = DefaultDeploymentManager()
+    plan = _make_valid_deployment_plan()
+    probe_ok = ReadinessProbeResult(
+        passed=True,
+        startup_time_sec=1.0,
+        probe_latency_mean_ms=10.0,
+        vram_consumed_mb=1024.0,
+        probed_at=datetime.now(timezone.utc),
+    )
+    record = DeploymentRecord(
+        deployment_id=plan.deployment_id,
+        plan=plan,
+        status=DeploymentStatus.VERIFYING,
+        readiness_result=probe_ok,
+    )
+    op_id, app_req, app_dec = _make_approval_context(plan)
+
+    mismatched_op = op_id.model_copy(update={"operation_id": "op-different-001"})
+    with pytest.raises(
+        DeploymentApprovalRequiredError, match="Operation ID mismatch across 4-tuple"
+    ):
+        manager.activate(
+            record=record,
+            operation_identity=mismatched_op,
+            approval_request=app_req,
+            approval_decision=app_dec,
+            tool_id=ToolId("cv.deploy.activate"),
+            tool_executor=_MockToolExecutor(),
+            target_id=plan.target.target_id,
+        )
+
+
+def test_b6_approval_operation_version_mismatch_fails_closed() -> None:
+    """[B6] Verify OperationIdentity operation_version mismatch against ApprovalRequest fails closed."""
+    manager = DefaultDeploymentManager()
+    plan = _make_valid_deployment_plan()
+    probe_ok = ReadinessProbeResult(
+        passed=True,
+        startup_time_sec=1.0,
+        probe_latency_mean_ms=10.0,
+        vram_consumed_mb=1024.0,
+        probed_at=datetime.now(timezone.utc),
+    )
+    record = DeploymentRecord(
+        deployment_id=plan.deployment_id,
+        plan=plan,
+        status=DeploymentStatus.VERIFYING,
+        readiness_result=probe_ok,
+    )
+    op_id, app_req, app_dec = _make_approval_context(plan)
+
+    mismatched_ver = op_id.model_copy(update={"operation_version": "99"})
+    with pytest.raises(
+        DeploymentApprovalRequiredError,
+        match="Operation version mismatch across 4-tuple",
+    ):
+        manager.activate(
+            record=record,
+            operation_identity=mismatched_ver,
+            approval_request=app_req,
+            approval_decision=app_dec,
+            tool_id=ToolId("cv.deploy.activate"),
+            tool_executor=_MockToolExecutor(),
+            target_id=plan.target.target_id,
+        )
+
+
+def test_b6_approval_target_identity_mismatch_fails_closed() -> None:
+    """[B6] Verify OperationIdentity target_identity mismatch against plan target fails closed."""
+    manager = DefaultDeploymentManager()
+    plan = _make_valid_deployment_plan()
+    probe_ok = ReadinessProbeResult(
+        passed=True,
+        startup_time_sec=1.0,
+        probe_latency_mean_ms=10.0,
+        vram_consumed_mb=1024.0,
+        probed_at=datetime.now(timezone.utc),
+    )
+    record = DeploymentRecord(
+        deployment_id=plan.deployment_id,
+        plan=plan,
+        status=DeploymentStatus.VERIFYING,
+        readiness_result=probe_ok,
+    )
+    op_id, app_req, app_dec = _make_approval_context(plan)
+
+    mismatched_target = op_id.model_copy(update={"target_identity": "target-fake"})
+    with pytest.raises(
+        DeploymentApprovalRequiredError, match="Target identity mismatch"
+    ):
+        manager.activate(
+            record=record,
+            operation_identity=mismatched_target,
+            approval_request=app_req,
+            approval_decision=app_dec,
+            tool_id=ToolId("cv.deploy.activate"),
+            tool_executor=_MockToolExecutor(),
+            target_id=plan.target.target_id,
+        )
+
+
+def test_b6_approval_request_id_mismatch_fails_closed() -> None:
+    """[B6] Verify ApprovalDecision request_id mismatch against ApprovalRequest fails closed."""
+    manager = DefaultDeploymentManager()
+    plan = _make_valid_deployment_plan()
+    probe_ok = ReadinessProbeResult(
+        passed=True,
+        startup_time_sec=1.0,
+        probe_latency_mean_ms=10.0,
+        vram_consumed_mb=1024.0,
+        probed_at=datetime.now(timezone.utc),
+    )
+    record = DeploymentRecord(
+        deployment_id=plan.deployment_id,
+        plan=plan,
+        status=DeploymentStatus.VERIFYING,
+        readiness_result=probe_ok,
+    )
+    op_id, app_req, app_dec = _make_approval_context(plan)
+
+    bad_dec = app_dec.model_copy(update={"request_id": "req-rogue-001"})
+    with pytest.raises(
+        DeploymentApprovalRequiredError, match="Approval decision request_id mismatch"
+    ):
+        manager.activate(
+            record=record,
+            operation_identity=op_id,
+            approval_request=app_req,
+            approval_decision=bad_dec,
+            tool_id=ToolId("cv.deploy.activate"),
+            tool_executor=_MockToolExecutor(),
+            target_id=plan.target.target_id,
+        )
+
+
+def test_b6_approval_policy_version_mismatch_fails_closed() -> None:
+    """[B6] Verify policy_version mismatch between request and decision fails closed."""
+    manager = DefaultDeploymentManager()
+    plan = _make_valid_deployment_plan()
+    probe_ok = ReadinessProbeResult(
+        passed=True,
+        startup_time_sec=1.0,
+        probe_latency_mean_ms=10.0,
+        vram_consumed_mb=1024.0,
+        probed_at=datetime.now(timezone.utc),
+    )
+    record = DeploymentRecord(
+        deployment_id=plan.deployment_id,
+        plan=plan,
+        status=DeploymentStatus.VERIFYING,
+        readiness_result=probe_ok,
+    )
+    op_id, app_req, app_dec = _make_approval_context(plan)
+
+    bad_policy = app_dec.model_copy(update={"bound_policy_version": "9.9"})
+    with pytest.raises(
+        DeploymentApprovalRequiredError, match="Policy version mismatch"
+    ):
+        manager.activate(
+            record=record,
+            operation_identity=op_id,
+            approval_request=app_req,
+            approval_decision=bad_policy,
+            tool_id=ToolId("cv.deploy.activate"),
+            tool_executor=_MockToolExecutor(),
+            target_id=plan.target.target_id,
+        )
+
+
+def test_b6_approval_bound_scope_mismatch_fails_closed() -> None:
+    """[B6] Verify bound_resource_scope mismatch against authorized target fails closed."""
+    manager = DefaultDeploymentManager()
+    plan = _make_valid_deployment_plan()
+    probe_ok = ReadinessProbeResult(
+        passed=True,
+        startup_time_sec=1.0,
+        probe_latency_mean_ms=10.0,
+        vram_consumed_mb=1024.0,
+        probed_at=datetime.now(timezone.utc),
+    )
+    record = DeploymentRecord(
+        deployment_id=plan.deployment_id,
+        plan=plan,
+        status=DeploymentStatus.VERIFYING,
+        readiness_result=probe_ok,
+    )
+    op_id, app_req, app_dec = _make_approval_context(plan)
+
+    bad_scope = app_dec.model_copy(
+        update={"bound_resource_scope": "target:cluster-rogue"}
+    )
+    with pytest.raises(
+        DeploymentApprovalRequiredError, match="Bound resource scope mismatch"
+    ):
+        manager.activate(
+            record=record,
+            operation_identity=op_id,
+            approval_request=app_req,
+            approval_decision=bad_scope,
+            tool_id=ToolId("cv.deploy.activate"),
+            tool_executor=_MockToolExecutor(),
+            target_id=plan.target.target_id,
+        )
+
+
+# --- B7: Enforced Deployment Lifecycle State Machine ---
+def test_b7_deployment_lifecycle_state_machine_invalid_transition_fails_closed() -> (
+    None
+):
+    """[B7] Verify validate_deployment_transition strictly rejects illegal lifecycle transitions."""
+    invalid_transitions = [
+        (DeploymentStatus.DRAFT, DeploymentStatus.ACTIVE),
+        (DeploymentStatus.STAGING, DeploymentStatus.ACTIVE),
+        (DeploymentStatus.FAILED, DeploymentStatus.ACTIVE),
+        (DeploymentStatus.ROLLED_BACK, DeploymentStatus.ACTIVE),
+        (DeploymentStatus.OPERATOR_REQUIRED, DeploymentStatus.ACTIVE),
+        (DeploymentStatus.REJECTED, DeploymentStatus.ACTIVE),
+        (DeploymentStatus.ACTIVE, DeploymentStatus.STAGING),
+    ]
+    for current, target in invalid_transitions:
+        with pytest.raises(
+            DeploymentValidationError, match="Invalid deployment lifecycle transition"
+        ):
+            validate_deployment_transition(current, target)
+
+
+def test_b7_verify_readiness_transitions_staging_to_verifying() -> None:
+    """[B7] Verify verify_readiness() transitions STAGING record to VERIFYING."""
+    manager = DefaultDeploymentManager()
+    plan = _make_valid_deployment_plan()
+    record = DeploymentRecord(
+        deployment_id=plan.deployment_id,
+        plan=plan,
+        status=DeploymentStatus.STAGING,
+    )
+    probe_res, verifying_rec = manager.verify_readiness(
+        record=record,
+        tool_id=ToolId("cv.deploy.probe"),
+        tool_executor=_MockToolExecutor(),
+        target_id=plan.target.target_id,
+    )
+    assert probe_res.passed is True
+    assert verifying_rec.status == DeploymentStatus.VERIFYING
+    assert verifying_rec.readiness_result == probe_res
+
+
+def test_b7_activate_rejects_non_verifying_record() -> None:
+    """[B7] Verify activate() rejects any record not in VERIFYING state."""
+    manager = DefaultDeploymentManager()
+    plan = _make_valid_deployment_plan()
+    op_id, app_req, app_dec = _make_approval_context(plan)
+
+    for bad_status in [
+        DeploymentStatus.DRAFT,
+        DeploymentStatus.STAGING,
+        DeploymentStatus.FAILED,
+        DeploymentStatus.ACTIVE,
+        DeploymentStatus.ROLLED_BACK,
+    ]:
+        record = DeploymentRecord(
+            deployment_id=plan.deployment_id,
+            plan=plan,
+            status=bad_status,
+        )
+        with pytest.raises(
+            DeploymentValidationError,
+            match="must be in VERIFYING state to be activated",
+        ):
+            manager.activate(
+                record=record,
+                operation_identity=op_id,
+                approval_request=app_req,
+                approval_decision=app_dec,
+                tool_id=ToolId("cv.deploy.activate"),
+                tool_executor=_MockToolExecutor(),
+                target_id=plan.target.target_id,
+            )
+
+
+# --- B8: Null-Predecessor Rollback Produces OPERATOR_REQUIRED & Lockout ---
+def test_b8_null_predecessor_rollback_escalates_to_operator_required_record() -> None:
+    """[B8] Verify rollback without predecessor returns record in OPERATOR_REQUIRED state."""
+    manager = DefaultDeploymentManager()
+    plan = _make_valid_deployment_plan(rollback_target_id=None)
+    record = DeploymentRecord(
+        deployment_id=plan.deployment_id,
+        plan=plan,
+        status=DeploymentStatus.ACTIVE,
+    )
+    active_deployments = {record.deployment_id: record}
+
+    escalated, restored = manager.rollback(
+        record=record,
+        reason="Pipeline stall on initial deployment",
+        tool_id=ToolId("cv.deploy.rollback"),
+        tool_executor=_MockToolExecutor(),
+        target_id=plan.target.target_id,
+        active_deployments=active_deployments,
+    )
+    assert escalated.status == DeploymentStatus.OPERATOR_REQUIRED
+    assert restored is None
+    assert "OPERATOR_REQUIRED" in (escalated.failure_details or "")
+    assert (
+        active_deployments[record.deployment_id].status
+        == DeploymentStatus.OPERATOR_REQUIRED
+    )
+
+
+def test_b8_operator_required_locks_out_subsequent_staging_and_activation() -> None:
+    """[B8] Verify an OPERATOR_REQUIRED record for a target locks out staging and activation."""
+    manager = DefaultDeploymentManager()
+    plan1 = _make_valid_deployment_plan(deployment_id="dep-initial")
+    op_record = DeploymentRecord(
+        deployment_id=plan1.deployment_id,
+        plan=plan1,
+        status=DeploymentStatus.OPERATOR_REQUIRED,
+    )
+    active_deployments = {op_record.deployment_id: op_record}
+
+    plan2 = _make_valid_deployment_plan(deployment_id="dep-next")
+    with pytest.raises(
+        DeploymentValidationError, match="locked out by deployment.*OPERATOR_REQUIRED"
+    ):
+        manager.stage(
+            plan=plan2,
+            tool_id=ToolId("cv.deploy.stage"),
+            tool_executor=_MockToolExecutor(),
+            target_id=plan2.target.target_id,
+            active_deployments=active_deployments,
+        )
+
+    verifying_rec = DeploymentRecord(
+        deployment_id=plan2.deployment_id,
+        plan=plan2,
+        status=DeploymentStatus.VERIFYING,
+        readiness_result=ReadinessProbeResult(
+            passed=True,
+            startup_time_sec=1.0,
+            probe_latency_mean_ms=10.0,
+            vram_consumed_mb=1024.0,
+            probed_at=datetime.now(timezone.utc),
+        ),
+    )
+    op_id, app_req, app_dec = _make_approval_context(plan2)
+    with pytest.raises(
+        DeploymentValidationError, match="locked out by deployment.*OPERATOR_REQUIRED"
+    ):
+        manager.activate(
+            record=verifying_rec,
+            operation_identity=op_id,
+            approval_request=app_req,
+            approval_decision=app_dec,
+            tool_id=ToolId("cv.deploy.activate"),
+            tool_executor=_MockToolExecutor(),
+            target_id=plan2.target.target_id,
+            active_deployments=active_deployments,
+        )
+
+
+# --- B9: Post-Optimization Verification Strict Binding & Evidence Checks ---
+def test_b9_verifier_dataset_binding_mismatch_fails_closed() -> None:
+    """[B9] Verify verifier rejects evaluation if dataset binding does not match plan."""
+    verifier = DefaultOptimizationVerifier()
+    plan = _make_valid_optimization_plan()
+    artifact = _make_valid_artifact(plan)
+
+    bad_ds_eval = _make_valid_evaluation_result("exp-base")
+    bad_ds_binding = _make_valid_verification_binding().model_copy(
+        update={"split_name": "validation"}
+    )
+    bad_plan = bad_ds_eval.plan.model_copy(update={"dataset_binding": bad_ds_binding})
+    cand_eval = bad_ds_eval.model_copy(update={"plan": bad_plan})
+
+    with pytest.raises(
+        OptimizationVerificationError, match="split_name 'validation' does not match"
+    ):
+        verifier.verify(
+            artifact=artifact,
+            plan=plan,
+            baseline_evaluation=bad_ds_eval,
+            candidate_evaluation=cand_eval,
+        )
+
+
+def test_b9_verifier_candidate_artifact_binding_mismatch_fails_closed() -> None:
+    """[B9] Verify verifier rejects candidate evaluation if model checkpoint does not match candidate artifact."""
+    verifier = DefaultOptimizationVerifier()
+    plan = _make_valid_optimization_plan()
+    artifact = _make_valid_artifact(plan)
+    base_eval = _make_valid_evaluation_result("exp-base")
+    cand_eval = _make_valid_evaluation_result("exp-cand")
+
+    bad_cand_model = cand_eval.plan.model_artifact.model_copy(
+        update={"checkpoint_id": CheckpointId("ckpt-completely-unrelated")}
+    )
+    bad_plan = cand_eval.plan.model_copy(update={"model_artifact": bad_cand_model})
+    bad_cand_eval = cand_eval.model_copy(update={"plan": bad_plan})
+
+    with pytest.raises(
+        OptimizationVerificationError, match="does not match candidate artifact"
+    ):
+        verifier.verify(
+            artifact=artifact,
+            plan=plan,
+            baseline_evaluation=base_eval,
+            candidate_evaluation=bad_cand_eval,
+        )
+
+
+def test_b9_verifier_hardware_mismatch_fails_closed() -> None:
+    """[B9] Verify verifier rejects evaluation with hardware environment mismatch."""
+    verifier = DefaultOptimizationVerifier()
+    plan = _make_valid_optimization_plan()
+    artifact = _make_valid_artifact(plan)
+    base_eval = _make_valid_evaluation_result("exp-base")
+
+    diff_env = base_eval.environment.model_copy(
+        update={"target_hardware": "NVIDIA A100-SXM4-80GB"}
+    )
+    cand_eval = _make_valid_evaluation_result("exp-cand").model_copy(
+        update={"environment": diff_env}
+    )
+
+    with pytest.raises(
+        OptimizationVerificationError, match="Hardware environment mismatch"
+    ):
+        verifier.verify(
+            artifact=artifact,
+            plan=plan,
+            baseline_evaluation=base_eval,
+            candidate_evaluation=cand_eval,
+        )
+
+
+def test_b9_verifier_non_passed_verdict_fails_closed() -> None:
+    """[B9] Verify verifier strictly rejects candidate or baseline evaluations with non-PASSED verdict."""
+    verifier = DefaultOptimizationVerifier()
+    plan = _make_valid_optimization_plan()
+    artifact = _make_valid_artifact(plan)
+    base_eval = _make_valid_evaluation_result("exp-base")
+    failed_cand_eval = _make_valid_evaluation_result("exp-cand").model_copy(
+        update={"verdict": EvaluationVerdict.FAILED_QUALITY}
+    )
+
+    with pytest.raises(
+        OptimizationVerificationError,
+        match="Candidate evaluation verdict must be PASSED",
+    ):
+        verifier.verify(
+            artifact=artifact,
+            plan=plan,
+            baseline_evaluation=base_eval,
+            candidate_evaluation=failed_cand_eval,
+        )
+
+
+def test_b9_verifier_unsynchronized_timing_benchmark_fails_closed() -> None:
+    """[B9] Verify verifier strictly requires timing_synchronized=True on benchmark evidence."""
+    verifier = DefaultOptimizationVerifier()
+    plan = _make_valid_optimization_plan()
+    artifact = _make_valid_artifact(plan)
+    base_eval = _make_valid_evaluation_result("exp-base")
+    cand_eval = _make_valid_evaluation_result("exp-cand")
+
+    unsync_bench = cand_eval.system_benchmarks[0].model_copy(
+        update={"timing_synchronized": False}
+    )
+    cand_eval_unsync = cand_eval.model_copy(
+        update={"system_benchmarks": (unsync_bench,)}
+    )
+
+    with pytest.raises(
+        OptimizationVerificationError, match="timing is not hardware-synchronized"
+    ):
+        verifier.verify(
+            artifact=artifact,
+            plan=plan,
+            baseline_evaluation=base_eval,
+            candidate_evaluation=cand_eval_unsync,
+        )
+
+
+# --- B10: Pydantic Contract Field Identifier Validators Attached ---
+def test_b10_pydantic_contract_rejects_malformed_optimization_plan_id() -> None:
+    """[B10] Verify OptimizationPlan rejects malformed plan_id via Pydantic validator."""
+    bad_ids = ["", "   ", "OPT_PLAN_UPPER", "plan with spaces", "plan!special#"]
+    for bad_id in bad_ids:
+        with pytest.raises(ValidationError):
+            OptimizationPlan(
+                plan_id=bad_id,  # type: ignore[arg-type]
+                source_checkpoint_id=CheckpointId("ckpt-001"),
+                source_weights_hash=ContentHash("sha256:" + "2" * 64),
+                technique=OptimizationTechnique.TENSORRT_COMPILATION,
+                target_precision=OptimizationPrecision.FP16,
+                target_platform="nvidia_jetson_agx_orin",
+                target_compute_capability="8.7",
+                shape_profiles=(_make_valid_shape_profile(),),
+                verification_dataset_binding=_make_valid_verification_binding(),
+                created_at=datetime.now(timezone.utc),
+            )
+
+
+def test_b10_pydantic_contract_rejects_malformed_optimized_artifact_id() -> None:
+    """[B10] Verify OptimizedModelArtifact rejects malformed artifact_id via Pydantic validator."""
+    plan = _make_valid_optimization_plan()
+    bad_ids = ["", "   ", "ART_UPPER", "art with spaces", "art%bad"]
+    for bad_id in bad_ids:
+        with pytest.raises(ValidationError):
+            OptimizedModelArtifact(
+                artifact_id=bad_id,  # type: ignore[arg-type]
+                plan_id=plan.plan_id,
+                source_checkpoint_id=plan.source_checkpoint_id,
+                technique=plan.technique,
+                precision=plan.target_precision,
+                runtime_format="tensorrt_engine",
+                target_device="target-jetson-01",
+                target_compute_capability=plan.target_compute_capability,
+                artifact_hash=ContentHash("sha256:" + "3" * 64),
+                artifact_uri="s3://model.engine",
+                artifact_size_bytes=85000000,
+                shape_profiles=plan.shape_profiles,
+                created_at=datetime.now(timezone.utc),
+            )
+
+
+def test_b10_pydantic_contract_rejects_malformed_deployment_id() -> None:
+    """[B10] Verify DeploymentPlan rejects malformed deployment_id via Pydantic validator."""
+    bad_ids = ["", "   ", "DEP_UPPER", "dep with spaces", "dep@bad"]
+    for bad_id in bad_ids:
+        with pytest.raises(ValidationError):
+            DeploymentPlan(
+                deployment_id=bad_id,  # type: ignore[arg-type]
+                artifact_id=OptimizedArtifactId("art-001"),
+                target=_make_valid_deployment_target(),
+                runtime=DeploymentRuntime.STANDALONE_TENSORRT,
+                health_check=HealthCheckSpec(
+                    startup_timeout_sec=30.0,
+                    readiness_probe_samples=5,
+                    max_latency_threshold_ms=25.0,
+                    memory_headroom_mb=1024.0,
+                ),
+                created_at=datetime.now(timezone.utc),
+            )

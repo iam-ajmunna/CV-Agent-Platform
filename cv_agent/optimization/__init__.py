@@ -10,6 +10,7 @@ from cv_agent.optimization.canonicalization import (
     extract_optimization_operation_payload,
 )
 from cv_agent.optimization.contracts import (
+    VALID_DEPLOYMENT_TRANSITIONS,
     CalibrationDatasetBinding,
     DeploymentPlan,
     DeploymentRecord,
@@ -20,6 +21,7 @@ from cv_agent.optimization.contracts import (
     OptimizationResult,
     OptimizedModelArtifact,
     ReadinessProbeResult,
+    validate_deployment_transition,
 )
 from cv_agent.optimization.deployment import (
     DefaultDeploymentManager,
@@ -60,6 +62,7 @@ from cv_agent.optimization.verifier import (
 )
 
 __all__ = [
+    "VALID_DEPLOYMENT_TRANSITIONS",
     "CalibrationAlgorithm",
     "CalibrationDatasetBinding",
     "CalibrationLeakageError",
@@ -75,17 +78,13 @@ __all__ = [
     "DeploymentStatus",
     "DeploymentTarget",
     "DeploymentValidationError",
-    # Contracts
     "DynamicShapeProfile",
     "HardwareMismatchError",
     "HealthCheckSpec",
-    # Subsystem Engines & Protocols
     "ModelOptimizer",
-    # Errors
     "OptimizationError",
     "OptimizationExecutionError",
     "OptimizationPlan",
-    # Identifiers & Enums
     "OptimizationPlanId",
     "OptimizationPrecision",
     "OptimizationResult",
@@ -102,9 +101,9 @@ __all__ = [
     "compute_deployment_payload_hash",
     "compute_optimization_payload_hash",
     "extract_deployment_operation_payload",
-    # Canonicalization
     "extract_optimization_operation_payload",
     "validate_deployment_id",
+    "validate_deployment_transition",
     "validate_optimization_plan_id",
     "validate_optimized_artifact_id",
 ]

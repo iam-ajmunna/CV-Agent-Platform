@@ -19,6 +19,7 @@ from cv_agent.optimization.contracts import (
     DeploymentRecord,
     OptimizationResult,
     ReadinessProbeResult,
+    _ensure_finite_float,
 )
 from cv_agent.optimization.errors import (
     DeploymentApprovalRequiredError,
@@ -50,38 +51,44 @@ class DeploymentManager(Protocol):
     def stage(
         self,
         plan: DeploymentPlan,
+        target_id: TargetId,
         tool_id: ToolId,
         tool_executor: ToolExecutor,
         *,
         optimization_result: OptimizationResult | None = None,
-        target_id: TargetId | None = None,
+        active_deployments: Mapping[DeploymentId, DeploymentRecord] | None = None,
     ) -> DeploymentRecord: ...
 
     def verify_readiness(
         self,
         record: DeploymentRecord,
+        target_id: TargetId,
         tool_id: ToolId,
         tool_executor: ToolExecutor,
-    ) -> ReadinessProbeResult: ...
+    ) -> tuple[ReadinessProbeResult, DeploymentRecord]: ...
 
     def activate(
         self,
         record: DeploymentRecord,
+        target_id: TargetId,
         operation_identity: OperationIdentity,
         approval_request: ApprovalRequest,
         approval_decision: ApprovalDecision,
         tool_id: ToolId,
         tool_executor: ToolExecutor,
+        *,
+        active_deployments: Mapping[DeploymentId, DeploymentRecord] | None = None,
     ) -> DeploymentRecord: ...
 
     def rollback(
         self,
         record: DeploymentRecord,
+        target_id: TargetId,
         reason: str,
         tool_id: ToolId,
         tool_executor: ToolExecutor,
         *,
-        active_deployments: Mapping[DeploymentId, DeploymentRecord] | None = None,
+        active_deployments: dict[DeploymentId, DeploymentRecord] | None = None,
     ) -> tuple[DeploymentRecord, DeploymentRecord | None]: ...
 
 
@@ -91,14 +98,20 @@ class DefaultDeploymentManager:
     def stage(
         self,
         plan: DeploymentPlan,
+        target_id: TargetId,
         tool_id: ToolId,
         tool_executor: ToolExecutor,
         *,
         optimization_result: OptimizationResult | None = None,
-        target_id: TargetId | None = None,
+        active_deployments: Mapping[DeploymentId, DeploymentRecord] | None = None,
     ) -> DeploymentRecord:
         """Stage an optimized model artifact and runtime packaging on the deployment target."""
-        # 1. Mandatory tool arguments (No local synthesis)
+        # 1. Mandatory tool arguments (B5: External TargetId mandatory, zero local synthesis)
+        if target_id is None or not str(target_id).strip():
+            raise DeploymentValidationError(
+                "target_id is mandatory for deployment staging. "
+                "Local synthesis of TargetId is strictly prohibited."
+            )
         if tool_id is None or not str(tool_id).strip():
             raise OptimizationExecutionError(
                 "tool_id is mandatory for deployment staging. "
@@ -110,20 +123,28 @@ class DefaultDeploymentManager:
                 "ADR-0005 execution dispatch cannot be omitted."
             )
 
-        # 2. Target consistency validation
-        effective_target_id = target_id or plan.target.target_id
-        if target_id is not None and str(target_id) != str(plan.target.target_id):
+        # 2. Lockout state check (B8: OPERATOR_REQUIRED blocks new deployments)
+        if active_deployments is not None:
+            for dep_id, existing in active_deployments.items():
+                if existing.status == DeploymentStatus.OPERATOR_REQUIRED:
+                    raise DeploymentValidationError(
+                        f"Deployment operation rejected: target is locked out by deployment {dep_id!r} "
+                        "in OPERATOR_REQUIRED state per ADR-0012 §3.7."
+                    )
+
+        # 3. Target consistency validation (B5)
+        if str(target_id) != str(plan.target.target_id):
             raise DeploymentValidationError(
                 f"Supplied target_id {target_id!r} conflicts with DeploymentPlan target {plan.target.target_id!r}"
             )
 
-        # 3. Target hardware validation (Fail fast on hardware mismatch per D-022)
+        # 4. Target hardware validation (Fail fast on hardware mismatch per D-022)
         if not str(plan.target.gpu_device_name).strip():
             raise HardwareMismatchError("Target gpu_device_name cannot be empty")
         if not str(plan.target.compute_capability).strip():
             raise HardwareMismatchError("Target compute_capability cannot be empty")
 
-        # 4. Mandatory post-optimization verification gate (Acceptance Criterion 5)
+        # 5. Mandatory post-optimization verification gate (Acceptance Criterion 5)
         if optimization_result is not None:
             if not optimization_result.verification_passed:
                 raise OptimizationVerificationError(
@@ -136,11 +157,11 @@ class DefaultDeploymentManager:
                     f"does not match DeploymentPlan artifact {plan.artifact_id!r}"
                 )
 
-        # 5. Dispatch staging to ADR-0005
+        # 6. Dispatch staging to ADR-0005
         exec_id = ExecutionId(f"exec-stage-{plan.deployment_id}-{uuid.uuid4().hex[:8]}")
         invocation = ToolInvocation(
             tool_id=tool_id,
-            target_id=effective_target_id,
+            target_id=target_id,
             execution_id=exec_id,
             timeout_seconds=int(
                 plan.runtime_config.get("staging_timeout_seconds", 300)
@@ -155,7 +176,7 @@ class DefaultDeploymentManager:
         tool_result = self._dispatch_tool(tool_executor, invocation)
         if tool_result.status != ToolExecutionStatus.SUCCESS:
             raise OptimizationExecutionError(
-                f"Deployment staging failed on target {effective_target_id}: "
+                f"Deployment staging failed on target {target_id}: "
                 f"{tool_result.error_message or 'Unknown execution error'}"
             )
 
@@ -164,16 +185,29 @@ class DefaultDeploymentManager:
             plan=plan,
             status=DeploymentStatus.STAGING,
             execution_id=exec_id,
-            target_id=effective_target_id,
+            target_id=target_id,
         )
 
     def verify_readiness(
         self,
         record: DeploymentRecord,
+        target_id: TargetId,
         tool_id: ToolId,
         tool_executor: ToolExecutor,
-    ) -> ReadinessProbeResult:
+    ) -> tuple[ReadinessProbeResult, DeploymentRecord]:
         """Execute automated startup and readiness health probing per ADR-0012 §3.7."""
+        # 1. Mandatory arguments (B5)
+        if target_id is None or not str(target_id).strip():
+            raise DeploymentValidationError(
+                "target_id is mandatory for readiness probe. "
+                "Local synthesis of TargetId is strictly prohibited."
+            )
+        if str(target_id) != str(record.target_id) or str(target_id) != str(
+            record.plan.target.target_id
+        ):
+            raise DeploymentValidationError(
+                f"Supplied target_id {target_id!r} conflicts with record target {record.target_id!r}"
+            )
         if tool_id is None or not str(tool_id).strip():
             raise OptimizationExecutionError("tool_id is mandatory for readiness probe")
         if tool_executor is None:
@@ -181,7 +215,8 @@ class DefaultDeploymentManager:
                 "tool_executor is mandatory for readiness probe"
             )
 
-        if record.status not in (DeploymentStatus.STAGING, DeploymentStatus.VERIFYING):
+        # 2. Lifecycle state check (B7: Must strictly be STAGING)
+        if record.status != DeploymentStatus.STAGING:
             raise DeploymentValidationError(
                 f"Deployment must be in STAGING to run readiness probe, currently in {record.status.value!r}"
             )
@@ -192,7 +227,7 @@ class DefaultDeploymentManager:
         )
         invocation = ToolInvocation(
             tool_id=tool_id,
-            target_id=record.plan.target.target_id,
+            target_id=target_id,
             execution_id=exec_id,
             timeout_seconds=int(
                 record.plan.runtime_config.get(
@@ -213,12 +248,68 @@ class DefaultDeploymentManager:
 
         tool_result = self._dispatch_tool(tool_executor, invocation)
 
-        output = tool_result.structured_output or {}
-        startup_time = float(output.get("startup_time_sec", 1.5))
-        probe_latency = float(output.get("probe_latency_mean_ms", 15.0))
-        vram_mb = float(output.get("vram_consumed_mb", 1024.0))
+        # 3. Telemetry extraction (B4: Fail-closed on missing/malformed telemetry, zero synthetic defaults)
+        output = tool_result.structured_output
+        if not output or not isinstance(output, Mapping):
+            failed_record = record.with_transition(
+                DeploymentStatus.FAILED,
+                failure_details="Readiness probe tool execution output missing structured telemetry",
+            )
+            raise ReadinessProbeFailureError(
+                f"Deployment {record.deployment_id} failed readiness verification: "
+                "missing structured output/telemetry from probe tool execution",
+                failed_record=failed_record,
+            )
 
-        # Evaluate against health check specifications
+        for req_metric in (
+            "startup_time_sec",
+            "probe_latency_mean_ms",
+            "vram_consumed_mb",
+        ):
+            if req_metric not in output or output[req_metric] is None:
+                failed_record = record.with_transition(
+                    DeploymentStatus.FAILED,
+                    failure_details=f"Readiness probe telemetry missing required metric {req_metric!r}",
+                )
+                raise ReadinessProbeFailureError(
+                    f"Deployment {record.deployment_id} failed readiness verification: "
+                    f"probe telemetry missing required metric {req_metric!r}. "
+                    "Synthetic fail-open defaults are prohibited per ADR-0012 §3.7.",
+                    failed_record=failed_record,
+                )
+
+        try:
+            startup_time = _ensure_finite_float(
+                float(output["startup_time_sec"]), "startup_time_sec"
+            )
+            probe_latency = _ensure_finite_float(
+                float(output["probe_latency_mean_ms"]), "probe_latency_mean_ms"
+            )
+            vram_mb = _ensure_finite_float(
+                float(output["vram_consumed_mb"]), "vram_consumed_mb"
+            )
+        except (TypeError, ValueError) as exc:
+            failed_record = record.with_transition(
+                DeploymentStatus.FAILED,
+                failure_details=f"Readiness probe telemetry numeric parse failure: {exc}",
+            )
+            raise ReadinessProbeFailureError(
+                f"Deployment {record.deployment_id} failed readiness verification: {exc}",
+                failed_record=failed_record,
+            ) from exc
+
+        if startup_time < 0.0 or probe_latency < 0.0 or vram_mb < 0.0:
+            failed_record = record.with_transition(
+                DeploymentStatus.FAILED,
+                failure_details="Readiness probe telemetry metrics must be non-negative",
+            )
+            raise ReadinessProbeFailureError(
+                f"Deployment {record.deployment_id} failed readiness verification: "
+                "telemetry metrics must be non-negative",
+                failed_record=failed_record,
+            )
+
+        # 4. Evaluate against health check specifications
         max_allowed_vram = (
             record.plan.target.max_memory_allocation_gb * 1024.0
         ) - health.memory_headroom_mb
@@ -258,23 +349,48 @@ class DefaultDeploymentManager:
         )
 
         if not passed:
+            failed_record = record.with_transition(
+                DeploymentStatus.FAILED,
+                readiness_result=probe_result,
+                failure_details=err_msg,
+            )
             raise ReadinessProbeFailureError(
-                f"Deployment {record.deployment_id} failed readiness verification: {err_msg}"
+                f"Deployment {record.deployment_id} failed readiness verification: {err_msg}",
+                failed_record=failed_record,
             )
 
-        return probe_result
+        # B7: Return updated record transitioned from STAGING to VERIFYING
+        verifying_record = record.with_transition(
+            DeploymentStatus.VERIFYING,
+            readiness_result=probe_result,
+        )
+        return probe_result, verifying_record
 
     def activate(
         self,
         record: DeploymentRecord,
+        target_id: TargetId,
         operation_identity: OperationIdentity,
         approval_request: ApprovalRequest,
         approval_decision: ApprovalDecision,
         tool_id: ToolId,
         tool_executor: ToolExecutor,
+        *,
+        active_deployments: Mapping[DeploymentId, DeploymentRecord] | None = None,
     ) -> DeploymentRecord:
         """Activate a staged deployment following strict ADR-0003 4-tuple approval verification."""
-        # 1. Mandatory arguments
+        # 1. Mandatory arguments (B5)
+        if target_id is None or not str(target_id).strip():
+            raise DeploymentValidationError(
+                "target_id is mandatory for activation. "
+                "Local synthesis of TargetId is strictly prohibited."
+            )
+        if str(target_id) != str(record.target_id) or str(target_id) != str(
+            record.plan.target.target_id
+        ):
+            raise DeploymentValidationError(
+                f"Supplied target_id {target_id!r} conflicts with record target {record.target_id!r}"
+            )
         if tool_id is None or not str(tool_id).strip():
             raise OptimizationExecutionError(
                 "tool_id is mandatory for deployment activation"
@@ -284,70 +400,116 @@ class DefaultDeploymentManager:
                 "tool_executor is mandatory for deployment activation"
             )
 
-        # 2. Verify readiness probing passed
+        # 2. Lockout state check (B8)
+        if active_deployments is not None:
+            for dep_id, existing in active_deployments.items():
+                if existing.status == DeploymentStatus.OPERATOR_REQUIRED:
+                    raise DeploymentValidationError(
+                        f"Deployment activation rejected: target is locked out by deployment {dep_id!r} "
+                        "in OPERATOR_REQUIRED state per ADR-0012 §3.7."
+                    )
+
+        # 3. Lifecycle state check (B7: Must be in VERIFYING state to transition to ACTIVE)
+        if record.status != DeploymentStatus.VERIFYING:
+            raise DeploymentValidationError(
+                f"Deployment must be in VERIFYING state to be activated, currently in {record.status.value!r}. "
+                "Lifecycle must strictly follow STAGING -> VERIFYING -> ACTIVE."
+            )
+
+        # 4. Verify readiness probing passed
         if record.readiness_result is None or not record.readiness_result.passed:
             raise DeploymentValidationError(
                 "Deployment cannot be activated without passing readiness probing (ADR-0012 Invariant 8)"
             )
 
-        # 3. ADR-0003 4-tuple approval verification
-        computed_hash = compute_deployment_payload_hash(record.plan)
-
-        # 3a. Canonical payload hash matches operation identity
-        if operation_identity.canonical_payload_hash != computed_hash:
-            raise DeploymentApprovalRequiredError(
-                f"Canonical payload hash mismatch: OperationIdentity has {operation_identity.canonical_payload_hash!r}, "
-                f"but DeploymentPlan computes to {computed_hash!r}"
-            )
-
-        # 3b. Operation identity matches approval request
+        # 5. Strict ADR-0003 4-tuple approval verification (B6)
+        # 5a. Operation ID cross-check between operation_identity and approval_request
         if str(operation_identity.operation_id) != str(approval_request.operation_id):
             raise DeploymentApprovalRequiredError(
-                f"Operation ID mismatch: OperationIdentity has {operation_identity.operation_id!r}, "
-                f"ApprovalRequest has {approval_request.operation_id!r}"
+                f"Operation ID mismatch across 4-tuple: OperationIdentity={operation_identity.operation_id!r}, "
+                f"ApprovalRequest={approval_request.operation_id!r}"
             )
 
-        # 3c. Approval decision matches request
+        # 5b. Operation version cross-check between operation_identity and approval_request
+        if str(operation_identity.operation_version) != str(
+            approval_request.operation_version
+        ):
+            raise DeploymentApprovalRequiredError(
+                f"Operation version mismatch across 4-tuple: OperationIdentity={operation_identity.operation_version}, "
+                f"ApprovalRequest={approval_request.operation_version}"
+            )
+
+        # 5c. Target identity cross-check
+        if not (
+            str(operation_identity.target_identity)
+            == str(target_id)
+            == str(record.target_id)
+        ):
+            raise DeploymentApprovalRequiredError(
+                f"Target identity mismatch: OperationIdentity target={operation_identity.target_identity!r}, "
+                f"external target={target_id!r}, record target={record.target_id!r}"
+            )
+
+        # 5d. Approval decision matches request
         if approval_decision.request_id != approval_request.request_id:
             raise DeploymentApprovalRequiredError(
                 f"Approval decision request_id mismatch: expected {approval_request.request_id!r}, "
                 f"got {approval_decision.request_id!r}"
             )
 
-        # 3d. Approval decision is strictly APPROVED
+        # 5e. Policy version cross-check
+        if approval_decision.bound_policy_version != approval_request.policy_version:
+            raise DeploymentApprovalRequiredError(
+                f"Policy version mismatch: ApprovalRequest policy_version={approval_request.policy_version!r}, "
+                f"ApprovalDecision bound_policy_version={approval_decision.bound_policy_version!r}"
+            )
+
+        # 5f. Approval decision is strictly APPROVED
         if approval_decision.decision != ApprovalStatus.APPROVED:
             raise DeploymentApprovalRequiredError(
                 f"Deployment activation rejected: approval status is {approval_decision.decision!r}"
             )
 
-        # 3e. Bound payload hash matches
-        if (
-            approval_decision.bound_payload_hash
-            != operation_identity.canonical_payload_hash
-        ):
+        # 5g. Canonical payload hash matches across operation identity, approval decision, and plan
+        computed_hash = compute_deployment_payload_hash(record.plan)
+        if operation_identity.canonical_payload_hash != computed_hash:
             raise DeploymentApprovalRequiredError(
-                "ApprovalDecision bound_payload_hash does not match OperationIdentity canonical hash"
+                f"Canonical payload hash mismatch: OperationIdentity has {operation_identity.canonical_payload_hash!r}, "
+                f"but DeploymentPlan computes to {computed_hash!r}"
+            )
+        if approval_decision.bound_payload_hash != computed_hash:
+            raise DeploymentApprovalRequiredError(
+                f"ApprovalDecision bound_payload_hash mismatch: expected {computed_hash!r}, "
+                f"got {approval_decision.bound_payload_hash!r}"
             )
 
-        # 3f. Target resource scope consistency
+        # 5h. Bound resource scope cross-check
+        if approval_decision.bound_resource_scope != approval_request.resource_scope:
+            raise DeploymentApprovalRequiredError(
+                f"Bound resource scope mismatch: ApprovalRequest={approval_request.resource_scope!r}, "
+                f"ApprovalDecision={approval_decision.bound_resource_scope!r}"
+            )
+
         scope = approval_request.resource_scope
-        expected_target_str = str(record.plan.target.target_id)
-        if ":" in scope:
-            prefix, scope_target = scope.split(":", 1)
-            if prefix == "target" and scope_target != expected_target_str:
-                raise DeploymentApprovalRequiredError(
-                    f"Supplied target {expected_target_str!r} conflicts with authorized scope target {scope_target!r}"
-                )
-        elif scope != expected_target_str:
+        expected_target_str = str(target_id)
+        expected_dep_str = str(record.deployment_id)
+        valid_scopes = {
+            f"deployment:{expected_dep_str}",
+            f"target:{expected_target_str}",
+            expected_target_str,
+            expected_dep_str,
+        }
+        if scope not in valid_scopes:
             raise DeploymentApprovalRequiredError(
-                f"Supplied target {expected_target_str!r} conflicts with authorized scope {scope!r}"
+                f"ApprovalRequest resource_scope {scope!r} does not match deployment {expected_dep_str!r} "
+                f"or target {expected_target_str!r}"
             )
 
-        # 4. Dispatch activation to ADR-0005 with approval_authorized=True
+        # 6. Dispatch activation to ADR-0005 with approval_authorized=True
         exec_id = ExecutionId(f"exec-act-{record.deployment_id}-{uuid.uuid4().hex[:8]}")
         invocation = ToolInvocation(
             tool_id=tool_id,
-            target_id=record.plan.target.target_id,
+            target_id=target_id,
             execution_id=exec_id,
             timeout_seconds=int(
                 record.plan.runtime_config.get("activation_timeout_seconds", 300)
@@ -362,41 +524,64 @@ class DefaultDeploymentManager:
 
         tool_result = self._dispatch_tool(tool_executor, invocation)
         if tool_result.status != ToolExecutionStatus.SUCCESS:
+            record.with_transition(
+                DeploymentStatus.FAILED,
+                failure_details=tool_result.error_message or "Unknown execution error",
+            )
             raise OptimizationExecutionError(
-                f"Deployment activation failed on target {record.plan.target.target_id}: "
+                f"Deployment activation failed on target {target_id}: "
                 f"{tool_result.error_message or 'Unknown execution error'}"
             )
 
-        return DeploymentRecord(
-            deployment_id=record.deployment_id,
-            plan=record.plan,
-            status=DeploymentStatus.ACTIVE,
-            readiness_result=record.readiness_result,
+        # 7. Transition to ACTIVE per ADR-0012 §3.6 (B7)
+        activated_record = record.with_transition(
+            DeploymentStatus.ACTIVE,
             execution_id=exec_id,
-            target_id=record.plan.target.target_id,
+            target_id=target_id,
             activated_at=datetime.now(timezone.utc),
         )
+        return activated_record
 
     def rollback(
         self,
         record: DeploymentRecord,
+        target_id: TargetId,
         reason: str,
         tool_id: ToolId,
         tool_executor: ToolExecutor,
         *,
-        active_deployments: Mapping[DeploymentId, DeploymentRecord] | None = None,
+        active_deployments: dict[DeploymentId, DeploymentRecord] | None = None,
     ) -> tuple[DeploymentRecord, DeploymentRecord | None]:
         """Execute deterministic rollback or escalate to OPERATOR_REQUIRED per ADR-0012 §3.7."""
-        # 1. Null Predecessor Escalation Invariant (ADR-0012 §3.7 & Acceptance Criterion 9)
-        # If rollback_target_id is None (first deployment), cannot execute automated rollback.
-        # Must escalate to OPERATOR_REQUIRED and fail closed.
-        if record.plan.rollback_target_id is None:
-            raise RollbackExecutionError(
-                f"Deployment {record.deployment_id} has no predecessor rollback target (first deployment). "
-                f"Escalated to OPERATOR_REQUIRED: {reason}"
+        # 1. Mandatory arguments (B5)
+        if target_id is None or not str(target_id).strip():
+            raise DeploymentValidationError(
+                "target_id is mandatory for rollback. "
+                "Local synthesis of TargetId is strictly prohibited."
+            )
+        if str(target_id) != str(record.target_id) and str(target_id) != str(
+            record.plan.target.target_id
+        ):
+            raise DeploymentValidationError(
+                f"Supplied target_id {target_id!r} conflicts with record target {record.target_id!r}"
             )
 
-        # 2. Locate rollback target if active_deployments registry provided
+        # 2. Null Predecessor Escalation Invariant (B8: ADR-0012 §3.7 & Acceptance Criterion 9)
+        # If rollback_target_id is None (first deployment), cannot execute automated rollback.
+        # Must escalate to OPERATOR_REQUIRED domain state and lock out target.
+        if record.plan.rollback_target_id is None:
+            escalated_record = record.with_transition(
+                DeploymentStatus.OPERATOR_REQUIRED,
+                failure_details=(
+                    f"Null predecessor rollback target (first deployment). "
+                    f"Escalated to OPERATOR_REQUIRED: {reason}"
+                ),
+            )
+            if active_deployments is not None and isinstance(active_deployments, dict):
+                active_deployments[record.deployment_id] = escalated_record
+            return escalated_record, None
+
+        # 3. Locate rollback target if active_deployments registry provided
         target_dep_id = record.plan.rollback_target_id
         target_record: DeploymentRecord | None = None
         if active_deployments is not None:
@@ -406,13 +591,13 @@ class DefaultDeploymentManager:
                 )
             target_record = active_deployments[target_dep_id]
 
-        # 3. Dispatch rollback to ADR-0005
+        # 4. Dispatch rollback to ADR-0005
         exec_id = ExecutionId(
             f"exec-roll-{record.deployment_id}-{uuid.uuid4().hex[:8]}"
         )
         invocation = ToolInvocation(
             tool_id=tool_id,
-            target_id=record.plan.target.target_id,
+            target_id=target_id,
             execution_id=exec_id,
             timeout_seconds=int(
                 record.plan.runtime_config.get("rollback_timeout_seconds", 300)
@@ -429,32 +614,31 @@ class DefaultDeploymentManager:
         tool_result = self._dispatch_tool(tool_executor, invocation)
         if tool_result.status != ToolExecutionStatus.SUCCESS:
             raise RollbackExecutionError(
-                f"Rollback execution failed on target {record.plan.target.target_id}: "
+                f"Rollback execution failed on target {target_id}: "
                 f"{tool_result.error_message or 'Unknown execution error'}"
             )
 
-        rolled_back_record = DeploymentRecord(
-            deployment_id=record.deployment_id,
-            plan=record.plan,
-            status=DeploymentStatus.ROLLED_BACK,
-            readiness_result=record.readiness_result,
+        rolled_back_record = record.with_transition(
+            DeploymentStatus.ROLLED_BACK,
             execution_id=exec_id,
-            target_id=record.plan.target.target_id,
+            target_id=target_id,
             rolled_back_at=datetime.now(timezone.utc),
             failure_details=f"Rolled back to {target_dep_id}: {reason}",
         )
 
         restored_record: DeploymentRecord | None = None
         if target_record is not None:
-            restored_record = DeploymentRecord(
-                deployment_id=target_record.deployment_id,
-                plan=target_record.plan,
-                status=DeploymentStatus.ACTIVE,
-                readiness_result=target_record.readiness_result,
+            restored_record = target_record.with_transition(
+                DeploymentStatus.ACTIVE,
                 execution_id=exec_id,
-                target_id=target_record.target_id,
+                target_id=target_id,
                 activated_at=datetime.now(timezone.utc),
             )
+            if active_deployments is not None and isinstance(active_deployments, dict):
+                active_deployments[target_dep_id] = restored_record
+
+        if active_deployments is not None and isinstance(active_deployments, dict):
+            active_deployments[record.deployment_id] = rolled_back_record
 
         return rolled_back_record, restored_record
 

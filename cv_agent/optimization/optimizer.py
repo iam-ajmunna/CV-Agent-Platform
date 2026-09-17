@@ -5,8 +5,9 @@ from __future__ import annotations
 import asyncio
 import inspect
 import uuid
+from collections.abc import Mapping
 from datetime import datetime, timezone
-from typing import Any, Protocol, cast, runtime_checkable
+from typing import Protocol, cast, runtime_checkable
 
 from cv_agent.dataset import DatasetManifest
 from cv_agent.optimization.canonicalization import (
@@ -45,8 +46,8 @@ class ModelOptimizer(Protocol):
         tool_id: ToolId,
         target_id: TargetId,
         tool_executor: ToolExecutor,
+        checkpoint_manifest: CheckpointManifest,
         *,
-        checkpoint_manifest: CheckpointManifest | None = None,
         dataset_manifest: DatasetManifest | None = None,
         approval_authorized: bool = False,
     ) -> OptimizedModelArtifact: ...
@@ -61,8 +62,8 @@ class DefaultModelOptimizer:
         tool_id: ToolId,
         target_id: TargetId,
         tool_executor: ToolExecutor,
+        checkpoint_manifest: CheckpointManifest,
         *,
-        checkpoint_manifest: CheckpointManifest | None = None,
         dataset_manifest: DatasetManifest | None = None,
         approval_authorized: bool = False,
     ) -> OptimizedModelArtifact:
@@ -84,26 +85,40 @@ class DefaultModelOptimizer:
                 "ADR-0005 execution dispatch cannot be omitted."
             )
 
-        # 2. Lineage verification against CheckpointManifest
-        if checkpoint_manifest is not None:
-            if str(plan.source_checkpoint_id) != str(checkpoint_manifest.checkpoint_id):
-                raise OptimizationValidationError(
-                    f"Checkpoint ID mismatch: plan specifies {plan.source_checkpoint_id!r}, "
-                    f"but manifest has {checkpoint_manifest.checkpoint_id!r}"
-                )
-            if str(plan.source_weights_hash) != str(checkpoint_manifest.weights_hash):
-                raise OptimizationValidationError(
-                    f"Weights hash mismatch: plan specifies {plan.source_weights_hash!r}, "
-                    f"but manifest has {checkpoint_manifest.weights_hash!r}"
-                )
+        # 2. Lineage verification against CheckpointManifest (B1: Mandatory, fail-closed)
+        if checkpoint_manifest is None:
+            raise OptimizationValidationError(
+                "checkpoint_manifest is mandatory for optimization compilation per ADR-0010 lineage requirements. "
+                "Compilation without authoritative checkpoint manifest is strictly prohibited."
+            )
+        if str(plan.source_checkpoint_id) != str(checkpoint_manifest.checkpoint_id):
+            raise OptimizationValidationError(
+                f"Checkpoint ID mismatch: plan specifies {plan.source_checkpoint_id!r}, "
+                f"but manifest has {checkpoint_manifest.checkpoint_id!r}"
+            )
+        if str(plan.source_weights_hash) != str(checkpoint_manifest.weights_hash):
+            raise OptimizationValidationError(
+                f"Weights hash mismatch: plan specifies {plan.source_weights_hash!r}, "
+                f"but manifest has {checkpoint_manifest.weights_hash!r}"
+            )
 
-        # 3. Lineage & leakage verification against DatasetManifest
-        if dataset_manifest is not None and plan.calibration_binding is not None:
+        # 3. Lineage & leakage verification against DatasetManifest (B2: Mandatory for PTQ/calibration)
+        if plan.calibration_binding is not None:
+            if dataset_manifest is None:
+                raise CalibrationLeakageError(
+                    "dataset_manifest is mandatory when calibration_binding is specified for compilation. "
+                    "PTQ calibration without authoritative dataset manifest is strictly prohibited."
+                )
             calib = plan.calibration_binding
             if str(calib.dataset_id) != str(dataset_manifest.dataset_id):
                 raise CalibrationLeakageError(
                     f"Calibration dataset ID mismatch: plan specifies {calib.dataset_id!r}, "
                     f"but manifest has {dataset_manifest.dataset_id!r}"
+                )
+            if str(calib.dataset_version) != str(dataset_manifest.version):
+                raise CalibrationLeakageError(
+                    f"Calibration dataset version mismatch: plan specifies {calib.dataset_version!r}, "
+                    f"but manifest has {dataset_manifest.version!r}"
                 )
             if str(calib.dataset_manifest_hash) != str(
                 dataset_manifest.payload_root_checksum
@@ -112,21 +127,10 @@ class DefaultModelOptimizer:
                     f"Calibration manifest hash mismatch: plan specifies {calib.dataset_manifest_hash!r}, "
                     f"but manifest has {dataset_manifest.payload_root_checksum!r}"
                 )
-            # Verify calibration split exists in manifest
-            available_splits: set[str] = set()
-            if dataset_manifest.split_membership.train_hashes:
-                available_splits.add("train")
-            if dataset_manifest.split_membership.val_hashes:
-                available_splits.add("val")
-            if dataset_manifest.split_membership.test_hashes:
-                available_splits.add("test")
-            if dataset_manifest.split_membership.calibration_hashes:
-                available_splits.add("calibration")
-
-            if calib.split_name not in available_splits:
+            if not dataset_manifest.split_membership.calibration_hashes:
                 raise CalibrationLeakageError(
-                    f"Calibration split {calib.split_name!r} not declared in dataset manifest. "
-                    f"Available splits: {sorted(available_splits)}"
+                    f"Calibration split 'calibration' in dataset {dataset_manifest.dataset_id} "
+                    "has no items (empty calibration split in manifest)."
                 )
 
         # 4. Prepare ADR-0005 ToolInvocation
@@ -157,25 +161,37 @@ class DefaultModelOptimizer:
                 f"{tool_result.error_message or 'Unknown error'}"
             )
 
-        # 6. Parse compilation telemetry & construct OptimizedModelArtifact
-        output = tool_result.structured_output or {}
-        artifact_uri = str(
-            output.get(
-                "artifact_uri",
-                f"artifact://models/{plan.plan_id}/model.{self._default_ext(plan.technique)}",
+        # 6. Parse compilation telemetry & construct OptimizedModelArtifact (B3: Zero synthetic metadata)
+        output = tool_result.structured_output
+        if not output or not isinstance(output, Mapping):
+            raise OptimizationExecutionError(
+                "Compilation completed tool dispatch without structured completion output/evidence."
             )
-        )
-        artifact_size = int(
-            output.get("artifact_size_bytes", 104857600)
-        )  # Default 100MB
-        runtime_format = str(
-            output.get(
-                "runtime_format",
-                "tensorrt_engine"
-                if plan.technique == plan.technique.TENSORRT_COMPILATION
-                else "onnx",
+
+        if "artifact_uri" not in output or not str(output["artifact_uri"]).strip():
+            raise OptimizationExecutionError(
+                "Compilation tool execution output missing mandatory non-empty 'artifact_uri'"
             )
-        )
+        artifact_uri = str(output["artifact_uri"]).strip()
+
+        if "artifact_size_bytes" not in output:
+            raise OptimizationExecutionError(
+                "Compilation tool execution output missing mandatory 'artifact_size_bytes'"
+            )
+        try:
+            artifact_size = int(output["artifact_size_bytes"])
+            if artifact_size <= 0:
+                raise ValueError()
+        except (TypeError, ValueError):
+            raise OptimizationExecutionError(
+                f"Compilation output 'artifact_size_bytes' must be a positive integer, got {output.get('artifact_size_bytes')!r}"
+            )
+
+        if "runtime_format" not in output or not str(output["runtime_format"]).strip():
+            raise OptimizationExecutionError(
+                "Compilation tool execution output missing mandatory non-empty 'runtime_format'"
+            )
+        runtime_format = str(output["runtime_format"]).strip()
 
         lineage_hash = compute_artifact_lineage_hash(
             plan,
@@ -229,10 +245,3 @@ class DefaultModelOptimizer:
             raise OptimizationExecutionError(
                 f"Compilation transport failed via ADR-0005: {exc}"
             ) from exc
-
-    @staticmethod
-    def _default_ext(technique: Any) -> str:
-        tech_val = getattr(technique, "value", str(technique))
-        if tech_val == "onnx_export":
-            return "onnx"
-        return "engine"
