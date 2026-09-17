@@ -3,35 +3,33 @@
 > **Rewritten** every session. Describes **now**, never history — history lives in
 > `JOURNAL.md`. Hard cap: 60 lines. If it exceeds that, you are logging, not stating.
 
-**Updated:** 2026-09-16 · **Phase:** Phase 2L Complete · **Health:** green
+**Updated:** 2026-09-17 · **Phase:** Phase 2M Optimization & Deployment · **Health:** green
 
 ## Where we are
 
-Phase 2L (ADR-0011 Evaluation Subsystem) is complete, accepted by the Official PM, and squash-merged into `main` at `23e920e` (PR #61, Issue #60).
+Phase 2M (ADR-0012 Optimization & Deployment Subsystem) runtime package and adversarial test suite are implemented on `feature/ajmunna/phase-2m-optimization-subsystem` (cut from `main @ 32cd533`) under Issue #62.
 
-- Evaluation runtime substrate implemented in `cv_agent/evaluation/` with authoritative empirical benchmark execution, strict ADR-0005 transport delegation, and mandatory external `ToolId`.
-- Authorization propagation originates strictly from verified ADR-0003 credentials (`approval_authorized`), with zero local assertion or identity synthesis.
-- Hardware-synchronized timing validation enforced per ADR-0011 §3.13 both on observation paths and at the immutable `BenchmarkResult` contract boundary (zero defaults, unsynchronized modes rejected).
-- Direct raw benchmark ingestion path in `DefaultEvaluationRunner` validates via contract and plan target requirements with zero bypass.
-- All 46 adversarial boundary tests pass; full test suite reaches 508 passing tests.
-- CI completed cleanly on GitHub Actions run `35123638631` across Python 3.10–3.13 matrix.
+- Runtime package `cv_agent/optimization/` fully implemented with contracts, canonicalization, ModelOptimizer, OptimizationVerifier, and DeploymentManager.
+- Strict authority boundaries enforced: ADR-0003 4-tuple approval verification, ADR-0005 execution transport delegation, ADR-0009 calibration split isolation (Invariant 13), ADR-0010 checkpoint lineage, and ADR-0011 empirical post-optimization verification.
+- Complete adversarial boundary test suite: 37/37 passing in `tests/test_optimization_boundary.py` (545/545 full suite passing).
+- Clean quality gates: ruff check clean, ruff format clean, mypy clean (112 source files), git diff --check clean.
 
 ## In flight
 
 | Item | Issue | PR | State |
 |---|---|---|---|
-| Phase 2M Optimization & Deployment Subsystem (ADR-0012) | TBD | TBD | Queued; awaiting issue and work branch initialization |
+| Phase 2M Optimization & Deployment Subsystem runtime | #62 | Pending | Implemented & verified on `feature/ajmunna/phase-2m-optimization-subsystem` |
 
 ## Next 3 actions
 
-1. Initialize Phase 2M tracking issue and cut `feature/<owner>/phase-2m-optimization-deployment` branch from `main`.
-2. Implement ADR-0012 Optimization & Deployment Subsystem runtime package (`cv_agent/optimization/` or equivalent).
-3. Construct adversarial boundary test suite covering INT8 calibration leakage, shape profiles, and deployment rollbacks.
+1. Commit and push `feature/ajmunna/phase-2m-optimization-subsystem`.
+2. Open Pull Request referencing Issue #62.
+3. Present runtime package and test results for Official PM adversarial review.
 
 ## Blockers
 
-- None. Phase 2L is complete and all quality gates are green on `main`.
+- None. Implementation and local verification complete; ready for PR and CI.
 
 ## Scope guard
 
-Evaluation owns immutable evaluation specifications, empirical metric/benchmark semantics, baseline comparison, diagnostics, and reproducibility result construction. It does NOT own orchestration lifecycle/approval/recovery (ADR-0003), physical transport (ADR-0005), experiment persistence (ADR-0004), dataset authority (ADR-0009), checkpoint/training authority (ADR-0010), or cognitive strategy (ADR-0008).
+Optimization & Deployment owns optimization plans, dynamic shape bounds, calibration split bindings, model compilation delegation, empirical post-optimization verification, deployment plans, and readiness probing/rollback management. It does NOT own orchestration lifecycle/fencing (ADR-0003), physical transport/execution (ADR-0005), dataset authority (ADR-0009), training (ADR-0010), evaluation metrics (ADR-0011), or stream monitoring (ADR-0013).

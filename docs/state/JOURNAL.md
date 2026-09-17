@@ -1702,3 +1702,39 @@ Remediated all three architectural blockers identified in the Official PM's seco
 **Learned:** Data contracts for empirical hardware metrics must enforce safety invariants at their own schema and model validation boundary, not merely in operational helper functions. Making fields mandatory with no defaults ensures fail-closed behavior across all ingestion and deserialization vectors.
 
 **Left open:** Push commit to PR #61, verify CI matrix across Python 3.10–3.13, and await Official PM final merge approval.
+
+---
+
+## 2026-09-17 — Phase 2M Optimization & Deployment Subsystem Runtime Implementation (Issue #62)
+
+**Did:** Implemented the Phase 2M Optimization & Deployment Subsystem runtime package (`cv_agent/optimization/`) and comprehensive adversarial test suite (`tests/test_optimization_boundary.py`) adhering to ADR-0012:
+1. **Identifier and Domain Vocabulary (`types.py`):**
+   - Canonical `OptimizationPlanId`, `OptimizedArtifactId`, and `DeploymentId` conforming to `^[a-z0-9_.-]+(/[a-z0-9_.-]+)*$`.
+   - Enumerations: `OptimizationTechnique`, `OptimizationPrecision`, `CalibrationAlgorithm`, `DeploymentRuntime`, `DeploymentStatus` (`STAGING`, `VERIFYING`, `ACTIVE`, `SUPERSEDED`, `ROLLED_BACK`, `OPERATOR_REQUIRED`).
+2. **Immutable Contracts (`contracts.py`):**
+   - `DynamicShapeProfile`: Enforces strict monotonic ordering `min_shape <= opt_shape <= max_shape` and non-empty tensor naming.
+   - `CalibrationDatasetBinding`: Validates non-negative sample count, supported calibration algorithms, and blocks evaluation/test splits (`"test"`, `"evaluation"`, `"eval"`, `"val_test"`) per ADR-0009 Invariant 13.
+   - `OptimizationPlan`: Enforces frozen validation, hardware platform/compute capability consistency, mandatory `CalibrationDatasetBinding` for PTQ/INT8, and finite `max_accuracy_drop_tolerance`.
+   - `OptimizedModelArtifact`: Captures compiled hardware-locked artifact metadata, target compute capability, artifact SHA-256 hash, and lineage hash.
+   - `OptimizationResult`: Couples optimization plan, artifact, ADR-0011 evaluation result, baseline comparison, accuracy retention, and systems speedup metrics.
+   - `DeploymentPlan`, `DeploymentTarget`, `HealthCheckSpec`, `ReadinessProbeResult`, `DeploymentRecord`: Models deployment configuration, target memory allocations, automated health check thresholds, readiness probe outcomes, and deployment lifecycle records.
+3. **Deterministic Canonicalization (`canonicalization.py`):**
+   - Pure functional payload extraction for optimization and deployment plans.
+   - Deterministic SHA-256 payload hashing via IEEE-754 normalized JSON serialization.
+   - Lineage DAG hash derivation combining parent checkpoint weights hash and optimization plan parameters.
+4. **Subsystem Engines (`optimizer.py`, `verifier.py`, `deployment.py`):**
+   - `ModelOptimizer` (`DefaultModelOptimizer`): Validates plan constraints, verifies checkpoint and calibration dataset manifest hashes, and dispatches compilation exclusively via ADR-0005 `ToolExecutor`.
+   - `OptimizationVerifier` (`DefaultOptimizationVerifier`): Validates artifact-to-plan linkage, evaluates primary accuracy retention, computes systems speedup via ADR-0011 `DefaultBaselineComparator`, and enforces the accuracy drop tolerance gate.
+   - `DeploymentManager` (`DefaultDeploymentManager`): Enforces staging preconditions, dispatches readiness probe tooling, verifies ADR-0003 4-tuple approval credentials (`OperationIdentity`, `ApprovalRequest`, `ApprovalDecision`) upon activation, and executes automated rollback with fail-closed escalation to `OPERATOR_REQUIRED` for initial deployments (null predecessor).
+5. **Adversarial Boundary Test Suite (`tests/test_optimization_boundary.py`):**
+   - Implemented 37 boundary tests covering dynamic shape profile monotonicity, calibration leakage isolation, tolerance gates, approval replay rejection, target scope conflicts, probe timeouts, latency/memory budgets, rollback escalation, AST zero-subprocess/shell audit, and AST zero-sqlite audit.
+   - 37/37 boundary tests passing; 545/545 full repository tests passing.
+   - Ruff check clean, Ruff format clean, Mypy clean (112 source files), git diff --check clean.
+
+**Why:** Fulfills ADR-0012 architecture specification and Issue #62 acceptance criteria, guaranteeing hardware-aware deployment readiness and optimization without creating competing execution or orchestration lifecycle state machines.
+
+**Broke:** Nothing broken. Conformed all test fixtures to ADR-0009 `DatasetManifest`, ADR-0010 `CheckpointManifest`, and ADR-0011 `EvaluationResult` schemas with zero regressions.
+
+**Learned:** Data contracts in downstream subsystems must strictly conform to existing domain schemas and validation rules (e.g. `n_items` equaling split hash count in `DatasetManifest`, mandatory `EvaluationPlan` on `EvaluationResult`). Designing mock executors to implement the full async `ToolExecutor` protocol prevents typechecker friction across subsystems.
+
+**Left open:** Pushing `feature/ajmunna/phase-2m-optimization-subsystem` to remote origin, opening PR referencing Issue #62, and presenting to Official PM for adversarial review.
