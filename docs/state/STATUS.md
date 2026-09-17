@@ -18,7 +18,7 @@ Phase 2M (ADR-0012 Optimization & Deployment Subsystem) runtime package and adve
 
 | Item | Issue | PR | State |
 |---|---|---|---|
-| Phase 2M Optimization & Deployment Subsystem runtime | #62 | #63 | Open · CI in flight |
+| Phase 2M Optimization & Deployment Subsystem runtime | #62 | #63 | Open · CI green · Awaiting PM Review |
 
 ## Next 3 actions
 
