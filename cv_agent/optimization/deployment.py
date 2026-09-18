@@ -55,7 +55,7 @@ class DeploymentManager(Protocol):
         tool_id: ToolId,
         tool_executor: ToolExecutor,
         *,
-        optimization_result: OptimizationResult | None = None,
+        optimization_result: OptimizationResult,
         active_deployments: Mapping[DeploymentId, DeploymentRecord] | None = None,
     ) -> DeploymentRecord: ...
 
@@ -95,6 +95,39 @@ class DeploymentManager(Protocol):
 class DefaultDeploymentManager:
     """Standard deployment manager enforcing ADR-0003 approval and automated rollback per ADR-0012."""
 
+    def __init__(
+        self,
+        safety_index: dict[DeploymentId, DeploymentRecord] | None = None,
+    ) -> None:
+        """Initialize DefaultDeploymentManager with an optional process-local operational safety index (B13)."""
+        self._safety_index: dict[DeploymentId, DeploymentRecord] = (
+            dict(safety_index) if safety_index is not None else {}
+        )
+
+    def _check_target_lockout(
+        self,
+        target_id: TargetId,
+        caller_deployments: Mapping[DeploymentId, DeploymentRecord] | None = None,
+    ) -> None:
+        """Enforce process-local target-scoped lockout when target is in OPERATOR_REQUIRED state (B13)."""
+        target_str = str(target_id)
+        records_to_check: list[DeploymentRecord] = list(self._safety_index.values())
+        if caller_deployments:
+            records_to_check.extend(caller_deployments.values())
+
+        for existing in records_to_check:
+            if existing.status == DeploymentStatus.OPERATOR_REQUIRED:
+                existing_target_str = (
+                    str(existing.target_id)
+                    if existing.target_id is not None
+                    else str(existing.plan.target.target_id)
+                )
+                if existing_target_str == target_str:
+                    raise DeploymentValidationError(
+                        f"Deployment operation rejected: target {target_id!r} is locked out by deployment "
+                        f"{existing.deployment_id!r} in OPERATOR_REQUIRED state per ADR-0012 §3.7."
+                    )
+
     def stage(
         self,
         plan: DeploymentPlan,
@@ -102,7 +135,7 @@ class DefaultDeploymentManager:
         tool_id: ToolId,
         tool_executor: ToolExecutor,
         *,
-        optimization_result: OptimizationResult | None = None,
+        optimization_result: OptimizationResult,
         active_deployments: Mapping[DeploymentId, DeploymentRecord] | None = None,
     ) -> DeploymentRecord:
         """Stage an optimized model artifact and runtime packaging on the deployment target."""
@@ -123,14 +156,8 @@ class DefaultDeploymentManager:
                 "ADR-0005 execution dispatch cannot be omitted."
             )
 
-        # 2. Lockout state check (B8: OPERATOR_REQUIRED blocks new deployments)
-        if active_deployments is not None:
-            for dep_id, existing in active_deployments.items():
-                if existing.status == DeploymentStatus.OPERATOR_REQUIRED:
-                    raise DeploymentValidationError(
-                        f"Deployment operation rejected: target is locked out by deployment {dep_id!r} "
-                        "in OPERATOR_REQUIRED state per ADR-0012 §3.7."
-                    )
+        # 2. Target-scoped lockout state check (B13: OPERATOR_REQUIRED blocks affected target)
+        self._check_target_lockout(target_id, active_deployments)
 
         # 3. Target consistency validation (B5)
         if str(target_id) != str(plan.target.target_id):
@@ -144,18 +171,22 @@ class DefaultDeploymentManager:
         if not str(plan.target.compute_capability).strip():
             raise HardwareMismatchError("Target compute_capability cannot be empty")
 
-        # 5. Mandatory post-optimization verification gate (Acceptance Criterion 5)
-        if optimization_result is not None:
-            if not optimization_result.verification_passed:
-                raise OptimizationVerificationError(
-                    f"Cannot deploy unverified or degraded artifact {plan.artifact_id!r}. "
-                    f"Diagnostics: {optimization_result.diagnostics}"
-                )
-            if str(optimization_result.artifact.artifact_id) != str(plan.artifact_id):
-                raise OptimizationValidationError(
-                    f"OptimizationResult artifact {optimization_result.artifact.artifact_id!r} "
-                    f"does not match DeploymentPlan artifact {plan.artifact_id!r}"
-                )
+        # 5. Mandatory post-optimization verification gate (B12: Acceptance Criterion 5)
+        if optimization_result is None:
+            raise OptimizationVerificationError(
+                "Mandatory OptimizationResult missing for deployment staging. "
+                "Optimized artifacts remain strictly provisional until verified."
+            )
+        if not optimization_result.verification_passed:
+            raise OptimizationVerificationError(
+                f"Cannot deploy unverified or degraded artifact {plan.artifact_id!r}. "
+                f"Diagnostics: {optimization_result.diagnostics}"
+            )
+        if str(optimization_result.artifact.artifact_id) != str(plan.artifact_id):
+            raise OptimizationValidationError(
+                f"OptimizationResult artifact {optimization_result.artifact.artifact_id!r} "
+                f"does not match DeploymentPlan artifact {plan.artifact_id!r}"
+            )
 
         # 6. Dispatch staging to ADR-0005
         exec_id = ExecutionId(f"exec-stage-{plan.deployment_id}-{uuid.uuid4().hex[:8]}")
@@ -180,13 +211,19 @@ class DefaultDeploymentManager:
                 f"{tool_result.error_message or 'Unknown execution error'}"
             )
 
-        return DeploymentRecord(
+        staged_record = DeploymentRecord(
             deployment_id=plan.deployment_id,
             plan=plan,
             status=DeploymentStatus.STAGING,
             execution_id=exec_id,
             target_id=target_id,
         )
+        # Update process-local operational safety index (B13)
+        self._safety_index[staged_record.deployment_id] = staged_record
+        if active_deployments is not None and isinstance(active_deployments, dict):
+            active_deployments[staged_record.deployment_id] = staged_record
+
+        return staged_record
 
     def verify_readiness(
         self,
@@ -354,6 +391,7 @@ class DefaultDeploymentManager:
                 readiness_result=probe_result,
                 failure_details=err_msg,
             )
+            self._safety_index[failed_record.deployment_id] = failed_record
             raise ReadinessProbeFailureError(
                 f"Deployment {record.deployment_id} failed readiness verification: {err_msg}",
                 failed_record=failed_record,
@@ -364,6 +402,7 @@ class DefaultDeploymentManager:
             DeploymentStatus.VERIFYING,
             readiness_result=probe_result,
         )
+        self._safety_index[verifying_record.deployment_id] = verifying_record
         return probe_result, verifying_record
 
     def activate(
@@ -400,14 +439,8 @@ class DefaultDeploymentManager:
                 "tool_executor is mandatory for deployment activation"
             )
 
-        # 2. Lockout state check (B8)
-        if active_deployments is not None:
-            for dep_id, existing in active_deployments.items():
-                if existing.status == DeploymentStatus.OPERATOR_REQUIRED:
-                    raise DeploymentValidationError(
-                        f"Deployment activation rejected: target is locked out by deployment {dep_id!r} "
-                        "in OPERATOR_REQUIRED state per ADR-0012 §3.7."
-                    )
+        # 2. Target-scoped lockout state check (B13: OPERATOR_REQUIRED blocks affected target)
+        self._check_target_lockout(target_id, active_deployments)
 
         # 3. Lifecycle state check (B7: Must be in VERIFYING state to transition to ACTIVE)
         if record.status != DeploymentStatus.VERIFYING:
@@ -540,6 +573,9 @@ class DefaultDeploymentManager:
             target_id=target_id,
             activated_at=datetime.now(timezone.utc),
         )
+        self._safety_index[activated_record.deployment_id] = activated_record
+        if active_deployments is not None and isinstance(active_deployments, dict):
+            active_deployments[activated_record.deployment_id] = activated_record
         return activated_record
 
     def rollback(
@@ -572,11 +608,13 @@ class DefaultDeploymentManager:
         if record.plan.rollback_target_id is None:
             escalated_record = record.with_transition(
                 DeploymentStatus.OPERATOR_REQUIRED,
+                target_id=target_id,
                 failure_details=(
                     f"Null predecessor rollback target (first deployment). "
                     f"Escalated to OPERATOR_REQUIRED: {reason}"
                 ),
             )
+            self._safety_index[record.deployment_id] = escalated_record
             if active_deployments is not None and isinstance(active_deployments, dict):
                 active_deployments[record.deployment_id] = escalated_record
             return escalated_record, None
@@ -634,9 +672,11 @@ class DefaultDeploymentManager:
                 target_id=target_id,
                 activated_at=datetime.now(timezone.utc),
             )
+            self._safety_index[target_dep_id] = restored_record
             if active_deployments is not None and isinstance(active_deployments, dict):
                 active_deployments[target_dep_id] = restored_record
 
+        self._safety_index[record.deployment_id] = rolled_back_record
         if active_deployments is not None and isinstance(active_deployments, dict):
             active_deployments[record.deployment_id] = rolled_back_record
 

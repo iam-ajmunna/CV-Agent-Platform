@@ -25,6 +25,7 @@ from cv_agent.optimization.errors import (
     OptimizationValidationError,
 )
 from cv_agent.tools import (
+    ActiveJobHandoff,
     ExecutionId,
     TargetId,
     ToolExecutionStatus,
@@ -50,7 +51,7 @@ class ModelOptimizer(Protocol):
         *,
         dataset_manifest: DatasetManifest | None = None,
         approval_authorized: bool = False,
-    ) -> OptimizedModelArtifact: ...
+    ) -> OptimizedModelArtifact | ActiveJobHandoff: ...
 
 
 class DefaultModelOptimizer:
@@ -66,7 +67,7 @@ class DefaultModelOptimizer:
         *,
         dataset_manifest: DatasetManifest | None = None,
         approval_authorized: bool = False,
-    ) -> OptimizedModelArtifact:
+    ) -> OptimizedModelArtifact | ActiveJobHandoff:
         """Validate optimization plan, verify lineage bindings, and dispatch compilation."""
         # 1. Mandatory execution arguments (Zero local synthesis)
         if tool_id is None or not str(tool_id).strip():
@@ -161,7 +162,13 @@ class DefaultModelOptimizer:
                 f"{tool_result.error_message or 'Unknown error'}"
             )
 
-        # 6. Parse compilation telemetry & construct OptimizedModelArtifact (B3: Zero synthetic metadata)
+        # 6. Asynchronous dispatch handoff to ADR-0003 (B11)
+        # When ToolResult.active_job_ref exists, return that handoff without constructing any artifact metadata.
+        # ADR-0005 explicitly defines SUCCESS for async tools as dispatch acceptance, not underlying job completion.
+        if tool_result.active_job_ref is not None:
+            return tool_result.active_job_ref
+
+        # 7. Parse compilation telemetry & construct OptimizedModelArtifact (B3: Zero synthetic metadata)
         output = tool_result.structured_output
         if not output or not isinstance(output, Mapping):
             raise OptimizationExecutionError(

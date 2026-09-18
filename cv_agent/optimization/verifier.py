@@ -10,6 +10,7 @@ from cv_agent.evaluation.types import EvaluationVerdict, ExperimentId
 from cv_agent.optimization.contracts import (
     OptimizationPlan,
     OptimizationResult,
+    OptimizedArtifactEvaluationBinding,
     OptimizedModelArtifact,
 )
 from cv_agent.optimization.errors import (
@@ -28,6 +29,7 @@ class OptimizationVerifier(Protocol):
         plan: OptimizationPlan,
         baseline_evaluation: EvaluationResult,
         candidate_evaluation: EvaluationResult,
+        candidate_artifact_binding: OptimizedArtifactEvaluationBinding | None = None,
         *,
         baseline_comparator: BaselineComparator | None = None,
         raise_on_failure: bool = False,
@@ -46,6 +48,7 @@ class DefaultOptimizationVerifier:
         plan: OptimizationPlan,
         baseline_evaluation: EvaluationResult,
         candidate_evaluation: EvaluationResult,
+        candidate_artifact_binding: OptimizedArtifactEvaluationBinding | None = None,
         *,
         baseline_comparator: BaselineComparator | None = None,
         raise_on_failure: bool = False,
@@ -99,7 +102,35 @@ class DefaultOptimizationVerifier:
                     f"OptimizationPlan verification_dataset_binding {target_ds.dataset_manifest_hash!r}"
                 )
 
-        # 4. Model / Artifact binding verification
+        # 4. Mandatory Candidate Artifact Binding (B14)
+        if candidate_artifact_binding is None:
+            raise OptimizationVerificationError(
+                "candidate_artifact_binding is mandatory for candidate verification. "
+                "Candidate evaluation must bind explicitly to the optimized artifact identity and hash."
+            )
+        if str(candidate_artifact_binding.candidate_artifact_id) != str(
+            artifact.artifact_id
+        ):
+            raise OptimizationVerificationError(
+                f"Candidate artifact binding ID {candidate_artifact_binding.candidate_artifact_id!r} "
+                f"does not match artifact {artifact.artifact_id!r}"
+            )
+        if str(candidate_artifact_binding.candidate_artifact_hash) != str(
+            artifact.artifact_hash
+        ):
+            raise OptimizationVerificationError(
+                f"Candidate artifact binding hash {candidate_artifact_binding.candidate_artifact_hash!r} "
+                f"does not match artifact hash {artifact.artifact_hash!r}"
+            )
+        if candidate_artifact_binding.evaluation_id is not None and str(
+            candidate_artifact_binding.evaluation_id
+        ) != str(candidate_evaluation.evaluation_id):
+            raise OptimizationVerificationError(
+                f"Candidate artifact binding evaluation_id {candidate_artifact_binding.evaluation_id!r} "
+                f"does not match candidate evaluation {candidate_evaluation.evaluation_id!r}"
+            )
+
+        # 5. ADR-0011 Model / Checkpoint Lineage Verification
         base_model = baseline_evaluation.plan.model_artifact
         if str(base_model.checkpoint_id) != str(plan.source_checkpoint_id):
             raise OptimizationVerificationError(
@@ -113,27 +144,18 @@ class DefaultOptimizationVerifier:
             )
 
         cand_model = candidate_evaluation.plan.model_artifact
-        allowed_candidate_ckpts = {
-            str(artifact.artifact_id),
-            str(artifact.plan_id),
-            str(artifact.source_checkpoint_id),
-        }
-        if str(cand_model.checkpoint_id) not in allowed_candidate_ckpts:
+        if str(cand_model.checkpoint_id) != str(plan.source_checkpoint_id):
             raise OptimizationVerificationError(
-                f"Candidate evaluation model checkpoint {cand_model.checkpoint_id!r} does not match "
-                f"candidate artifact {artifact.artifact_id!r}"
+                f"Candidate evaluation model checkpoint lineage {cand_model.checkpoint_id!r} does not match "
+                f"source checkpoint {plan.source_checkpoint_id!r}"
             )
-        allowed_candidate_hashes = {
-            str(artifact.artifact_hash),
-            str(plan.source_weights_hash),
-        }
-        if str(cand_model.weights_hash) not in allowed_candidate_hashes:
+        if str(cand_model.weights_hash) != str(plan.source_weights_hash):
             raise OptimizationVerificationError(
-                f"Candidate evaluation weights hash {cand_model.weights_hash!r} does not match "
-                f"candidate artifact hash {artifact.artifact_hash!r}"
+                f"Candidate evaluation weights hash lineage {cand_model.weights_hash!r} does not match "
+                f"source weights hash {plan.source_weights_hash!r}"
             )
 
-        # 5. Hardware / Target environment binding verification
+        # 6. Hardware / Target environment binding verification
         base_hw = baseline_evaluation.environment.target_hardware
         cand_hw = candidate_evaluation.environment.target_hardware
         if base_hw != cand_hw:
@@ -275,4 +297,5 @@ class DefaultOptimizationVerifier:
             memory_reduction_ratio=round(max(0.0, memory_reduction_ratio), 4),
             verification_passed=verification_passed,
             diagnostics=diag,
+            candidate_artifact_binding=candidate_artifact_binding,
         )

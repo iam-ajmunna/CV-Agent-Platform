@@ -67,6 +67,7 @@ from cv_agent.optimization.contracts import (
     HealthCheckSpec,
     OptimizationPlan,
     OptimizationResult,
+    OptimizedArtifactEvaluationBinding,
     OptimizedModelArtifact,
     ReadinessProbeResult,
     validate_deployment_transition,
@@ -101,6 +102,7 @@ from cv_agent.orchestration import (
     OperationId,
 )
 from cv_agent.tools import (
+    ActiveJobHandoff,
     TargetId,
     ToolExecutionStatus,
     ToolId,
@@ -231,6 +233,53 @@ def _make_valid_deployment_plan(
         if rollback_target_id
         else None,
         created_at=datetime.now(timezone.utc),
+    )
+
+
+def _make_valid_candidate_binding(
+    artifact: OptimizedModelArtifact,
+    eval_id: EvaluationId | str = "eval-exp-cand",
+) -> OptimizedArtifactEvaluationBinding:
+    return OptimizedArtifactEvaluationBinding(
+        candidate_artifact_id=artifact.artifact_id,
+        candidate_artifact_hash=artifact.artifact_hash,
+        evaluation_id=EvaluationId(str(eval_id)),
+    )
+
+
+def _make_valid_optimization_result(
+    plan: OptimizationPlan | None = None,
+    artifact: OptimizedModelArtifact | None = None,
+    artifact_id: str | None = None,
+) -> OptimizationResult:
+    opt_plan = plan or _make_valid_optimization_plan()
+    opt_art = artifact or _make_valid_artifact(opt_plan)
+    if artifact_id is not None:
+        opt_art = opt_art.model_copy(
+            update={"artifact_id": OptimizedArtifactId(artifact_id)}
+        )
+    cand_eval = _make_valid_evaluation_result("exp-cand")
+    base_eval = _make_valid_evaluation_result("exp-base")
+    cand_binding = _make_valid_candidate_binding(opt_art, cand_eval.evaluation_id)
+    comp = DefaultBaselineComparator().compare(
+        candidate_metrics=cand_eval.quality_metrics,
+        baseline_metrics=base_eval.quality_metrics,
+        candidate_benchmarks=cand_eval.system_benchmarks,
+        baseline_benchmarks=base_eval.system_benchmarks,
+        candidate_exp_id=ExperimentId("exp-cand"),
+        baseline_exp_id=ExperimentId("exp-base"),
+    )
+    return OptimizationResult(
+        plan=opt_plan,
+        artifact=opt_art,
+        evaluation_result=cand_eval,
+        baseline_comparison=comp,
+        accuracy_retention_ratio=0.98,
+        speedup_ratio=1.45,
+        memory_reduction_ratio=0.25,
+        verification_passed=True,
+        diagnostics="Optimization verification PASSED",
+        candidate_artifact_binding=cand_binding,
     )
 
 
@@ -446,9 +495,11 @@ class _MockToolExecutor:
         status: ToolExecutionStatus = ToolExecutionStatus.SUCCESS,
         error_message: str | None = None,
         structured_output: dict[str, Any] | None = None,
+        active_job_ref: ActiveJobHandoff | None = None,
     ) -> None:
         self.status = status
         self.error_message = error_message
+        self.active_job_ref = active_job_ref
         if structured_output is not None:
             self.structured_output = structured_output
         else:
@@ -472,6 +523,7 @@ class _MockToolExecutor:
             status=self.status,
             error_message=self.error_message,
             structured_output=self.structured_output,
+            active_job_ref=self.active_job_ref,
         )
 
     async def probe(self, tool: Any, target: Any) -> Any:
@@ -988,6 +1040,9 @@ def test_verifier_artifact_plan_mismatch_fails_closed() -> None:
             plan=plan,
             baseline_evaluation=base_eval,
             candidate_evaluation=cand_eval,
+            candidate_artifact_binding=_make_valid_candidate_binding(
+                artifact, cand_eval.evaluation_id
+            ),
         )
 
 
@@ -1004,12 +1059,14 @@ def test_verifier_accuracy_tolerance_exceeded_fails_verification() -> None:
     base_eval = _make_valid_evaluation_result("exp-base", map50=0.785)
     # Drop is 0.785 - 0.750 = 0.035 > 0.015!
     cand_eval = _make_valid_evaluation_result("exp-cand", map50=0.750, fps=120.0)
+    cand_binding = _make_valid_candidate_binding(artifact, cand_eval.evaluation_id)
 
     result = verifier.verify(
         artifact=artifact,
         plan=plan,
         baseline_evaluation=base_eval,
         candidate_evaluation=cand_eval,
+        candidate_artifact_binding=cand_binding,
     )
 
     assert result.verification_passed is False
@@ -1024,6 +1081,7 @@ def test_verifier_accuracy_tolerance_exceeded_fails_verification() -> None:
             plan=plan,
             baseline_evaluation=base_eval,
             candidate_evaluation=cand_eval,
+            candidate_artifact_binding=cand_binding,
             raise_on_failure=True,
         )
 
@@ -1051,6 +1109,9 @@ def test_verifier_accuracy_retention_and_speedup_calculation() -> None:
         plan=plan,
         baseline_evaluation=base_eval,
         candidate_evaluation=cand_eval,
+        candidate_artifact_binding=_make_valid_candidate_binding(
+            artifact, cand_eval.evaluation_id
+        ),
     )
 
     assert res.verification_passed is True
@@ -1117,6 +1178,9 @@ def test_verifier_missing_overlapping_metrics_fails_closed() -> None:
             plan=plan,
             baseline_evaluation=eval_base,
             candidate_evaluation=eval_cand,
+            candidate_artifact_binding=_make_valid_candidate_binding(
+                artifact, eval_cand.evaluation_id
+            ),
         )
 
 
@@ -1127,6 +1191,7 @@ def test_deployment_staging_mandatory_tool_id_and_executor() -> None:
     """Verify DeploymentManager.stage requires tool_id, target_id, and tool_executor without synthesis."""
     manager = DefaultDeploymentManager()
     plan = _make_valid_deployment_plan()
+    opt_res = _make_valid_optimization_result(artifact_id=str(plan.artifact_id))
 
     for bad_id in [cast(ToolId, None), cast(ToolId, ""), cast(ToolId, "   ")]:
         with pytest.raises(OptimizationExecutionError, match="tool_id is mandatory"):
@@ -1135,6 +1200,7 @@ def test_deployment_staging_mandatory_tool_id_and_executor() -> None:
                 tool_id=bad_id,  # type: ignore[arg-type]
                 tool_executor=_MockToolExecutor(),
                 target_id=plan.target.target_id,
+                optimization_result=opt_res,
             )
 
     for bad_target in [cast(TargetId, None), cast(TargetId, ""), cast(TargetId, "   ")]:
@@ -1144,6 +1210,7 @@ def test_deployment_staging_mandatory_tool_id_and_executor() -> None:
                 tool_id=ToolId("cv.deploy.stage"),
                 tool_executor=_MockToolExecutor(),
                 target_id=bad_target,  # type: ignore[arg-type]
+                optimization_result=opt_res,
             )
 
     with pytest.raises(OptimizationExecutionError, match="tool_executor is mandatory"):
@@ -1152,6 +1219,7 @@ def test_deployment_staging_mandatory_tool_id_and_executor() -> None:
             tool_id=ToolId("cv.deploy.stage"),
             tool_executor=None,  # type: ignore[arg-type]
             target_id=plan.target.target_id,
+            optimization_result=opt_res,
         )
 
 
@@ -1162,6 +1230,7 @@ def test_deployment_staging_target_id_conflict_rejected() -> None:
     """Verify DeploymentManager.stage rejects conflicting target_id."""
     manager = DefaultDeploymentManager()
     plan = _make_valid_deployment_plan()
+    opt_res = _make_valid_optimization_result(artifact_id=str(plan.artifact_id))
 
     with pytest.raises(
         DeploymentValidationError, match="conflicts with DeploymentPlan target"
@@ -1171,6 +1240,7 @@ def test_deployment_staging_target_id_conflict_rejected() -> None:
             tool_id=ToolId("cv.deploy.stage"),
             tool_executor=_MockToolExecutor(),
             target_id=TargetId("target-different-server"),
+            optimization_result=opt_res,
         )
 
 
@@ -1562,6 +1632,9 @@ def test_deployment_rollback_null_predecessor_escalates_to_operator_required() -
             tool_id=ToolId("cv.deploy.stage"),
             tool_executor=_MockToolExecutor(),
             target_id=new_plan.target.target_id,
+            optimization_result=_make_valid_optimization_result(
+                artifact_id=str(new_plan.artifact_id)
+            ),
             active_deployments=active_deployments,
         )
 
@@ -2028,6 +2101,9 @@ def test_b5_external_target_id_mandatory_across_operations() -> None:
                 tool_id=ToolId("cv.deploy.stage"),
                 tool_executor=_MockToolExecutor(),
                 target_id=bad_target,  # type: ignore[arg-type]
+                optimization_result=_make_valid_optimization_result(
+                    artifact_id=str(plan.artifact_id)
+                ),
             )
 
         with pytest.raises(DeploymentValidationError, match="target_id is mandatory"):
@@ -2078,6 +2154,9 @@ def test_b5_external_target_id_mismatch_fails_closed() -> None:
             tool_id=ToolId("cv.deploy.stage"),
             tool_executor=_MockToolExecutor(),
             target_id=diff_target,
+            optimization_result=_make_valid_optimization_result(
+                artifact_id=str(plan.artifact_id)
+            ),
         )
 
     with pytest.raises(DeploymentValidationError, match="conflicts with record target"):
@@ -2420,6 +2499,9 @@ def test_b8_operator_required_locks_out_subsequent_staging_and_activation() -> N
             tool_id=ToolId("cv.deploy.stage"),
             tool_executor=_MockToolExecutor(),
             target_id=plan2.target.target_id,
+            optimization_result=_make_valid_optimization_result(
+                artifact_id=str(plan2.artifact_id)
+            ),
             active_deployments=active_deployments,
         )
 
@@ -2473,11 +2555,14 @@ def test_b9_verifier_dataset_binding_mismatch_fails_closed() -> None:
             plan=plan,
             baseline_evaluation=bad_ds_eval,
             candidate_evaluation=cand_eval,
+            candidate_artifact_binding=_make_valid_candidate_binding(
+                artifact, cand_eval.evaluation_id
+            ),
         )
 
 
 def test_b9_verifier_candidate_artifact_binding_mismatch_fails_closed() -> None:
-    """[B9] Verify verifier rejects candidate evaluation if model checkpoint does not match candidate artifact."""
+    """[B9] Verify verifier rejects candidate evaluation if model checkpoint does not match source checkpoint."""
     verifier = DefaultOptimizationVerifier()
     plan = _make_valid_optimization_plan()
     artifact = _make_valid_artifact(plan)
@@ -2489,15 +2574,17 @@ def test_b9_verifier_candidate_artifact_binding_mismatch_fails_closed() -> None:
     )
     bad_plan = cand_eval.plan.model_copy(update={"model_artifact": bad_cand_model})
     bad_cand_eval = cand_eval.model_copy(update={"plan": bad_plan})
+    cand_binding = _make_valid_candidate_binding(artifact, bad_cand_eval.evaluation_id)
 
     with pytest.raises(
-        OptimizationVerificationError, match="does not match candidate artifact"
+        OptimizationVerificationError, match="does not match source checkpoint"
     ):
         verifier.verify(
             artifact=artifact,
             plan=plan,
             baseline_evaluation=base_eval,
             candidate_evaluation=bad_cand_eval,
+            candidate_artifact_binding=cand_binding,
         )
 
 
@@ -2523,6 +2610,9 @@ def test_b9_verifier_hardware_mismatch_fails_closed() -> None:
             plan=plan,
             baseline_evaluation=base_eval,
             candidate_evaluation=cand_eval,
+            candidate_artifact_binding=_make_valid_candidate_binding(
+                artifact, cand_eval.evaluation_id
+            ),
         )
 
 
@@ -2545,6 +2635,9 @@ def test_b9_verifier_non_passed_verdict_fails_closed() -> None:
             plan=plan,
             baseline_evaluation=base_eval,
             candidate_evaluation=failed_cand_eval,
+            candidate_artifact_binding=_make_valid_candidate_binding(
+                artifact, failed_cand_eval.evaluation_id
+            ),
         )
 
 
@@ -2571,6 +2664,9 @@ def test_b9_verifier_unsynchronized_timing_benchmark_fails_closed() -> None:
             plan=plan,
             baseline_evaluation=base_eval,
             candidate_evaluation=cand_eval_unsync,
+            candidate_artifact_binding=_make_valid_candidate_binding(
+                artifact, cand_eval_unsync.evaluation_id
+            ),
         )
 
 
@@ -2635,3 +2731,377 @@ def test_b10_pydantic_contract_rejects_malformed_deployment_id() -> None:
                 ),
                 created_at=datetime.now(timezone.utc),
             )
+
+
+# =============================================================================
+# B11: Async Execution Semantics (ADR-0005 & ADR-0003 Boundary)
+# =============================================================================
+def test_b11_async_tool_dispatch_returns_active_job_handoff_without_artifact() -> None:
+    """[B11] Verify DefaultModelOptimizer.compile returns ActiveJobHandoff on async dispatch without constructing artifact."""
+    optimizer = DefaultModelOptimizer()
+    plan = _make_valid_optimization_plan()
+    ckpt = _make_valid_checkpoint_manifest()
+
+    active_handoff = ActiveJobHandoff(
+        job_id="remote-opt-job-001",
+        job_type="export",
+        target="remote_gpu",
+        submitted_at=datetime.now(timezone.utc).isoformat(),
+        status="running",
+    )
+    executor = _MockToolExecutor(
+        status=ToolExecutionStatus.SUCCESS,
+        active_job_ref=active_handoff,
+        structured_output=None,
+    )
+
+    result = optimizer.compile(
+        plan=plan,
+        tool_id=ToolId("cv.optimize.compile"),
+        target_id=TargetId("target-jetson-01"),
+        tool_executor=executor,
+        checkpoint_manifest=ckpt,
+    )
+
+    assert isinstance(result, ActiveJobHandoff)
+    assert not isinstance(result, OptimizedModelArtifact)
+    assert result.job_id == "remote-opt-job-001"
+    assert result.target == "remote_gpu"
+
+
+def test_b11_sync_tool_dispatch_returns_optimized_model_artifact() -> None:
+    """[B11] Verify DefaultModelOptimizer.compile returns OptimizedModelArtifact on synchronous completion."""
+    optimizer = DefaultModelOptimizer()
+    plan = _make_valid_optimization_plan()
+    ckpt = _make_valid_checkpoint_manifest()
+
+    executor = _MockToolExecutor(
+        status=ToolExecutionStatus.SUCCESS,
+        active_job_ref=None,
+        structured_output={
+            "artifact_uri": "artifact://models/opt-plan-001/model.engine",
+            "artifact_size_bytes": 85000000,
+            "runtime_format": "tensorrt_engine",
+            "artifact_hash": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+        },
+    )
+
+    result = optimizer.compile(
+        plan=plan,
+        tool_id=ToolId("cv.optimize.compile"),
+        target_id=TargetId("target-jetson-01"),
+        tool_executor=executor,
+        checkpoint_manifest=ckpt,
+    )
+
+    assert isinstance(result, OptimizedModelArtifact)
+    assert result.plan_id == plan.plan_id
+    assert result.runtime_format == "tensorrt_engine"
+
+
+# =============================================================================
+# B12: Mandatory Empirical OptimizationResult on Staging (Criterion 5)
+# =============================================================================
+def test_b12_stage_fails_closed_when_optimization_result_none() -> None:
+    """[B12] Verify DeploymentManager.stage strictly fails closed when optimization_result is None."""
+    manager = DefaultDeploymentManager()
+    plan = _make_valid_deployment_plan()
+
+    with pytest.raises(
+        OptimizationVerificationError,
+        match="Mandatory OptimizationResult missing for deployment staging",
+    ):
+        manager.stage(
+            plan=plan,
+            tool_id=ToolId("cv.deploy.stage"),
+            tool_executor=_MockToolExecutor(),
+            target_id=plan.target.target_id,
+            optimization_result=None,  # type: ignore[arg-type]
+        )
+
+
+def test_b12_stage_fails_closed_when_optimization_result_unverified() -> None:
+    """[B12] Verify DeploymentManager.stage strictly fails closed when verification_passed is False."""
+    manager = DefaultDeploymentManager()
+    plan = _make_valid_deployment_plan()
+    failed_opt_res = _make_valid_optimization_result(artifact_id=str(plan.artifact_id))
+    failed_opt_res = failed_opt_res.model_copy(update={"verification_passed": False})
+
+    with pytest.raises(
+        OptimizationVerificationError,
+        match="Cannot deploy unverified or degraded artifact",
+    ):
+        manager.stage(
+            plan=plan,
+            tool_id=ToolId("cv.deploy.stage"),
+            tool_executor=_MockToolExecutor(),
+            target_id=plan.target.target_id,
+            optimization_result=failed_opt_res,
+        )
+
+
+def test_b12_stage_fails_closed_when_optimization_result_artifact_mismatched() -> None:
+    """[B12] Verify DeploymentManager.stage strictly fails closed when artifact_id does not match plan."""
+    manager = DefaultDeploymentManager()
+    plan = _make_valid_deployment_plan(artifact_id="art-expected-001")
+    mismatched_opt_res = _make_valid_optimization_result(artifact_id="art-other-999")
+
+    with pytest.raises(
+        OptimizationValidationError,
+        match="does not match DeploymentPlan artifact",
+    ):
+        manager.stage(
+            plan=plan,
+            tool_id=ToolId("cv.deploy.stage"),
+            tool_executor=_MockToolExecutor(),
+            target_id=plan.target.target_id,
+            optimization_result=mismatched_opt_res,
+        )
+
+
+# =============================================================================
+# B13: Target-Scoped Operational Lockout Index (ADR-0012 §3.7)
+# =============================================================================
+def test_b13_operator_required_lockout_persists_in_safety_index_without_external_registry() -> (
+    None
+):
+    """[B13] Verify rollback escalation to OPERATOR_REQUIRED records in safety_index and locks subsequent staging without caller registry."""
+    manager = DefaultDeploymentManager()
+    plan = _make_valid_deployment_plan(deployment_id="dep-001")
+    record = DeploymentRecord(
+        deployment_id=plan.deployment_id,
+        plan=plan,
+        status=DeploymentStatus.ACTIVE,
+    )
+
+    # Rollback without predecessor escalates to OPERATOR_REQUIRED and updates manager._safety_index
+    escalated, restored = manager.rollback(
+        record=record,
+        reason="Pipeline hardware watchdog timeout",
+        tool_id=ToolId("cv.deploy.rollback"),
+        tool_executor=_MockToolExecutor(),
+        target_id=plan.target.target_id,
+        active_deployments=None,  # Zero external registry passed!
+    )
+    assert escalated.status == DeploymentStatus.OPERATOR_REQUIRED
+    assert restored is None
+
+    # Subsequent staging on the same target fails closed even with active_deployments=None
+    new_plan = _make_valid_deployment_plan(deployment_id="dep-002")
+    with pytest.raises(
+        DeploymentValidationError, match="locked out by deployment.*OPERATOR_REQUIRED"
+    ):
+        manager.stage(
+            plan=new_plan,
+            tool_id=ToolId("cv.deploy.stage"),
+            tool_executor=_MockToolExecutor(),
+            target_id=new_plan.target.target_id,
+            optimization_result=_make_valid_optimization_result(
+                artifact_id=str(new_plan.artifact_id)
+            ),
+            active_deployments=None,
+        )
+
+
+def test_b13_operator_required_lockout_is_strictly_target_scoped() -> None:
+    """[B13] Verify target lockout strictly affects the locked TargetId, permitting unaffected targets."""
+    target_b = DeploymentTarget(
+        target_id=TargetId("target-jetson-02"),
+        hostname_or_ip="192.168.1.101",
+        platform_type="nvidia_jetson_agx_orin",
+        gpu_device_name="NVIDIA Jetson AGX Orin 64GB",
+        compute_capability="8.7",
+        cuda_runtime_version="12.2",
+        driver_version="535.104.05",
+        max_memory_allocation_gb=48.0,
+        power_mode="MAXN",
+    )
+
+    plan_a = _make_valid_deployment_plan(deployment_id="dep-a")
+    op_record_a = DeploymentRecord(
+        deployment_id=plan_a.deployment_id,
+        plan=plan_a,
+        status=DeploymentStatus.OPERATOR_REQUIRED,
+    )
+
+    # Initialize manager with target A locked out in safety index
+    manager = DefaultDeploymentManager(
+        safety_index={op_record_a.deployment_id: op_record_a}
+    )
+
+    # Staging on Target A fails closed
+    plan_a_next = _make_valid_deployment_plan(deployment_id="dep-a-next")
+    with pytest.raises(
+        DeploymentValidationError, match="locked out by deployment.*OPERATOR_REQUIRED"
+    ):
+        manager.stage(
+            plan=plan_a_next,
+            tool_id=ToolId("cv.deploy.stage"),
+            tool_executor=_MockToolExecutor(),
+            target_id=plan_a_next.target.target_id,
+            optimization_result=_make_valid_optimization_result(
+                artifact_id=str(plan_a_next.artifact_id)
+            ),
+        )
+
+    # Staging on Target B SUCCEEDS without obstruction
+    plan_b = DeploymentPlan(
+        deployment_id=DeploymentId("dep-b"),
+        artifact_id=OptimizedArtifactId("art-opt-plan-001"),
+        target=target_b,
+        runtime=DeploymentRuntime.STANDALONE_TENSORRT,
+        health_check=HealthCheckSpec(
+            startup_timeout_sec=30.0,
+            readiness_probe_samples=5,
+            max_latency_threshold_ms=25.0,
+            memory_headroom_mb=1024.0,
+        ),
+        created_at=datetime.now(timezone.utc),
+    )
+    rec_b = manager.stage(
+        plan=plan_b,
+        tool_id=ToolId("cv.deploy.stage"),
+        tool_executor=_MockToolExecutor(),
+        target_id=target_b.target_id,
+        optimization_result=_make_valid_optimization_result(
+            artifact_id=str(plan_b.artifact_id)
+        ),
+    )
+    assert rec_b.status == DeploymentStatus.STAGING
+
+
+# =============================================================================
+# B14: Explicit Optimized-Artifact Evaluation Binding (ADR-0011 Untouched)
+# =============================================================================
+def test_b14_verifier_rejects_missing_candidate_artifact_binding() -> None:
+    """[B14] Verify verifier strictly rejects verification when candidate_artifact_binding is None."""
+    verifier = DefaultOptimizationVerifier()
+    plan = _make_valid_optimization_plan()
+    artifact = _make_valid_artifact(plan)
+    base_eval = _make_valid_evaluation_result("exp-base")
+    cand_eval = _make_valid_evaluation_result("exp-cand")
+
+    with pytest.raises(
+        OptimizationVerificationError,
+        match="candidate_artifact_binding is mandatory",
+    ):
+        verifier.verify(
+            artifact=artifact,
+            plan=plan,
+            baseline_evaluation=base_eval,
+            candidate_evaluation=cand_eval,
+            candidate_artifact_binding=None,
+        )
+
+
+def test_b14_verifier_rejects_candidate_artifact_id_mismatch() -> None:
+    """[B14] Verify verifier rejects binding where candidate_artifact_id does not match artifact.artifact_id."""
+    verifier = DefaultOptimizationVerifier()
+    plan = _make_valid_optimization_plan()
+    artifact = _make_valid_artifact(plan)
+    base_eval = _make_valid_evaluation_result("exp-base")
+    cand_eval = _make_valid_evaluation_result("exp-cand")
+
+    bad_binding = OptimizedArtifactEvaluationBinding(
+        candidate_artifact_id=OptimizedArtifactId("art-completely-different"),
+        candidate_artifact_hash=artifact.artifact_hash,
+        evaluation_id=cand_eval.evaluation_id,
+    )
+
+    with pytest.raises(
+        OptimizationVerificationError,
+        match="Candidate artifact binding ID.*does not match",
+    ):
+        verifier.verify(
+            artifact=artifact,
+            plan=plan,
+            baseline_evaluation=base_eval,
+            candidate_evaluation=cand_eval,
+            candidate_artifact_binding=bad_binding,
+        )
+
+
+def test_b14_verifier_rejects_candidate_artifact_hash_mismatch() -> None:
+    """[B14] Verify verifier rejects binding where candidate_artifact_hash does not match artifact.artifact_hash."""
+    verifier = DefaultOptimizationVerifier()
+    plan = _make_valid_optimization_plan()
+    artifact = _make_valid_artifact(plan)
+    base_eval = _make_valid_evaluation_result("exp-base")
+    cand_eval = _make_valid_evaluation_result("exp-cand")
+
+    bad_binding = OptimizedArtifactEvaluationBinding(
+        candidate_artifact_id=artifact.artifact_id,
+        candidate_artifact_hash=ContentHash("sha256:" + "9" * 64),
+        evaluation_id=cand_eval.evaluation_id,
+    )
+
+    with pytest.raises(
+        OptimizationVerificationError,
+        match="Candidate artifact binding hash.*does not match",
+    ):
+        verifier.verify(
+            artifact=artifact,
+            plan=plan,
+            baseline_evaluation=base_eval,
+            candidate_evaluation=cand_eval,
+            candidate_artifact_binding=bad_binding,
+        )
+
+
+def test_b14_verifier_rejects_candidate_evaluation_id_mismatch() -> None:
+    """[B14] Verify verifier rejects binding where evaluation_id does not match candidate_evaluation.evaluation_id."""
+    verifier = DefaultOptimizationVerifier()
+    plan = _make_valid_optimization_plan()
+    artifact = _make_valid_artifact(plan)
+    base_eval = _make_valid_evaluation_result("exp-base")
+    cand_eval = _make_valid_evaluation_result("exp-cand")
+
+    bad_binding = OptimizedArtifactEvaluationBinding(
+        candidate_artifact_id=artifact.artifact_id,
+        candidate_artifact_hash=artifact.artifact_hash,
+        evaluation_id=EvaluationId("eval-exp-other"),
+    )
+
+    with pytest.raises(
+        OptimizationVerificationError,
+        match="does not match candidate evaluation",
+    ):
+        verifier.verify(
+            artifact=artifact,
+            plan=plan,
+            baseline_evaluation=base_eval,
+            candidate_evaluation=cand_eval,
+            candidate_artifact_binding=bad_binding,
+        )
+
+
+def test_b14_verifier_accepts_valid_candidate_binding_and_retains_adr0011_types() -> (
+    None
+):
+    """[B14] Verify verifier accepts valid binding, preserving ADR-0011 ModelArtifactReference as pure CheckpointId."""
+    verifier = DefaultOptimizationVerifier()
+    plan = _make_valid_optimization_plan()
+    artifact = _make_valid_artifact(plan)
+    base_eval = _make_valid_evaluation_result("exp-base")
+    cand_eval = _make_valid_evaluation_result("exp-cand")
+
+    # ADR-0011 ModelArtifactReference has source checkpoint ID, NOT an OptimizedArtifactId
+    assert cand_eval.plan.model_artifact.checkpoint_id == plan.source_checkpoint_id
+    assert isinstance(cand_eval.plan.model_artifact.checkpoint_id, str)
+
+    binding = _make_valid_candidate_binding(artifact, cand_eval.evaluation_id)
+
+    res = verifier.verify(
+        artifact=artifact,
+        plan=plan,
+        baseline_evaluation=base_eval,
+        candidate_evaluation=cand_eval,
+        candidate_artifact_binding=binding,
+    )
+
+    assert res.verification_passed is True
+    assert res.candidate_artifact_binding == binding
+    assert res.candidate_artifact_binding.candidate_artifact_id == artifact.artifact_id
+    assert (
+        res.candidate_artifact_binding.candidate_artifact_hash == artifact.artifact_hash
+    )

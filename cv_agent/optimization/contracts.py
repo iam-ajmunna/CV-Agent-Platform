@@ -16,6 +16,7 @@ from cv_agent.evaluation.contracts import (
     EvaluationDatasetBinding,
     EvaluationResult,
 )
+from cv_agent.evaluation.types import EvaluationId
 from cv_agent.optimization.errors import (
     CalibrationLeakageError,
     DeploymentValidationError,
@@ -223,6 +224,24 @@ class OptimizedModelArtifact(BaseModel):
         return self
 
 
+class OptimizedArtifactEvaluationBinding(BaseModel):
+    """Explicit Phase 2M binding between an optimized model artifact and candidate evaluation."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid", arbitrary_types_allowed=True)
+
+    candidate_artifact_id: OptimizedArtifactId
+    candidate_artifact_hash: ContentHash
+    evaluation_id: EvaluationId | None = None
+
+    @model_validator(mode="after")
+    def _validate_non_empty(self) -> OptimizedArtifactEvaluationBinding:
+        if not str(self.candidate_artifact_id).strip():
+            raise ValueError("candidate_artifact_id cannot be empty")
+        if not str(self.candidate_artifact_hash).strip():
+            raise ValueError("candidate_artifact_hash cannot be empty")
+        return self
+
+
 class OptimizationResult(BaseModel):
     """Outcome of model optimization including empirical verification against baseline."""
 
@@ -237,6 +256,7 @@ class OptimizationResult(BaseModel):
     memory_reduction_ratio: float = Field(ge=0.0)
     verification_passed: bool
     diagnostics: str
+    candidate_artifact_binding: OptimizedArtifactEvaluationBinding | None = None
 
     @model_validator(mode="after")
     def _validate_metrics(self) -> OptimizationResult:

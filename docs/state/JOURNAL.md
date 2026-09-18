@@ -1763,3 +1763,39 @@ Remediated all three architectural blockers identified in the Official PM's seco
 **Learned:** In contract boundaries, defensive fail-closed architecture requires that every field produced by remote execution tools be strictly validated against authoritative upstream manifests and runtime telemetry. Type aliasing alone without attached Pydantic validators leaves runtime deserialization open to malformed inputs.
 
 **Left open:** Push commit to PR #63, verify GitHub Actions CI matrix, and request Official PM re-review for merge approval.
+
+---
+
+## 2026-09-18 — Phase 2M PM Adversarial Re-Review Blockers Remediation (B11–B14, PR #63)
+
+**Did:** Fully remediated the four architecture-boundary blockers identified in Official PM Re-Review #5239513557 on PR #63:
+1. **B11 (Async Execution Semantics):**
+   - Updated `ModelOptimizer.compile()` to return `OptimizedModelArtifact | ActiveJobHandoff`.
+   - In `DefaultModelOptimizer.compile()`, when `ToolResult.active_job_ref` is present (ADR-0005 accepted asynchronous dispatch), immediately returned the `ActiveJobHandoff` token to ADR-0003 orchestration without constructing premature artifact metadata.
+2. **B12 (Mandatory Empirical OptimizationResult on Staging):**
+   - Updated `DeploymentManager.stage()` signature across protocol and implementation to make `optimization_result: OptimizationResult` mandatory (no default).
+   - Enforced fail-closed checks validating that `optimization_result` is present, `verification_passed == True`, and `optimization_result.artifact.artifact_id == plan.artifact_id` before any ADR-0005 dispatch.
+3. **B13 (Target-Scoped Operational Lockout Index):**
+   - Implemented process-local operational safety index `self._safety_index: dict[DeploymentId, DeploymentRecord]` in `DefaultDeploymentManager` (decoupled from durable authoritative state belonging to ADR-0003/0004).
+   - In `_check_target_lockout()`, strictly scoped the `OPERATOR_REQUIRED` lockout to the affected `target_id`, allowing staging and activation on unaffected target environments without obstruction.
+   - Ensured `OPERATOR_REQUIRED` escalation on null-predecessor rollback updates `self._safety_index` and enforces target lockout even when `active_deployments=None`.
+4. **B14 (Explicit Optimized-Artifact Evaluation Binding):**
+   - Preserved ADR-0011 `ModelArtifactReference` as pure `CheckpointId` and `ContentHash` without identity smuggling.
+   - Introduced frozen `OptimizedArtifactEvaluationBinding(candidate_artifact_id, candidate_artifact_hash, evaluation_id)` at the Phase 2M verifier boundary.
+   - In `DefaultOptimizationVerifier.verify()`, required mandatory `candidate_artifact_binding` and enforced:
+     - `candidate_artifact_binding.candidate_artifact_id == artifact.artifact_id`
+     - `candidate_artifact_binding.candidate_artifact_hash == artifact.artifact_hash`
+     - `candidate_artifact_binding.evaluation_id == candidate_evaluation.evaluation_id`
+     - Retained independent ADR-0011 model lineage checks on `plan.source_checkpoint_id` and `plan.source_weights_hash`.
+5. **Dedicated Adversarial Regression Tests:**
+   - Added 12 new blocker-specific boundary tests in `tests/test_optimization_boundary.py` (expanding boundary suite from 68 to 80 tests, all passing).
+   - Full repository test suite: 588/588 passing across 22 test files.
+   - Ruff check clean, Ruff format check clean, Mypy clean across 112 source files, git diff --check clean.
+
+**Why:** `[P§8]`, `[P§14]`, `[P§15]`, `[P§19]`, `[P§21]`, `[P§22]`, `[P§24]`, `[P§29.4]`, `[P§34]`, ADR-0003, ADR-0005, ADR-0011, and ADR-0012. Prevents layer leakage, enforces contract purity across subsystem boundaries, guarantees empirical verification before deployment staging, and prevents cross-target operational lockouts.
+
+**Broke:** Nothing broken. Updated boundary tests to supply mandatory `optimization_result` to `stage()` and `candidate_artifact_binding` to `verify()`. All 588 tests passing.
+
+**Learned:** When cross-referencing evaluation results against specialized artifacts (e.g. optimized compilation engines vs training checkpoints), keep upstream core contracts (ADR-0011) unchanged and introduce an explicit binding contract at the verifier boundary rather than repurposing or subverting existing identifier fields.
+
+**Left open:** Push commit to PR #63, monitor GitHub Actions CI matrix, and submit resolution report to Official PM for final merge approval.
