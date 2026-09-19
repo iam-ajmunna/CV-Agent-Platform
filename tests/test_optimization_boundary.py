@@ -16,7 +16,7 @@ Exercises all 12 architectural invariants and review requirements:
 from __future__ import annotations
 
 import ast
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, cast
 
@@ -450,6 +450,7 @@ def _make_approval_context(
     bound_payload_hash: str | None = None,
     bound_resource_scope: str | None = None,
     bound_policy_version: str | None = None,
+    expires_at: datetime | None = None,
 ) -> tuple[OperationIdentity, ApprovalRequest, ApprovalDecision]:
     extract_deployment_operation_payload(plan)
     canonical_hash = compute_deployment_payload_hash(plan)
@@ -474,6 +475,7 @@ def _make_approval_context(
         risk_level="HIGH",
         resource_scope=scope,
         created_at=datetime.now(timezone.utc),
+        expires_at=expires_at,
     )
 
     app_dec = ApprovalDecision(
@@ -3494,4 +3496,123 @@ def test_b17_rollback_propagates_external_approval_authorized() -> None:
     assert restored is not None and restored.status == DeploymentStatus.ACTIVE
     assert len(executor.invocations) == 1
     # Crucial B17 invariant: propagated caller authorization
+    assert executor.invocations[0].approval_authorized is True
+
+
+# =============================================================================
+# B18: Incomplete ADR-0003 approval binding remediation (hash cross-check & expiry)
+# =============================================================================
+def test_b18a_activate_rejects_approval_request_payload_hash_mismatch() -> None:
+    """[B18a] Verify activate rejects ApprovalRequest whose canonical_payload_hash does not match plan."""
+    manager = DefaultDeploymentManager()
+    plan = _make_valid_deployment_plan()
+    probe_ok = ReadinessProbeResult(
+        passed=True,
+        startup_time_sec=1.0,
+        probe_latency_mean_ms=10.0,
+        vram_consumed_mb=1024.0,
+        probed_at=datetime.now(timezone.utc),
+    )
+    record = DeploymentRecord(
+        deployment_id=plan.deployment_id,
+        plan=plan,
+        status=DeploymentStatus.VERIFYING,
+        readiness_result=probe_ok,
+    )
+    op_id, app_req, app_dec = _make_approval_context(plan)
+
+    # Tamper with ApprovalRequest canonical_payload_hash
+    tampered_app_req = app_req.model_copy(
+        update={
+            "canonical_payload_hash": "sha256:tampered_req_hash_0000000000000000000000000000000000000000000000"
+        }
+    )
+
+    with pytest.raises(
+        DeploymentApprovalRequiredError,
+        match="Canonical payload hash mismatch: ApprovalRequest has",
+    ):
+        manager.activate(
+            record=record,
+            operation_identity=op_id,
+            approval_request=tampered_app_req,
+            approval_decision=app_dec,
+            tool_id=ToolId("cv.deploy.activate"),
+            tool_executor=_MockToolExecutor(),
+            target_id=plan.target.target_id,
+        )
+
+
+def test_b18b_activate_rejects_expired_approval_request() -> None:
+    """[B18b] Verify activate rejects an otherwise-APPROVED request whose expires_at has passed."""
+    manager = DefaultDeploymentManager()
+    plan = _make_valid_deployment_plan()
+    probe_ok = ReadinessProbeResult(
+        passed=True,
+        startup_time_sec=1.0,
+        probe_latency_mean_ms=10.0,
+        vram_consumed_mb=1024.0,
+        probed_at=datetime.now(timezone.utc),
+    )
+    record = DeploymentRecord(
+        deployment_id=plan.deployment_id,
+        plan=plan,
+        status=DeploymentStatus.VERIFYING,
+        readiness_result=probe_ok,
+    )
+
+    # Approval request expired 60 seconds ago
+    expired_time = datetime.now(timezone.utc) - timedelta(seconds=60)
+    op_id, app_req, app_dec = _make_approval_context(plan, expires_at=expired_time)
+
+    with pytest.raises(
+        DeploymentApprovalRequiredError,
+        match="expired at.*Expired approvals fail closed per ADR-0003 §3.8",
+    ):
+        manager.activate(
+            record=record,
+            operation_identity=op_id,
+            approval_request=app_req,
+            approval_decision=app_dec,
+            tool_id=ToolId("cv.deploy.activate"),
+            tool_executor=_MockToolExecutor(),
+            target_id=plan.target.target_id,
+        )
+
+
+def test_b18b_activate_accepts_unexpired_approval_request() -> None:
+    """[B18b] Verify activate succeeds when expires_at is valid and in the future."""
+    manager = DefaultDeploymentManager()
+    plan = _make_valid_deployment_plan()
+    probe_ok = ReadinessProbeResult(
+        passed=True,
+        startup_time_sec=1.0,
+        probe_latency_mean_ms=10.0,
+        vram_consumed_mb=1024.0,
+        probed_at=datetime.now(timezone.utc),
+    )
+    record = DeploymentRecord(
+        deployment_id=plan.deployment_id,
+        plan=plan,
+        status=DeploymentStatus.VERIFYING,
+        readiness_result=probe_ok,
+    )
+
+    # Approval request valid for next 1 hour
+    future_time = datetime.now(timezone.utc) + timedelta(hours=1)
+    op_id, app_req, app_dec = _make_approval_context(plan, expires_at=future_time)
+    executor = _MockToolExecutor()
+
+    active_record = manager.activate(
+        record=record,
+        operation_identity=op_id,
+        approval_request=app_req,
+        approval_decision=app_dec,
+        tool_id=ToolId("cv.deploy.activate"),
+        tool_executor=executor,
+        target_id=plan.target.target_id,
+    )
+
+    assert active_record.status == DeploymentStatus.ACTIVE
+    assert len(executor.invocations) == 1
     assert executor.invocations[0].approval_authorized is True

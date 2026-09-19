@@ -558,12 +558,37 @@ class DefaultDeploymentManager:
                 f"Deployment activation rejected: approval status is {approval_decision.decision!r}"
             )
 
-        # 5g. Canonical payload hash matches across operation identity, approval decision, and plan
+        # 5g. Approval expiration check (B18b: ADR-0003 §3.8)
+        if approval_request.expires_at is not None:
+            now_utc = datetime.now(timezone.utc)
+            exp = approval_request.expires_at
+            if exp.tzinfo is None:
+                exp = exp.replace(tzinfo=timezone.utc)
+            if exp < now_utc:
+                raise DeploymentApprovalRequiredError(
+                    f"Approval request {approval_request.request_id!r} expired at {exp.isoformat()}. "
+                    "Expired approvals fail closed per ADR-0003 §3.8."
+                )
+
+        # 5h. Canonical payload hash matches across operation identity, approval request, approval decision, and plan (B18a: ADR-0003 §3.8)
         computed_hash = compute_deployment_payload_hash(record.plan)
         if operation_identity.canonical_payload_hash != computed_hash:
             raise DeploymentApprovalRequiredError(
                 f"Canonical payload hash mismatch: OperationIdentity has {operation_identity.canonical_payload_hash!r}, "
                 f"but DeploymentPlan computes to {computed_hash!r}"
+            )
+        if approval_request.canonical_payload_hash != computed_hash:
+            raise DeploymentApprovalRequiredError(
+                f"Canonical payload hash mismatch: ApprovalRequest has {approval_request.canonical_payload_hash!r}, "
+                f"but DeploymentPlan computes to {computed_hash!r}"
+            )
+        if (
+            operation_identity.canonical_payload_hash
+            != approval_request.canonical_payload_hash
+        ):
+            raise DeploymentApprovalRequiredError(
+                f"ApprovalRequest payload hash mismatch: expected {operation_identity.canonical_payload_hash!r}, "
+                f"got {approval_request.canonical_payload_hash!r}"
             )
         if approval_decision.bound_payload_hash != computed_hash:
             raise DeploymentApprovalRequiredError(

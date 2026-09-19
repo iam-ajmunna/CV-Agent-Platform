@@ -1842,3 +1842,30 @@ Remediated all three architectural blockers identified in the Official PM's seco
 **Learned:** Subsystem boundaries must never normalize distinct contract types into loose equivalence classes or manufacture authorization flags locally; contract authority requires validating exact representations at the boundary and transparently forwarding external authorization contexts.
 
 **Left open:** Push commit to PR #63, monitor GitHub Actions CI matrix, and submit resolution report to Official PM for final merge approval.
+
+---
+
+## 2026-09-19 — Phase 2M PM Adversarial Re-Review Blocker Remediation (B18, PR #63)
+
+**Did:** Remediated authority-boundary blocker B18 identified in Official PM Re-Review on PR #63:
+1. **B18a (ApprovalRequest Canonical Payload Hash Enforcement):**
+   - In `DefaultDeploymentManager.activate()`, enforced that `approval_request.canonical_payload_hash` matches `computed_hash` of the deployment plan and matches `operation_identity.canonical_payload_hash`.
+   - Closes the vulnerability where an approval request could be accepted without verifying its payload binding against the authoritative deployment plan per ADR-0003 §3.8.
+2. **B18b (Approval Expiration Enforcement):**
+   - In `DefaultDeploymentManager.activate()`, enforced that `approval_request.expires_at` is evaluated against current UTC time.
+   - If `approval_request.expires_at` has passed, raises `DeploymentApprovalRequiredError` fail-closed per ADR-0003 §3.8.
+3. **Dedicated Adversarial Regression Tests:**
+   - Added 3 new regression tests in `tests/test_optimization_boundary.py` (expanding boundary suite from 90 to 93 tests, all passing):
+     - `test_b18a_activate_rejects_approval_request_payload_hash_mismatch`: Proves tampered `ApprovalRequest.canonical_payload_hash` is rejected fail-closed.
+     - `test_b18b_activate_rejects_expired_approval_request`: Proves expired `ApprovalRequest` is rejected fail-closed even when status is `APPROVED`.
+     - `test_b18b_activate_accepts_unexpired_approval_request`: Proves valid unexpired approval request activates successfully.
+   - Full repository test suite: 601/601 passing across 22 test files.
+   - Quality gates: Ruff check clean, Ruff format clean, Mypy clean across 112 source files, git diff --check clean.
+
+**Why:** `[P§8]`, `[P§14]`, `[P§15]`, `[P§21]`, `[P§22]`, `[P§24]`, `[P§29.4]`, `[P§34]`, and ADR-0003 §3.8. Guarantees that approval requests are cryptographically bound to the plan payload and that temporal expiration boundaries cannot be bypassed.
+
+**Broke:** Nothing broken. Updated test approval helper to accept optional `expires_at`. All 601 repository tests passing.
+
+**Learned:** In approval systems, validating the approval decision is insufficient without also validating the request itself; both the intent payload hash and temporal validity must be verified across both request and decision contracts.
+
+**Left open:** Push commit to PR #63, monitor GitHub Actions CI matrix, and submit resolution report to Official PM for final merge approval.
