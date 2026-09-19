@@ -1,0 +1,111 @@
+"""cv_agent.optimization — Optimization and Deployment Subsystem for ADR-0012."""
+
+from __future__ import annotations
+
+from cv_agent.optimization.canonicalization import (
+    compute_artifact_lineage_hash,
+    compute_deployment_payload_hash,
+    compute_optimization_payload_hash,
+    extract_deployment_operation_payload,
+    extract_optimization_operation_payload,
+)
+from cv_agent.optimization.contracts import (
+    VALID_DEPLOYMENT_TRANSITIONS,
+    CalibrationDatasetBinding,
+    DeploymentPlan,
+    DeploymentRecord,
+    DeploymentTarget,
+    DynamicShapeProfile,
+    HealthCheckSpec,
+    OptimizationPlan,
+    OptimizationResult,
+    OptimizedArtifactEvaluationBinding,
+    OptimizedModelArtifact,
+    ReadinessProbeResult,
+    validate_deployment_transition,
+)
+from cv_agent.optimization.deployment import (
+    DefaultDeploymentManager,
+    DeploymentManager,
+)
+from cv_agent.optimization.errors import (
+    CalibrationLeakageError,
+    DeploymentApprovalRequiredError,
+    DeploymentValidationError,
+    HardwareMismatchError,
+    OptimizationError,
+    OptimizationExecutionError,
+    OptimizationValidationError,
+    OptimizationVerificationError,
+    ReadinessProbeFailureError,
+    RollbackExecutionError,
+)
+from cv_agent.optimization.optimizer import (
+    DefaultModelOptimizer,
+    ModelOptimizer,
+)
+from cv_agent.optimization.types import (
+    CalibrationAlgorithm,
+    DeploymentId,
+    DeploymentRuntime,
+    DeploymentStatus,
+    OptimizationPlanId,
+    OptimizationPrecision,
+    OptimizationTechnique,
+    OptimizedArtifactId,
+    validate_deployment_id,
+    validate_optimization_plan_id,
+    validate_optimized_artifact_id,
+)
+from cv_agent.optimization.verifier import (
+    DefaultOptimizationVerifier,
+    OptimizationVerifier,
+)
+
+__all__ = [
+    "VALID_DEPLOYMENT_TRANSITIONS",
+    "CalibrationAlgorithm",
+    "CalibrationDatasetBinding",
+    "CalibrationLeakageError",
+    "DefaultDeploymentManager",
+    "DefaultModelOptimizer",
+    "DefaultOptimizationVerifier",
+    "DeploymentApprovalRequiredError",
+    "DeploymentId",
+    "DeploymentManager",
+    "DeploymentPlan",
+    "DeploymentRecord",
+    "DeploymentRuntime",
+    "DeploymentStatus",
+    "DeploymentTarget",
+    "DeploymentValidationError",
+    "DynamicShapeProfile",
+    "HardwareMismatchError",
+    "HealthCheckSpec",
+    "ModelOptimizer",
+    "OptimizationError",
+    "OptimizationExecutionError",
+    "OptimizationPlan",
+    "OptimizationPlanId",
+    "OptimizationPrecision",
+    "OptimizationResult",
+    "OptimizationTechnique",
+    "OptimizationValidationError",
+    "OptimizationVerificationError",
+    "OptimizationVerifier",
+    "OptimizedArtifactEvaluationBinding",
+    "OptimizedArtifactId",
+    "OptimizedModelArtifact",
+    "ReadinessProbeFailureError",
+    "ReadinessProbeResult",
+    "RollbackExecutionError",
+    "compute_artifact_lineage_hash",
+    "compute_deployment_payload_hash",
+    "compute_optimization_payload_hash",
+    "extract_deployment_operation_payload",
+    "extract_optimization_operation_payload",
+    "validate_deployment_id",
+    "validate_deployment_transition",
+    "validate_optimization_plan_id",
+    "validate_optimized_artifact_id",
+]

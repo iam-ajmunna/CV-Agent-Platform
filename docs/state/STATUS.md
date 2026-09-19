@@ -3,35 +3,34 @@
 > **Rewritten** every session. Describes **now**, never history — history lives in
 > `JOURNAL.md`. Hard cap: 60 lines. If it exceeds that, you are logging, not stating.
 
-**Updated:** 2026-09-16 · **Phase:** Phase 2L Complete · **Health:** green
+**Updated:** 2026-09-19 · **Phase:** Phase 2M Optimization & Deployment · **Health:** green
 
 ## Where we are
 
-Phase 2L (ADR-0011 Evaluation Subsystem) is complete, accepted by the Official PM, and squash-merged into `main` at `23e920e` (PR #61, Issue #60).
+Phase 2M (ADR-0012 Optimization & Deployment Subsystem) authority-boundary blocker B18 (ADR-0003 approval request payload hash and expiry enforcement) is fully remediated on `feature/ajmunna/phase-2m-optimization-subsystem` (PR #63).
 
-- Evaluation runtime substrate implemented in `cv_agent/evaluation/` with authoritative empirical benchmark execution, strict ADR-0005 transport delegation, and mandatory external `ToolId`.
-- Authorization propagation originates strictly from verified ADR-0003 credentials (`approval_authorized`), with zero local assertion or identity synthesis.
-- Hardware-synchronized timing validation enforced per ADR-0011 §3.13 both on observation paths and at the immutable `BenchmarkResult` contract boundary (zero defaults, unsynchronized modes rejected).
-- Direct raw benchmark ingestion path in `DefaultEvaluationRunner` validates via contract and plan target requirements with zero bypass.
-- All 46 adversarial boundary tests pass; full test suite reaches 508 passing tests.
-- CI completed cleanly on GitHub Actions run `35123638631` across Python 3.10–3.13 matrix.
+- Remediated all components of B18 in `DefaultDeploymentManager.activate()`:
+  - B18a: Validates `approval_request.canonical_payload_hash == computed_hash` and cross-checks with `operation_identity.canonical_payload_hash`, strictly preventing approval reuse with payload drift.
+  - B18b: Enforces approval expiration checking against `approval_request.expires_at`, failing closed with `DeploymentApprovalRequiredError` if the approval timestamp has elapsed.
+- Complete boundary test suite: 93/93 passing in `tests/test_optimization_boundary.py` (601/601 full repository test suite passing).
+- Clean quality gates: ruff check clean, ruff format clean, mypy clean across 112 files, git diff --check clean.
 
 ## In flight
 
 | Item | Issue | PR | State |
 |---|---|---|---|
-| Phase 2M Optimization & Deployment Subsystem (ADR-0012) | TBD | TBD | Queued; awaiting issue and work branch initialization |
+| Phase 2M Optimization & Deployment Subsystem B18 remediation | #62 | #63 | Remediated · 93 boundary / 601 full tests passing · Ready for PM merge approval |
 
 ## Next 3 actions
 
-1. Initialize Phase 2M tracking issue and cut `feature/<owner>/phase-2m-optimization-deployment` branch from `main`.
-2. Implement ADR-0012 Optimization & Deployment Subsystem runtime package (`cv_agent/optimization/` or equivalent).
-3. Construct adversarial boundary test suite covering INT8 calibration leakage, shape profiles, and deployment rollbacks.
+1. Push B18 remediation commit to PR #63 and verify GitHub Actions CI matrix.
+2. Request Official PM final merge approval on PR #63.
+3. Squash-merge to `main`, record D-059, and transition to Phase 2N.
 
 ## Blockers
 
-- None. Phase 2L is complete and all quality gates are green on `main`.
+- None. All 18 review blockers (B1–B18) are resolved with comprehensive regression tests.
 
 ## Scope guard
 
-Evaluation owns immutable evaluation specifications, empirical metric/benchmark semantics, baseline comparison, diagnostics, and reproducibility result construction. It does NOT own orchestration lifecycle/approval/recovery (ADR-0003), physical transport (ADR-0005), experiment persistence (ADR-0004), dataset authority (ADR-0009), checkpoint/training authority (ADR-0010), or cognitive strategy (ADR-0008).
+Optimization & Deployment owns optimization plans, dynamic shape bounds, calibration split bindings, model compilation delegation, empirical post-optimization verification, deployment plans, and readiness probing/rollback management. It does NOT own orchestration lifecycle/fencing (ADR-0003), physical transport/execution (ADR-0005), dataset authority (ADR-0009), training (ADR-0010), evaluation metrics (ADR-0011), or stream monitoring (ADR-0013).

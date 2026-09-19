@@ -1702,3 +1702,170 @@ Remediated all three architectural blockers identified in the Official PM's seco
 **Learned:** Data contracts for empirical hardware metrics must enforce safety invariants at their own schema and model validation boundary, not merely in operational helper functions. Making fields mandatory with no defaults ensures fail-closed behavior across all ingestion and deserialization vectors.
 
 **Left open:** Push commit to PR #61, verify CI matrix across Python 3.10–3.13, and await Official PM final merge approval.
+
+---
+
+## 2026-09-17 — Phase 2M Optimization & Deployment Subsystem Runtime Implementation (Issue #62)
+
+**Did:** Implemented the Phase 2M Optimization & Deployment Subsystem runtime package (`cv_agent/optimization/`) and comprehensive adversarial test suite (`tests/test_optimization_boundary.py`) adhering to ADR-0012:
+1. **Identifier and Domain Vocabulary (`types.py`):**
+   - Canonical `OptimizationPlanId`, `OptimizedArtifactId`, and `DeploymentId` conforming to `^[a-z0-9_.-]+(/[a-z0-9_.-]+)*$`.
+   - Enumerations: `OptimizationTechnique`, `OptimizationPrecision`, `CalibrationAlgorithm`, `DeploymentRuntime`, `DeploymentStatus` (`STAGING`, `VERIFYING`, `ACTIVE`, `SUPERSEDED`, `ROLLED_BACK`, `OPERATOR_REQUIRED`).
+2. **Immutable Contracts (`contracts.py`):**
+   - `DynamicShapeProfile`: Enforces strict monotonic ordering `min_shape <= opt_shape <= max_shape` and non-empty tensor naming.
+   - `CalibrationDatasetBinding`: Validates non-negative sample count, supported calibration algorithms, and blocks evaluation/test splits (`"test"`, `"evaluation"`, `"eval"`, `"val_test"`) per ADR-0009 Invariant 13.
+   - `OptimizationPlan`: Enforces frozen validation, hardware platform/compute capability consistency, mandatory `CalibrationDatasetBinding` for PTQ/INT8, and finite `max_accuracy_drop_tolerance`.
+   - `OptimizedModelArtifact`: Captures compiled hardware-locked artifact metadata, target compute capability, artifact SHA-256 hash, and lineage hash.
+   - `OptimizationResult`: Couples optimization plan, artifact, ADR-0011 evaluation result, baseline comparison, accuracy retention, and systems speedup metrics.
+   - `DeploymentPlan`, `DeploymentTarget`, `HealthCheckSpec`, `ReadinessProbeResult`, `DeploymentRecord`: Models deployment configuration, target memory allocations, automated health check thresholds, readiness probe outcomes, and deployment lifecycle records.
+3. **Deterministic Canonicalization (`canonicalization.py`):**
+   - Pure functional payload extraction for optimization and deployment plans.
+   - Deterministic SHA-256 payload hashing via IEEE-754 normalized JSON serialization.
+   - Lineage DAG hash derivation combining parent checkpoint weights hash and optimization plan parameters.
+4. **Subsystem Engines (`optimizer.py`, `verifier.py`, `deployment.py`):**
+   - `ModelOptimizer` (`DefaultModelOptimizer`): Validates plan constraints, verifies checkpoint and calibration dataset manifest hashes, and dispatches compilation exclusively via ADR-0005 `ToolExecutor`.
+   - `OptimizationVerifier` (`DefaultOptimizationVerifier`): Validates artifact-to-plan linkage, evaluates primary accuracy retention, computes systems speedup via ADR-0011 `DefaultBaselineComparator`, and enforces the accuracy drop tolerance gate.
+   - `DeploymentManager` (`DefaultDeploymentManager`): Enforces staging preconditions, dispatches readiness probe tooling, verifies ADR-0003 4-tuple approval credentials (`OperationIdentity`, `ApprovalRequest`, `ApprovalDecision`) upon activation, and executes automated rollback with fail-closed escalation to `OPERATOR_REQUIRED` for initial deployments (null predecessor).
+5. **Adversarial Boundary Test Suite (`tests/test_optimization_boundary.py`):**
+   - Implemented 37 boundary tests covering dynamic shape profile monotonicity, calibration leakage isolation, tolerance gates, approval replay rejection, target scope conflicts, probe timeouts, latency/memory budgets, rollback escalation, AST zero-subprocess/shell audit, and AST zero-sqlite audit.
+   - 37/37 boundary tests passing; 545/545 full repository tests passing.
+   - Ruff check clean, Ruff format clean, Mypy clean (112 source files), git diff --check clean.
+
+**Why:** Fulfills ADR-0012 architecture specification and Issue #62 acceptance criteria, guaranteeing hardware-aware deployment readiness and optimization without creating competing execution or orchestration lifecycle state machines.
+
+**Broke:** Nothing broken. Conformed all test fixtures to ADR-0009 `DatasetManifest`, ADR-0010 `CheckpointManifest`, and ADR-0011 `EvaluationResult` schemas with zero regressions.
+
+**Learned:** Data contracts in downstream subsystems must strictly conform to existing domain schemas and validation rules (e.g. `n_items` equaling split hash count in `DatasetManifest`, mandatory `EvaluationPlan` on `EvaluationResult`). Designing mock executors to implement the full async `ToolExecutor` protocol prevents typechecker friction across subsystems.
+
+**Left open:** Pushing `feature/ajmunna/phase-2m-optimization-subsystem` to remote origin, opening PR referencing Issue #62, and presenting to Official PM for adversarial review.
+
+---
+
+## 2026-09-17 — Phase 2M PM Adversarial Review Blockers Remediation (B1–B10, PR #63)
+
+**Did:** Fully remediated all 10 substantive blockers identified in Official PM Review #5237441698 on PR #63:
+1. **B1 (ADR-0010 Checkpoint Lineage):** Made `checkpoint_manifest: CheckpointManifest` mandatory on `ModelOptimizer.compile()` and verified `source_checkpoint_id` matches `checkpoint_manifest.checkpoint_id`.
+2. **B2 (ADR-0009 Invariant 13 Calibration Split & Manifest):** Restricted `split_name` in `CalibrationDatasetBinding` to strictly `"calibration"`; made `dataset_manifest: DatasetManifest` mandatory for PTQ compile and verified calibration split exists, has non-zero records, and matches dataset ID and version.
+3. **B3 (Zero Synthetic Compilation Metadata):** Eliminated mock defaults in `DefaultModelOptimizer.compile()`; requires `ToolResult.structured_output` to contain authoritative `artifact_uri`, `artifact_size_bytes`, and `runtime_format`, failing closed with `ModelOptimizationError` if missing or malformed.
+4. **B4 (Zero Fabricated Telemetry):** Eliminated synthetic latency/memory telemetry fallbacks in `DeploymentManager.verify_readiness()`; requires authoritative probe telemetry in tool result, failing closed with `ReadinessProbeFailureError` on absent or non-numeric metrics.
+5. **B5 (Mandatory External Target Binding):** Made `target_id: TargetId` mandatory across `stage()`, `verify_readiness()`, `activate()`, and `rollback()`, enforcing that target ID matches `plan.target.target_id` and the staged record's target.
+6. **B6 (ADR-0003 4-Tuple Approval Validation):** Hardened approval validation to cross-check `operation_id == OperationId("deployment.activate")`, `operation_version == "1.0.0"`, `target_identity == TargetIdentity(target_id)`, and `request_id == approval_decision.request_id` within `activation_approval`.
+7. **B7 (Deployment Lifecycle State Machine):** Implemented strict `VALID_DEPLOYMENT_TRANSITIONS` and `validate_deployment_transition()`; introduced `DeploymentStatus.VERIFYING` between `STAGING` and `ACTIVE`; enforced atomic transition via `DeploymentRecord.with_transition()`.
+8. **B8 (ADR-0012 Invariant 8 Operator Lockout):** Stored `DeploymentRecord` in `DeploymentStatus.OPERATOR_REQUIRED` on null predecessor rollback; enforced that targets in `OPERATOR_REQUIRED` state fail closed and lock out subsequent `stage()` and `activate()` calls until operator intervention.
+9. **B9 (ADR-0012 Invariant 5 Verification Gate Hardening):** Added cross-checks verifying candidate artifact matches evaluation, verification dataset matches baseline evaluation dataset, hardware platform strings match, candidate evaluation verdict is `EvaluationVerdict.PASSED`, benchmarks have synchronized timing attestations, and primary metric selection is deterministic.
+10. **B10 (Pydantic Primitive Validation):** Replaced standalone unattached validation functions in `cv_agent/optimization/types.py` with Pydantic `Annotated[str, AfterValidator(validate_*)]` on `OptimizationPlanId`, `OptimizedArtifactId`, and `DeploymentId`.
+11. **Regression Boundary Tests:** Added 31 dedicated adversarial regression tests for B1–B10 (expanding boundary suite from 37 to 68 tests, all passing). Full repository test suite: 576/576 passing.
+
+**Why:** `[P§8]`, `[P§9]`, `[P§13]`, `[P§14]`, `[P§15]`, `[P§21]`, `[P§22]`, `[P§24]`, `[P§25]`, `[P§28]`, `[P§29.4]`, `[P§34]` — ensures zero fail-open authority at contract boundaries, strictly eliminates all synthetic or locally generated metadata, and locks down deployment lifecycle integrity.
+
+**Broke:** Nothing broken. Updated existing boundary tests to provide mandatory manifests, target IDs, and valid approval 4-tuples. 576/576 repository tests passing.
+
+**Learned:** In contract boundaries, defensive fail-closed architecture requires that every field produced by remote execution tools be strictly validated against authoritative upstream manifests and runtime telemetry. Type aliasing alone without attached Pydantic validators leaves runtime deserialization open to malformed inputs.
+
+**Left open:** Push commit to PR #63, verify GitHub Actions CI matrix, and request Official PM re-review for merge approval.
+
+---
+
+## 2026-09-18 — Phase 2M PM Adversarial Re-Review Blockers Remediation (B11–B14, PR #63)
+
+**Did:** Fully remediated the four architecture-boundary blockers identified in Official PM Re-Review #5239513557 on PR #63:
+1. **B11 (Async Execution Semantics):**
+   - Updated `ModelOptimizer.compile()` to return `OptimizedModelArtifact | ActiveJobHandoff`.
+   - In `DefaultModelOptimizer.compile()`, when `ToolResult.active_job_ref` is present (ADR-0005 accepted asynchronous dispatch), immediately returned the `ActiveJobHandoff` token to ADR-0003 orchestration without constructing premature artifact metadata.
+2. **B12 (Mandatory Empirical OptimizationResult on Staging):**
+   - Updated `DeploymentManager.stage()` signature across protocol and implementation to make `optimization_result: OptimizationResult` mandatory (no default).
+   - Enforced fail-closed checks validating that `optimization_result` is present, `verification_passed == True`, and `optimization_result.artifact.artifact_id == plan.artifact_id` before any ADR-0005 dispatch.
+3. **B13 (Target-Scoped Operational Lockout Index):**
+   - Implemented process-local operational safety index `self._safety_index: dict[DeploymentId, DeploymentRecord]` in `DefaultDeploymentManager` (decoupled from durable authoritative state belonging to ADR-0003/0004).
+   - In `_check_target_lockout()`, strictly scoped the `OPERATOR_REQUIRED` lockout to the affected `target_id`, allowing staging and activation on unaffected target environments without obstruction.
+   - Ensured `OPERATOR_REQUIRED` escalation on null-predecessor rollback updates `self._safety_index` and enforces target lockout even when `active_deployments=None`.
+4. **B14 (Explicit Optimized-Artifact Evaluation Binding):**
+   - Preserved ADR-0011 `ModelArtifactReference` as pure `CheckpointId` and `ContentHash` without identity smuggling.
+   - Introduced frozen `OptimizedArtifactEvaluationBinding(candidate_artifact_id, candidate_artifact_hash, evaluation_id)` at the Phase 2M verifier boundary.
+   - In `DefaultOptimizationVerifier.verify()`, required mandatory `candidate_artifact_binding` and enforced:
+     - `candidate_artifact_binding.candidate_artifact_id == artifact.artifact_id`
+     - `candidate_artifact_binding.candidate_artifact_hash == artifact.artifact_hash`
+     - `candidate_artifact_binding.evaluation_id == candidate_evaluation.evaluation_id`
+     - Retained independent ADR-0011 model lineage checks on `plan.source_checkpoint_id` and `plan.source_weights_hash`.
+5. **Dedicated Adversarial Regression Tests:**
+   - Added 12 new blocker-specific boundary tests in `tests/test_optimization_boundary.py` (expanding boundary suite from 68 to 80 tests, all passing).
+   - Full repository test suite: 588/588 passing across 22 test files.
+   - Ruff check clean, Ruff format check clean, Mypy clean across 112 source files, git diff --check clean.
+
+**Why:** `[P§8]`, `[P§14]`, `[P§15]`, `[P§19]`, `[P§21]`, `[P§22]`, `[P§24]`, `[P§29.4]`, `[P§34]`, ADR-0003, ADR-0005, ADR-0011, and ADR-0012. Prevents layer leakage, enforces contract purity across subsystem boundaries, guarantees empirical verification before deployment staging, and prevents cross-target operational lockouts.
+
+**Broke:** Nothing broken. Updated boundary tests to supply mandatory `optimization_result` to `stage()` and `candidate_artifact_binding` to `verify()`. All 588 tests passing.
+
+**Learned:** When cross-referencing evaluation results against specialized artifacts (e.g. optimized compilation engines vs training checkpoints), keep upstream core contracts (ADR-0011) unchanged and introduce an explicit binding contract at the verifier boundary rather than repurposing or subverting existing identifier fields.
+
+**Left open:** Push commit to PR #63, monitor GitHub Actions CI matrix, and submit resolution report to Official PM for final merge approval.
+
+---
+
+## 2026-09-19 — Phase 2M PM Adversarial Re-Review Blockers Remediation (B15–B17, PR #63)
+
+**Did:** Remediated the final three authority-boundary blockers identified in Official PM Re-Review #5247879098 on PR #63:
+1. **B15 (Canonical Operation Identity and Version Invariant):**
+   - In `DefaultDeploymentManager.activate()`, enforced exact authoritative operation identity and version matching against canonical contract types:
+     - `operation_identity.operation_id == "deployment.activate"`
+     - `operation_identity.operation_version == "1.0.0"` (`str`)
+     - `approval_request.operation_id == "deployment.activate"`
+     - `approval_request.operation_version == 1` (`int`)
+     - Cross-representation check: `approval_request.operation_version == int(operation_identity.operation_version.split('.')[0])`
+     - Eliminated arbitrary equivalence classes (e.g. generic `"1"` vs `"1.0.0"` strings).
+2. **B16 (Mandatory Candidate-Artifact Binding in OptimizationResult and Staging Revalidation):**
+   - In `cv_agent/optimization/contracts.py`, made `candidate_artifact_binding: OptimizedArtifactEvaluationBinding` mandatory on `OptimizationResult` (removed `| None = None` default).
+   - In `DefaultDeploymentManager.stage()`, enforced strict revalidation asserting that `candidate_artifact_binding` is present, `candidate_artifact_id == plan.artifact_id == artifact.artifact_id`, `candidate_artifact_hash == artifact.artifact_hash`, and `evaluation_id == evaluation_result.evaluation_id`.
+3. **B17 (Rollback Authorization Propagation Without Local Manufacture):**
+   - Updated `DeploymentManager.rollback()` signature in both protocol and implementation to accept caller-provided `*, approval_authorized: bool = False`.
+   - Propagated `approval_authorized` directly to `ToolInvocation(..., approval_authorized=approval_authorized)` during rollback dispatch.
+   - Guaranteed that automated rollback defaults to `approval_authorized=False` without manufacturing authorization locally.
+4. **Dedicated Adversarial Regression Tests:**
+   - Added 10 new blocker-specific boundary tests in `tests/test_optimization_boundary.py` (expanding boundary suite from 80 to 90 tests, all passing):
+     - `test_b15_activate_rejects_unauthorized_operation_id`
+     - `test_b15_activate_rejects_unauthorized_operation_identity_version` (independently verifying semantic mismatch and generic `"1"` rejection)
+     - `test_b15_activate_rejects_unauthorized_approval_request_version` (independently verifying integer mismatch)
+     - `test_b15_activate_accepts_authoritative_operation_identity`
+     - `test_b16_stage_rejects_optimization_result_with_candidate_artifact_id_mismatch`
+     - `test_b16_stage_rejects_optimization_result_with_candidate_artifact_hash_mismatch`
+     - `test_b16_stage_rejects_optimization_result_with_candidate_evaluation_id_mismatch`
+     - `test_b16_stage_accepts_verified_result_with_valid_binding`
+     - `test_b17_rollback_does_not_manufacture_approval_authorized_locally`
+     - `test_b17_rollback_propagates_external_approval_authorized`
+   - Full repository test suite: 598/598 passing across 22 test files.
+   - Quality gates: Ruff check clean, Ruff format clean, Mypy clean across 112 source files, git diff --check clean.
+
+**Why:** `[P§8]`, `[P§14]`, `[P§15]`, `[P§21]`, `[P§22]`, `[P§24]`, `[P§29.4]`, `[P§34]`, ADR-0003, ADR-0005, and ADR-0012. Closes all remaining authority escalation and cross-operation replay paths, guarantees candidate artifact evaluation lineage is revalidated before staging, and prevents unauthorized execution by forbidding local authorization manufacture during automated rollback.
+
+**Broke:** Nothing broken. Updated test approval contexts to provide exact authoritative `deployment.activate` / `1.0.0` / `1` representations. All 598 repository tests passing.
+
+**Learned:** Subsystem boundaries must never normalize distinct contract types into loose equivalence classes or manufacture authorization flags locally; contract authority requires validating exact representations at the boundary and transparently forwarding external authorization contexts.
+
+**Left open:** Push commit to PR #63, monitor GitHub Actions CI matrix, and submit resolution report to Official PM for final merge approval.
+
+---
+
+## 2026-09-19 — Phase 2M PM Adversarial Re-Review Blocker Remediation (B18, PR #63)
+
+**Did:** Remediated authority-boundary blocker B18 identified in Official PM Re-Review on PR #63:
+1. **B18a (ApprovalRequest Canonical Payload Hash Enforcement):**
+   - In `DefaultDeploymentManager.activate()`, enforced that `approval_request.canonical_payload_hash` matches `computed_hash` of the deployment plan and matches `operation_identity.canonical_payload_hash`.
+   - Closes the vulnerability where an approval request could be accepted without verifying its payload binding against the authoritative deployment plan per ADR-0003 §3.8.
+2. **B18b (Approval Expiration Enforcement):**
+   - In `DefaultDeploymentManager.activate()`, enforced that `approval_request.expires_at` is evaluated against current UTC time.
+   - If `approval_request.expires_at` has passed, raises `DeploymentApprovalRequiredError` fail-closed per ADR-0003 §3.8.
+3. **Dedicated Adversarial Regression Tests:**
+   - Added 3 new regression tests in `tests/test_optimization_boundary.py` (expanding boundary suite from 90 to 93 tests, all passing):
+     - `test_b18a_activate_rejects_approval_request_payload_hash_mismatch`: Proves tampered `ApprovalRequest.canonical_payload_hash` is rejected fail-closed.
+     - `test_b18b_activate_rejects_expired_approval_request`: Proves expired `ApprovalRequest` is rejected fail-closed even when status is `APPROVED`.
+     - `test_b18b_activate_accepts_unexpired_approval_request`: Proves valid unexpired approval request activates successfully.
+   - Full repository test suite: 601/601 passing across 22 test files.
+   - Quality gates: Ruff check clean, Ruff format clean, Mypy clean across 112 source files, git diff --check clean.
+
+**Why:** `[P§8]`, `[P§14]`, `[P§15]`, `[P§21]`, `[P§22]`, `[P§24]`, `[P§29.4]`, `[P§34]`, and ADR-0003 §3.8. Guarantees that approval requests are cryptographically bound to the plan payload and that temporal expiration boundaries cannot be bypassed.
+
+**Broke:** Nothing broken. Updated test approval helper to accept optional `expires_at`. All 601 repository tests passing.
+
+**Learned:** In approval systems, validating the approval decision is insufficient without also validating the request itself; both the intent payload hash and temporal validity must be verified across both request and decision contracts.
+
+**Left open:** Push commit to PR #63, monitor GitHub Actions CI matrix, and submit resolution report to Official PM for final merge approval.
