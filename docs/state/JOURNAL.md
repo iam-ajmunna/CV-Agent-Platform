@@ -1799,3 +1799,46 @@ Remediated all three architectural blockers identified in the Official PM's seco
 **Learned:** When cross-referencing evaluation results against specialized artifacts (e.g. optimized compilation engines vs training checkpoints), keep upstream core contracts (ADR-0011) unchanged and introduce an explicit binding contract at the verifier boundary rather than repurposing or subverting existing identifier fields.
 
 **Left open:** Push commit to PR #63, monitor GitHub Actions CI matrix, and submit resolution report to Official PM for final merge approval.
+
+---
+
+## 2026-09-19 — Phase 2M PM Adversarial Re-Review Blockers Remediation (B15–B17, PR #63)
+
+**Did:** Remediated the final three authority-boundary blockers identified in Official PM Re-Review #5247879098 on PR #63:
+1. **B15 (Canonical Operation Identity and Version Invariant):**
+   - In `DefaultDeploymentManager.activate()`, enforced exact authoritative operation identity and version matching against canonical contract types:
+     - `operation_identity.operation_id == "deployment.activate"`
+     - `operation_identity.operation_version == "1.0.0"` (`str`)
+     - `approval_request.operation_id == "deployment.activate"`
+     - `approval_request.operation_version == 1` (`int`)
+     - Cross-representation check: `approval_request.operation_version == int(operation_identity.operation_version.split('.')[0])`
+     - Eliminated arbitrary equivalence classes (e.g. generic `"1"` vs `"1.0.0"` strings).
+2. **B16 (Mandatory Candidate-Artifact Binding in OptimizationResult and Staging Revalidation):**
+   - In `cv_agent/optimization/contracts.py`, made `candidate_artifact_binding: OptimizedArtifactEvaluationBinding` mandatory on `OptimizationResult` (removed `| None = None` default).
+   - In `DefaultDeploymentManager.stage()`, enforced strict revalidation asserting that `candidate_artifact_binding` is present, `candidate_artifact_id == plan.artifact_id == artifact.artifact_id`, `candidate_artifact_hash == artifact.artifact_hash`, and `evaluation_id == evaluation_result.evaluation_id`.
+3. **B17 (Rollback Authorization Propagation Without Local Manufacture):**
+   - Updated `DeploymentManager.rollback()` signature in both protocol and implementation to accept caller-provided `*, approval_authorized: bool = False`.
+   - Propagated `approval_authorized` directly to `ToolInvocation(..., approval_authorized=approval_authorized)` during rollback dispatch.
+   - Guaranteed that automated rollback defaults to `approval_authorized=False` without manufacturing authorization locally.
+4. **Dedicated Adversarial Regression Tests:**
+   - Added 10 new blocker-specific boundary tests in `tests/test_optimization_boundary.py` (expanding boundary suite from 80 to 90 tests, all passing):
+     - `test_b15_activate_rejects_unauthorized_operation_id`
+     - `test_b15_activate_rejects_unauthorized_operation_identity_version` (independently verifying semantic mismatch and generic `"1"` rejection)
+     - `test_b15_activate_rejects_unauthorized_approval_request_version` (independently verifying integer mismatch)
+     - `test_b15_activate_accepts_authoritative_operation_identity`
+     - `test_b16_stage_rejects_optimization_result_with_candidate_artifact_id_mismatch`
+     - `test_b16_stage_rejects_optimization_result_with_candidate_artifact_hash_mismatch`
+     - `test_b16_stage_rejects_optimization_result_with_candidate_evaluation_id_mismatch`
+     - `test_b16_stage_accepts_verified_result_with_valid_binding`
+     - `test_b17_rollback_does_not_manufacture_approval_authorized_locally`
+     - `test_b17_rollback_propagates_external_approval_authorized`
+   - Full repository test suite: 598/598 passing across 22 test files.
+   - Quality gates: Ruff check clean, Ruff format clean, Mypy clean across 112 source files, git diff --check clean.
+
+**Why:** `[P§8]`, `[P§14]`, `[P§15]`, `[P§21]`, `[P§22]`, `[P§24]`, `[P§29.4]`, `[P§34]`, ADR-0003, ADR-0005, and ADR-0012. Closes all remaining authority escalation and cross-operation replay paths, guarantees candidate artifact evaluation lineage is revalidated before staging, and prevents unauthorized execution by forbidding local authorization manufacture during automated rollback.
+
+**Broke:** Nothing broken. Updated test approval contexts to provide exact authoritative `deployment.activate` / `1.0.0` / `1` representations. All 598 repository tests passing.
+
+**Learned:** Subsystem boundaries must never normalize distinct contract types into loose equivalence classes or manufacture authorization flags locally; contract authority requires validating exact representations at the boundary and transparently forwarding external authorization contexts.
+
+**Left open:** Push commit to PR #63, monitor GitHub Actions CI matrix, and submit resolution report to Official PM for final merge approval.

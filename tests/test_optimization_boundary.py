@@ -442,7 +442,9 @@ def _make_valid_evaluation_result(
 def _make_approval_context(
     plan: DeploymentPlan,
     resource_scope: str | None = None,
+    operation_id: str = "deployment.activate",
     operation_version: int = 1,
+    identity_version: str = "1.0.0",
     target_identity: str | None = None,
     policy_version: str = "1.0",
     bound_payload_hash: str | None = None,
@@ -455,8 +457,8 @@ def _make_approval_context(
     tid = target_identity if target_identity is not None else str(plan.target.target_id)
 
     op_id = OperationIdentity(
-        operation_id="op-dep-001",
-        operation_version=str(operation_version),
+        operation_id=operation_id,
+        operation_version=identity_version,
         canonical_payload_hash=canonical_hash,
         target_identity=tid,
     )
@@ -464,7 +466,7 @@ def _make_approval_context(
     app_req = ApprovalRequest(
         request_id="req-dep-001",
         session_id="sess-001",
-        operation_id=OperationId(value="op-dep-001"),
+        operation_id=OperationId(value=operation_id),
         operation_version=operation_version,
         canonical_payload_hash=canonical_hash,
         policy_version=policy_version,
@@ -1275,6 +1277,9 @@ def test_deployment_staging_unverified_optimization_result_rejected() -> None:
         memory_reduction_ratio=0.1,
         verification_passed=False,  # FAILED!
         diagnostics="Accuracy cliff: dropped 0.05",
+        candidate_artifact_binding=_make_valid_candidate_binding(
+            artifact, cand_eval.evaluation_id
+        ),
     )
 
     with pytest.raises(
@@ -2190,7 +2195,8 @@ def test_b6_approval_operation_id_mismatch_fails_closed() -> None:
 
     mismatched_op = op_id.model_copy(update={"operation_id": "op-different-001"})
     with pytest.raises(
-        DeploymentApprovalRequiredError, match="Operation ID mismatch across 4-tuple"
+        DeploymentApprovalRequiredError,
+        match="Operation ID 'op-different-001' is not authorized for deployment activation",
     ):
         manager.activate(
             record=record,
@@ -2225,7 +2231,7 @@ def test_b6_approval_operation_version_mismatch_fails_closed() -> None:
     mismatched_ver = op_id.model_copy(update={"operation_version": "99"})
     with pytest.raises(
         DeploymentApprovalRequiredError,
-        match="Operation version mismatch across 4-tuple",
+        match="OperationIdentity operation_version '99' is not authorized for deployment activation",
     ):
         manager.activate(
             record=record,
@@ -3105,3 +3111,387 @@ def test_b14_verifier_accepts_valid_candidate_binding_and_retains_adr0011_types(
     assert (
         res.candidate_artifact_binding.candidate_artifact_hash == artifact.artifact_hash
     )
+
+
+# =============================================================================
+# B15: Exact canonical operation identity and version enforcement
+# =============================================================================
+def test_b15_activate_rejects_unauthorized_operation_id() -> None:
+    """[B15] Verify activate rejects unauthorized operation_id in OperationIdentity or ApprovalRequest."""
+    manager = DefaultDeploymentManager()
+    plan = _make_valid_deployment_plan()
+    probe_ok = ReadinessProbeResult(
+        passed=True,
+        startup_time_sec=1.0,
+        probe_latency_mean_ms=10.0,
+        vram_consumed_mb=1024.0,
+        probed_at=datetime.now(timezone.utc),
+    )
+    record = DeploymentRecord(
+        deployment_id=plan.deployment_id,
+        plan=plan,
+        status=DeploymentStatus.VERIFYING,
+        readiness_result=probe_ok,
+    )
+    op_id, app_req, app_dec = _make_approval_context(plan)
+
+    # 1. OperationIdentity operation_id unauthorized
+    bad_op_id = op_id.model_copy(update={"operation_id": "dataset.mutate"})
+    with pytest.raises(
+        DeploymentApprovalRequiredError,
+        match="Operation ID 'dataset.mutate' is not authorized for deployment activation",
+    ):
+        manager.activate(
+            record=record,
+            operation_identity=bad_op_id,
+            approval_request=app_req,
+            approval_decision=app_dec,
+            tool_id=ToolId("cv.deploy.activate"),
+            tool_executor=_MockToolExecutor(),
+            target_id=plan.target.target_id,
+        )
+
+    # 2. ApprovalRequest operation_id unauthorized
+    bad_app_req = app_req.model_copy(
+        update={"operation_id": OperationId(value="dataset.mutate")}
+    )
+    with pytest.raises(
+        DeploymentApprovalRequiredError,
+        match=r"ApprovalRequest operation_id .*dataset\.mutate.* is not authorized for deployment activation",
+    ):
+        manager.activate(
+            record=record,
+            operation_identity=op_id,
+            approval_request=bad_app_req,
+            approval_decision=app_dec,
+            tool_id=ToolId("cv.deploy.activate"),
+            tool_executor=_MockToolExecutor(),
+            target_id=plan.target.target_id,
+        )
+
+
+def test_b15_activate_rejects_unauthorized_operation_identity_version() -> None:
+    """[B15] Verify activate rejects non-canonical OperationIdentity.operation_version (str)."""
+    manager = DefaultDeploymentManager()
+    plan = _make_valid_deployment_plan()
+    probe_ok = ReadinessProbeResult(
+        passed=True,
+        startup_time_sec=1.0,
+        probe_latency_mean_ms=10.0,
+        vram_consumed_mb=1024.0,
+        probed_at=datetime.now(timezone.utc),
+    )
+    record = DeploymentRecord(
+        deployment_id=plan.deployment_id,
+        plan=plan,
+        status=DeploymentStatus.VERIFYING,
+        readiness_result=probe_ok,
+    )
+    op_id, app_req, app_dec = _make_approval_context(plan)
+
+    # 1. Semantic mismatch (2.0.0 instead of 1.0.0)
+    bad_ver_sem = op_id.model_copy(update={"operation_version": "2.0.0"})
+    with pytest.raises(
+        DeploymentApprovalRequiredError,
+        match="OperationIdentity operation_version '2.0.0' is not authorized for deployment activation",
+    ):
+        manager.activate(
+            record=record,
+            operation_identity=bad_ver_sem,
+            approval_request=app_req,
+            approval_decision=app_dec,
+            tool_id=ToolId("cv.deploy.activate"),
+            tool_executor=_MockToolExecutor(),
+            target_id=plan.target.target_id,
+        )
+
+    # 2. Arbitrary equivalence class rejected: "1" instead of canonical "1.0.0"
+    bad_ver_generic = op_id.model_copy(update={"operation_version": "1"})
+    with pytest.raises(
+        DeploymentApprovalRequiredError,
+        match="OperationIdentity operation_version '1' is not authorized for deployment activation",
+    ):
+        manager.activate(
+            record=record,
+            operation_identity=bad_ver_generic,
+            approval_request=app_req,
+            approval_decision=app_dec,
+            tool_id=ToolId("cv.deploy.activate"),
+            tool_executor=_MockToolExecutor(),
+            target_id=plan.target.target_id,
+        )
+
+
+def test_b15_activate_rejects_unauthorized_approval_request_version() -> None:
+    """[B15] Verify activate rejects non-canonical ApprovalRequest.operation_version (int)."""
+    manager = DefaultDeploymentManager()
+    plan = _make_valid_deployment_plan()
+    probe_ok = ReadinessProbeResult(
+        passed=True,
+        startup_time_sec=1.0,
+        probe_latency_mean_ms=10.0,
+        vram_consumed_mb=1024.0,
+        probed_at=datetime.now(timezone.utc),
+    )
+    record = DeploymentRecord(
+        deployment_id=plan.deployment_id,
+        plan=plan,
+        status=DeploymentStatus.VERIFYING,
+        readiness_result=probe_ok,
+    )
+    op_id, app_req, app_dec = _make_approval_context(plan)
+
+    # Wrong integer version (2 instead of 1)
+    bad_req_ver = app_req.model_copy(update={"operation_version": 2})
+    with pytest.raises(
+        DeploymentApprovalRequiredError,
+        match="ApprovalRequest operation_version 2 is not authorized for deployment activation",
+    ):
+        manager.activate(
+            record=record,
+            operation_identity=op_id,
+            approval_request=bad_req_ver,
+            approval_decision=app_dec,
+            tool_id=ToolId("cv.deploy.activate"),
+            tool_executor=_MockToolExecutor(),
+            target_id=plan.target.target_id,
+        )
+
+
+def test_b15_activate_accepts_authoritative_operation_identity() -> None:
+    """[B15] Verify activate accepts exact canonical identity and version pairs and dispatches."""
+    manager = DefaultDeploymentManager()
+    plan = _make_valid_deployment_plan()
+    probe_ok = ReadinessProbeResult(
+        passed=True,
+        startup_time_sec=1.0,
+        probe_latency_mean_ms=10.0,
+        vram_consumed_mb=1024.0,
+        probed_at=datetime.now(timezone.utc),
+    )
+    record = DeploymentRecord(
+        deployment_id=plan.deployment_id,
+        plan=plan,
+        status=DeploymentStatus.VERIFYING,
+        readiness_result=probe_ok,
+    )
+    op_id, app_req, app_dec = _make_approval_context(plan)
+    executor = _MockToolExecutor()
+
+    # Canonical representations:
+    assert op_id.operation_id == "deployment.activate"
+    assert op_id.operation_version == "1.0.0"
+    assert str(app_req.operation_id) == "deployment.activate"
+    assert app_req.operation_version == 1
+
+    active_record = manager.activate(
+        record=record,
+        operation_identity=op_id,
+        approval_request=app_req,
+        approval_decision=app_dec,
+        tool_id=ToolId("cv.deploy.activate"),
+        tool_executor=executor,
+        target_id=plan.target.target_id,
+    )
+
+    assert active_record.status == DeploymentStatus.ACTIVE
+    assert len(executor.invocations) == 1
+    assert executor.invocations[0].approval_authorized is True
+
+
+# =============================================================================
+# B16: Mandatory candidate artifact binding verification at staging
+# =============================================================================
+def test_b16_stage_rejects_optimization_result_with_candidate_artifact_id_mismatch() -> (
+    None
+):
+    """[B16] Verify stage rejects candidate_artifact_binding where artifact_id does not match plan/artifact."""
+    manager = DefaultDeploymentManager()
+    plan = _make_valid_deployment_plan()
+    opt_res = _make_valid_optimization_result()
+    executor = _MockToolExecutor()
+
+    # Mismatch candidate_artifact_id
+    bad_binding = OptimizedArtifactEvaluationBinding(
+        candidate_artifact_id=OptimizedArtifactId("opt-art-other"),
+        candidate_artifact_hash=opt_res.artifact.artifact_hash,
+        evaluation_id=opt_res.evaluation_result.evaluation_id,
+    )
+    bad_opt_res = opt_res.model_copy(update={"candidate_artifact_binding": bad_binding})
+
+    with pytest.raises(
+        OptimizationVerificationError,
+        match="candidate_artifact_binding candidate_artifact_id 'opt-art-other' does not match DeploymentPlan artifact",
+    ):
+        manager.stage(
+            plan=plan,
+            target_id=plan.target.target_id,
+            tool_id=ToolId("cv.deploy.stage"),
+            tool_executor=executor,
+            optimization_result=bad_opt_res,
+        )
+
+
+def test_b16_stage_rejects_optimization_result_with_candidate_artifact_hash_mismatch() -> (
+    None
+):
+    """[B16] Verify stage rejects candidate_artifact_binding where hash does not match artifact hash."""
+    manager = DefaultDeploymentManager()
+    plan = _make_valid_deployment_plan()
+    opt_res = _make_valid_optimization_result()
+    executor = _MockToolExecutor()
+
+    bad_binding = OptimizedArtifactEvaluationBinding(
+        candidate_artifact_id=opt_res.artifact.artifact_id,
+        candidate_artifact_hash=ContentHash("sha256:" + "0" * 64),
+        evaluation_id=opt_res.evaluation_result.evaluation_id,
+    )
+    bad_opt_res = opt_res.model_copy(update={"candidate_artifact_binding": bad_binding})
+
+    with pytest.raises(
+        OptimizationVerificationError,
+        match="candidate_artifact_binding candidate_artifact_hash.*does not match OptimizationResult artifact hash",
+    ):
+        manager.stage(
+            plan=plan,
+            target_id=plan.target.target_id,
+            tool_id=ToolId("cv.deploy.stage"),
+            tool_executor=executor,
+            optimization_result=bad_opt_res,
+        )
+
+
+def test_b16_stage_rejects_optimization_result_with_candidate_evaluation_id_mismatch() -> (
+    None
+):
+    """[B16] Verify stage rejects candidate_artifact_binding where evaluation_id does not match evaluation_result."""
+    manager = DefaultDeploymentManager()
+    plan = _make_valid_deployment_plan()
+    opt_res = _make_valid_optimization_result()
+    executor = _MockToolExecutor()
+
+    bad_binding = OptimizedArtifactEvaluationBinding(
+        candidate_artifact_id=opt_res.artifact.artifact_id,
+        candidate_artifact_hash=opt_res.artifact.artifact_hash,
+        evaluation_id=EvaluationId("eval-exp-other"),
+    )
+    bad_opt_res = opt_res.model_copy(update={"candidate_artifact_binding": bad_binding})
+
+    with pytest.raises(
+        OptimizationVerificationError,
+        match="candidate_artifact_binding evaluation_id 'eval-exp-other' does not match OptimizationResult evaluation_id",
+    ):
+        manager.stage(
+            plan=plan,
+            target_id=plan.target.target_id,
+            tool_id=ToolId("cv.deploy.stage"),
+            tool_executor=executor,
+            optimization_result=bad_opt_res,
+        )
+
+
+def test_b16_stage_accepts_verified_result_with_valid_binding() -> None:
+    """[B16] Verify stage accepts verified OptimizationResult with consistent candidate binding."""
+    manager = DefaultDeploymentManager()
+    plan = _make_valid_deployment_plan()
+    opt_res = _make_valid_optimization_result()
+    executor = _MockToolExecutor()
+
+    record = manager.stage(
+        plan=plan,
+        target_id=plan.target.target_id,
+        tool_id=ToolId("cv.deploy.stage"),
+        tool_executor=executor,
+        optimization_result=opt_res,
+    )
+
+    assert record.status == DeploymentStatus.STAGING
+    assert record.target_id == plan.target.target_id
+    assert len(executor.invocations) == 1
+    assert executor.invocations[0].parameters["action"] == "stage"
+
+
+# =============================================================================
+# B17: Rollback authorization propagation without local manufacture
+# =============================================================================
+def test_b17_rollback_does_not_manufacture_approval_authorized_locally() -> None:
+    """[B17] Verify rollback does not manufacture approval_authorized=True when omitted by caller."""
+    manager = DefaultDeploymentManager()
+    pred_plan = _make_valid_deployment_plan(deployment_id="dep-predecessor-001")
+    plan = _make_valid_deployment_plan(
+        deployment_id="dep-current-001",
+        rollback_target_id="dep-predecessor-001",
+    )
+
+    curr_record = DeploymentRecord(
+        deployment_id=plan.deployment_id,
+        plan=plan,
+        status=DeploymentStatus.ACTIVE,
+        target_id=plan.target.target_id,
+    )
+    pred_record = DeploymentRecord(
+        deployment_id=pred_plan.deployment_id,
+        plan=pred_plan,
+        status=DeploymentStatus.SUPERSEDED,
+        target_id=pred_plan.target.target_id,
+    )
+    active_deps = {pred_plan.deployment_id: pred_record}
+    executor = _MockToolExecutor()
+
+    # Call rollback without approval_authorized argument (defaults to False)
+    rolled_back, restored = manager.rollback(
+        record=curr_record,
+        target_id=plan.target.target_id,
+        reason="Performance degradation in production",
+        tool_id=ToolId("cv.deploy.rollback"),
+        tool_executor=executor,
+        active_deployments=active_deps,
+    )
+
+    assert rolled_back.status == DeploymentStatus.ROLLED_BACK
+    assert restored is not None and restored.status == DeploymentStatus.ACTIVE
+    assert len(executor.invocations) == 1
+    # Crucial B17 invariant: rollback invocation MUST have approval_authorized=False by default
+    assert executor.invocations[0].approval_authorized is False
+
+
+def test_b17_rollback_propagates_external_approval_authorized() -> None:
+    """[B17] Verify rollback propagates explicitly provided external approval_authorized."""
+    manager = DefaultDeploymentManager()
+    pred_plan = _make_valid_deployment_plan(deployment_id="dep-predecessor-001")
+    plan = _make_valid_deployment_plan(
+        deployment_id="dep-current-001",
+        rollback_target_id="dep-predecessor-001",
+    )
+
+    curr_record = DeploymentRecord(
+        deployment_id=plan.deployment_id,
+        plan=plan,
+        status=DeploymentStatus.ACTIVE,
+        target_id=plan.target.target_id,
+    )
+    pred_record = DeploymentRecord(
+        deployment_id=pred_plan.deployment_id,
+        plan=pred_plan,
+        status=DeploymentStatus.SUPERSEDED,
+        target_id=pred_plan.target.target_id,
+    )
+    active_deps = {pred_plan.deployment_id: pred_record}
+    executor = _MockToolExecutor()
+
+    # Call rollback with approval_authorized=True from authorized caller
+    rolled_back, restored = manager.rollback(
+        record=curr_record,
+        target_id=plan.target.target_id,
+        reason="Approved emergency rollback",
+        tool_id=ToolId("cv.deploy.rollback"),
+        tool_executor=executor,
+        approval_authorized=True,
+        active_deployments=active_deps,
+    )
+
+    assert rolled_back.status == DeploymentStatus.ROLLED_BACK
+    assert restored is not None and restored.status == DeploymentStatus.ACTIVE
+    assert len(executor.invocations) == 1
+    # Crucial B17 invariant: propagated caller authorization
+    assert executor.invocations[0].approval_authorized is True

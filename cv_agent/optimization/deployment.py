@@ -88,6 +88,7 @@ class DeploymentManager(Protocol):
         tool_id: ToolId,
         tool_executor: ToolExecutor,
         *,
+        approval_authorized: bool = False,
         active_deployments: dict[DeploymentId, DeploymentRecord] | None = None,
     ) -> tuple[DeploymentRecord, DeploymentRecord | None]: ...
 
@@ -186,6 +187,40 @@ class DefaultDeploymentManager:
             raise OptimizationValidationError(
                 f"OptimizationResult artifact {optimization_result.artifact.artifact_id!r} "
                 f"does not match DeploymentPlan artifact {plan.artifact_id!r}"
+            )
+
+        # B16: Mandatory candidate-artifact evaluation binding verification
+        if getattr(optimization_result, "candidate_artifact_binding", None) is None:
+            raise OptimizationVerificationError(
+                "OptimizationResult missing mandatory candidate_artifact_binding. "
+                "Deployment staging strictly requires verified candidate-artifact evaluation binding per ADR-0012."
+            )
+        binding = optimization_result.candidate_artifact_binding
+        if str(binding.candidate_artifact_id) != str(plan.artifact_id):
+            raise OptimizationVerificationError(
+                f"candidate_artifact_binding candidate_artifact_id {binding.candidate_artifact_id!r} "
+                f"does not match DeploymentPlan artifact {plan.artifact_id!r}"
+            )
+        if str(binding.candidate_artifact_id) != str(
+            optimization_result.artifact.artifact_id
+        ):
+            raise OptimizationVerificationError(
+                f"candidate_artifact_binding candidate_artifact_id {binding.candidate_artifact_id!r} "
+                f"does not match OptimizationResult artifact {optimization_result.artifact.artifact_id!r}"
+            )
+        if str(binding.candidate_artifact_hash) != str(
+            optimization_result.artifact.artifact_hash
+        ):
+            raise OptimizationVerificationError(
+                f"candidate_artifact_binding candidate_artifact_hash {binding.candidate_artifact_hash!r} "
+                f"does not match OptimizationResult artifact hash {optimization_result.artifact.artifact_hash!r}"
+            )
+        if str(binding.evaluation_id) != str(
+            optimization_result.evaluation_result.evaluation_id
+        ):
+            raise OptimizationVerificationError(
+                f"candidate_artifact_binding evaluation_id {binding.evaluation_id!r} "
+                f"does not match OptimizationResult evaluation_id {optimization_result.evaluation_result.evaluation_id!r}"
             )
 
         # 6. Dispatch staging to ADR-0005
@@ -455,18 +490,38 @@ class DefaultDeploymentManager:
                 "Deployment cannot be activated without passing readiness probing (ADR-0012 Invariant 8)"
             )
 
-        # 5. Strict ADR-0003 4-tuple approval verification (B6)
-        # 5a. Operation ID cross-check between operation_identity and approval_request
+        # 5. Strict ADR-0003 4-tuple approval verification (B6 & B15)
+        # 5a. Exact operation ID validation for deployment activation (B15)
+        if str(operation_identity.operation_id) != "deployment.activate":
+            raise DeploymentApprovalRequiredError(
+                f"Operation ID {operation_identity.operation_id!r} is not authorized for deployment activation. "
+                "Activation strictly requires operation_id 'deployment.activate'."
+            )
+        if str(approval_request.operation_id) != "deployment.activate":
+            raise DeploymentApprovalRequiredError(
+                f"ApprovalRequest operation_id {approval_request.operation_id!r} is not authorized for deployment activation. "
+                "Activation strictly requires operation_id 'deployment.activate'."
+            )
         if str(operation_identity.operation_id) != str(approval_request.operation_id):
             raise DeploymentApprovalRequiredError(
                 f"Operation ID mismatch across 4-tuple: OperationIdentity={operation_identity.operation_id!r}, "
                 f"ApprovalRequest={approval_request.operation_id!r}"
             )
 
-        # 5b. Operation version cross-check between operation_identity and approval_request
-        if str(operation_identity.operation_version) != str(
-            approval_request.operation_version
-        ):
+        # 5b. Exact operation version validation using actual contract types (B15)
+        if operation_identity.operation_version != "1.0.0":
+            raise DeploymentApprovalRequiredError(
+                f"OperationIdentity operation_version {operation_identity.operation_version!r} is not authorized for deployment activation. "
+                "Activation strictly requires OperationIdentity.operation_version == '1.0.0'."
+            )
+        if approval_request.operation_version != 1:
+            raise DeploymentApprovalRequiredError(
+                f"ApprovalRequest operation_version {approval_request.operation_version!r} is not authorized for deployment activation. "
+                "Activation strictly requires ApprovalRequest.operation_version == 1."
+            )
+        # Authoritative cross-representation check: version 1.0.0 maps to major version 1
+        expected_major_version = int(operation_identity.operation_version.split(".")[0])
+        if approval_request.operation_version != expected_major_version:
             raise DeploymentApprovalRequiredError(
                 f"Operation version mismatch across 4-tuple: OperationIdentity={operation_identity.operation_version}, "
                 f"ApprovalRequest={approval_request.operation_version}"
@@ -586,6 +641,7 @@ class DefaultDeploymentManager:
         tool_id: ToolId,
         tool_executor: ToolExecutor,
         *,
+        approval_authorized: bool = False,
         active_deployments: dict[DeploymentId, DeploymentRecord] | None = None,
     ) -> tuple[DeploymentRecord, DeploymentRecord | None]:
         """Execute deterministic rollback or escalate to OPERATOR_REQUIRED per ADR-0012 §3.7."""
@@ -646,7 +702,7 @@ class DefaultDeploymentManager:
                 "rollback_target_id": str(target_dep_id),
                 "reason": reason,
             },
-            approval_authorized=True,
+            approval_authorized=approval_authorized,
         )
 
         tool_result = self._dispatch_tool(tool_executor, invocation)

@@ -256,7 +256,7 @@ class OptimizationResult(BaseModel):
     memory_reduction_ratio: float = Field(ge=0.0)
     verification_passed: bool
     diagnostics: str
-    candidate_artifact_binding: OptimizedArtifactEvaluationBinding | None = None
+    candidate_artifact_binding: OptimizedArtifactEvaluationBinding
 
     @model_validator(mode="after")
     def _validate_metrics(self) -> OptimizationResult:
