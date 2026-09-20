@@ -2011,6 +2011,30 @@ Remediated all three architectural blockers identified in the Official PM's seco
 
 **Learned:** When telemetry histograms define piecewise continuous uniform distributions within bins, optimal transport integrals must account for the linear slope of the CDF across the entire sub-interval rather than discretizing at endpoints. Furthermore, cryptographic integrity hashes must never be self-attested; they must anchor into an authoritative external evaluation manifest to establish true provenance.
 
-**Left open:** Final PM re-review on PR #65 and merge authorization to `main`.
+**Left open:** PR #65 approved by Official PM and squash-merged to `main` at `a88a9be`.
+
+---
+
+## 2026-09-20 — Phase 2N Merge Acceptance Synchronization (D-059, PR #65, Issue #64)
+
+**Did:** Synchronized repository rolling state on `main` following Official PM final approval and squash-merge of PR #65 (`a88a9be`). Recorded decisions `D-059`, `D-060`, and `D-061` in `DECISIONS.md`. Updated `STATUS.md`. Phase 2N (ADR-0013 Stream & Edge Monitoring Subsystem) is fully closed on `main`:
+1. All four adversarial review blockers (B19–B22) remediated and discharged:
+   - B19: Zero synthetic defaults and zero throughput multiplier fallbacks.
+   - B20: Exact closed-form piecewise-linear CDF difference integral for 1D Wasserstein distance under uniform-within-bin semantics; honest binned empirical CDF comparison for KS tests.
+   - B21: Cryptographic evidence hash provenance anchored to ADR-0011 EvaluationResult metadata / external ledger with SHA-256 digest validation and tamper rejection.
+   - B22: True $2 \times K$ contingency table test of independence and separate one-sample goodness-of-fit test.
+2. 51 dedicated adversarial boundary tests passing in `tests/test_monitoring_boundary.py`.
+3. 652 total repository tests passing across 23 test suites with 0 regressions.
+4. Clean quality gates: Ruff check clean, Ruff format clean, Mypy clean across 119 source files, git diff --check clean.
+5. GitHub Actions CI run fully green across Python 3.10–3.13 matrix and GitGuardian.
+6. Closed Scoping Issue #64.
+
+**Why:** `[P§8]`, `[P§9]`, `[P§16]`, `[P§21]`, `[P§22]`, `[P§24]`, `[P§25]`, `[P§26]`, `[P§27]`, `[P§28]`, `[P§29.2]`, `[P§29.6]`, `[P§29.7]`, `[P§31]`, `[P§34]`, and `AGENTS.md` rolling-state acceptance contract.
+
+**Broke:** Nothing broken. 652 repository tests pass, all gates green.
+
+**Learned:** Rigorous adversarial review boundaries with closed-form mathematical precision and cryptographic evidence anchoring guarantee that runtime monitoring preserves Baseline Primacy and never executes unverified retraining loops or tolerates statistical approximations.
+
+**Left open:** Phase 2N complete. All Phase 2 implementation subsystems (2A–2N) are now complete and accepted on `main`. Awaiting Official PM instruction for next milestone / Phase 3 kickoff.
 
 
