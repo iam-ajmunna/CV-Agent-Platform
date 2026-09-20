@@ -3,33 +3,34 @@
 > **Rewritten** every session. Describes **now**, never history — history lives in
 > `JOURNAL.md`. Hard cap: 60 lines. If it exceeds that, you are logging, not stating.
 
-**Updated:** 2026-09-19 · **Phase:** Phase 2M Optimization & Deployment · **Health:** green
+**Updated:** 2026-09-20 · **Phase:** Phase 2M Complete → Phase 2N Ready · **Health:** green
 
 ## Where we are
 
-Phase 2M (ADR-0012 Optimization & Deployment Subsystem) authority-boundary blocker B18 (ADR-0003 approval request payload hash and expiry enforcement) is fully remediated on `feature/ajmunna/phase-2m-optimization-subsystem` (PR #63).
+Phase 2M (ADR-0012 Optimization & Deployment Subsystem) is fully approved by the Official PM and squash-merged into `main` at `463ca1e` (PR #63, Issue #62). Decision D-058 recorded.
 
-- Remediated all components of B18 in `DefaultDeploymentManager.activate()`:
-  - B18a: Validates `approval_request.canonical_payload_hash == computed_hash` and cross-checks with `operation_identity.canonical_payload_hash`, strictly preventing approval reuse with payload drift.
-  - B18b: Enforces approval expiration checking against `approval_request.expires_at`, failing closed with `DeploymentApprovalRequiredError` if the approval timestamp has elapsed.
-- Complete boundary test suite: 93/93 passing in `tests/test_optimization_boundary.py` (601/601 full repository test suite passing).
-- Clean quality gates: ruff check clean, ruff format clean, mypy clean across 112 files, git diff --check clean.
+- All 18 PM review blockers (B1–B18) successfully resolved across contracts, compilation, verification, staging, and activation.
+- Complete boundary test suite: 93/93 passing in `tests/test_optimization_boundary.py`.
+- Full repository test suite: 601/601 passing across 22 test files with zero regressions.
+- All quality gates clean on `main`: ruff check clean, ruff format clean, mypy clean (112 files), git diff --check clean.
+- CI run `35452185407` fully green across Python 3.10, 3.11, 3.12, 3.13, and GitGuardian.
 
 ## In flight
 
 | Item | Issue | PR | State |
 |---|---|---|---|
-| Phase 2M Optimization & Deployment Subsystem B18 remediation | #62 | #63 | Remediated · 93 boundary / 601 full tests passing · Ready for PM merge approval |
+| Phase 2M Optimization & Deployment Subsystem | #62 | #63 | Merged into `main @ 463ca1e` · D-058 recorded |
+| Phase 2N Monitoring & Diagnostics Subsystem (ADR-0013) | TBD | TBD | Ready for kickoff upon Official PM authorization |
 
 ## Next 3 actions
 
-1. Push B18 remediation commit to PR #63 and verify GitHub Actions CI matrix.
-2. Request Official PM final merge approval on PR #63.
-3. Squash-merge to `main`, record D-059, and transition to Phase 2N.
+1. Sync rolling-state documents (`STATUS.md`, `DECISIONS.md`, `JOURNAL.md`) on `main`.
+2. Delete retired feature branch `feature/ajmunna/phase-2m-optimization-subsystem`.
+3. Await Official PM scoping issue and kickoff instruction for Phase 2N (ADR-0013 Stream & Edge Monitoring Subsystem).
 
 ## Blockers
 
-- None. All 18 review blockers (B1–B18) are resolved with comprehensive regression tests.
+- None. Phase 2M is merged and complete.
 
 ## Scope guard
 

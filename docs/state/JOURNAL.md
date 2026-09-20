@@ -1869,3 +1869,22 @@ Remediated all three architectural blockers identified in the Official PM's seco
 **Learned:** In approval systems, validating the approval decision is insufficient without also validating the request itself; both the intent payload hash and temporal validity must be verified across both request and decision contracts.
 
 **Left open:** Push commit to PR #63, monitor GitHub Actions CI matrix, and submit resolution report to Official PM for final merge approval.
+
+---
+
+## 2026-09-20 — Phase 2M Merge Acceptance Synchronization (D-058, PR #63)
+
+**Did:** Synchronized repository rolling state on `main` following Official PM final approval and squash-merge of PR #63 (`463ca1e`). Recorded decision `D-058` in `DECISIONS.md`. Updated `STATUS.md`. Phase 2M (ADR-0012 Optimization & Deployment Subsystem) is fully closed on `main`:
+1. All 18 adversarial review blockers (B1–B18) remediated across 4 review iterations.
+2. 93 dedicated adversarial boundary tests passing in `tests/test_optimization_boundary.py`.
+3. 601 total repository tests passing across 22 test files with 0 regressions.
+4. Clean quality gates: Ruff check clean, Ruff format clean, Mypy clean across 112 source files, git diff --check clean.
+5. GitHub Actions CI run `35452185407` fully green across Python 3.10–3.13 and GitGuardian.
+
+**Why:** `[P§8]`, `[P§9]`, `[P§13]`, `[P§14]`, `[P§15]`, `[P§19]`, `[P§21]`, `[P§22]`, `[P§24]`, `[P§25]`, `[P§28]`, `[P§29.4]`, `[P§34]`, and `AGENTS.md` rolling-state acceptance contract.
+
+**Broke:** Nothing broken. 601 repository tests pass, all gates green.
+
+**Learned:** Rigorous adversarial review boundaries with tight iterative remediation cycles (B1–B10, B11–B14, B15–B17, B18) ensure that complex subsystems (optimization compilation, empirical verification, readiness probing, rollback safety index, and 4-tuple approval binding) achieve airtight contract purity without compromises or leakages across ADR boundaries.
+
+**Left open:** Phase 2M complete. Awaiting Official PM issue creation and kickoff instruction for Phase 2N (ADR-0013 Stream & Edge Monitoring Subsystem).
