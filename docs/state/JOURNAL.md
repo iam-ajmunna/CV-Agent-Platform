@@ -1888,3 +1888,56 @@ Remediated all three architectural blockers identified in the Official PM's seco
 **Learned:** Rigorous adversarial review boundaries with tight iterative remediation cycles (B1–B10, B11–B14, B15–B17, B18) ensure that complex subsystems (optimization compilation, empirical verification, readiness probing, rollback safety index, and 4-tuple approval binding) achieve airtight contract purity without compromises or leakages across ADR boundaries.
 
 **Left open:** Phase 2M complete. Awaiting Official PM issue creation and kickoff instruction for Phase 2N (ADR-0013 Stream & Edge Monitoring Subsystem).
+
+---
+
+## 2026-09-20 — Phase 2N Implementation & Verification (ADR-0013, Issue #64)
+
+**Did:** Implemented and verified the Stream & Edge Monitoring Subsystem (`cv_agent/monitoring/`) per frozen ADR-0013 under Scoping Issue #64:
+1. **Immutable Domain Contracts (`cv_agent/monitoring/contracts.py`):**
+   - Tri-dimensional operational telemetry records: `ModelTelemetryRecord`, `SystemTelemetryRecord`, `DataTelemetryRecord`, and synchronized `UnifiedTelemetrySnapshot`.
+   - Authoritative baseline evidence models: `BaselineDistributionProfile` and `BaselineReferenceBinding`.
+   - Drift evaluation models: `DriftMetricResult`, `DriftAnalysisRecord`.
+   - Active learning curation models: `CandidateSample`, `ActiveLearningCandidateBatch`.
+   - Governance & alerting models: `MonitoringAlertRecord`, `RetrainingTriggerProposal`.
+2. **Baseline Primacy & Zero Synthetic Distribution (`[P§29.2]`):**
+   - Explicitly resolved the architectural blocker identified by the Official PM: eliminated synthetic distribution approximation.
+   - Bound continuous KS-test and Wasserstein distance to authoritative offline `confidence_quantiles` and `confidence_histogram`.
+   - Bound categorical Chi-Square and PSI tests to authoritative `class_distribution`.
+   - Bound information-theoretic divergence to authoritative `prediction_entropy_mean`.
+   - Required drift detector to fail closed (`BaselineMismatchError` / `DriftEvaluationError`) whenever baseline binding or distribution profile is incomplete or mismatched.
+3. **Pure-Python Statistical Drift Detector (`cv_agent/monitoring/drift.py`):**
+   - Implemented `DefaultStatisticalDriftDetector` with zero external heavy math/ML dependencies:
+     - Two-sample Kolmogorov-Smirnov test comparing empirical CDF against baseline quantiles.
+     - Wasserstein (Earth Mover's) distance via step-wise CDF integration.
+     - Population Stability Index (PSI) with epsilon smoothing.
+     - Pearson Chi-Square test of independence with survival-function p-value approximation.
+     - Prediction entropy divergence detection.
+     - Hardware latency SLA ceiling (`p99`) and warning threshold (`p95`) evaluation.
+     - Hardware throughput operational floor (`p05`) deficit detection.
+     - Optical degradation checks: defocus/blur variance and camera occlusion alerts.
+4. **Active Learning Candidate Frame Curator (`cv_agent/monitoring/active_learning.py`):**
+   - Implemented `DefaultActiveLearningSelector` with cryptographic SHA-256 frame payload hashing.
+   - Multi-strategy heuristic scoring: least confident, margin sampling, prediction entropy, optical blur, and low luminance.
+   - Bounded in-memory candidate buffer with deterministic eviction (drops lowest priority sample on capacity breach).
+   - Temporal TTL expiry enforcement (`expires_at` purging).
+   - Candidate batch assembly (`ActiveLearningCandidateBatch`) targeting ADR-0009 `DatasetId` without manifest tampering.
+5. **Telemetry Pipeline & Governance Coordinator (`cv_agent/monitoring/pipeline.py`):**
+   - Implemented `DefaultTelemetryPipeline` with decoupled ingestion sink interfaces (`TelemetryIngestionSink`).
+   - Windowed buffer management and cross-dimensional snapshot synchronization (`create_snapshot`).
+   - Operational alert dispatching (`MonitoringAlertRecord`).
+   - Retraining trigger proposal formulation (`RetrainingTriggerProposal`): strictly enforces Invariant 3 (Zero Autonomous Retraining) and Invariant 4 (Mandatory Human Approval) with `requires_human_approval: bool = True` invariant per `[P§24]` and `docs/APPROVALS.md`.
+6. **Factory Bridge (`cv_agent/monitoring/__init__.py`):**
+   - Provided `extract_baseline_reference_binding()` to seamlessly construct authoritative `BaselineReferenceBinding` from ADR-0011 `EvaluationResult`.
+7. **Comprehensive Boundary & Adversarial Test Suite (`tests/test_monitoring_boundary.py`):**
+   - 46 tests covering all 12 architectural invariants: baseline fail-closed enforcement, zero synthetic distributions, tri-dimensional snapshot validation, zero autonomous retraining, human approval requirements, cryptographic payload hashing, sub-millisecond drift execution, buffer eviction, AST audits (0 subprocess, 0 sqlite3, 0 PyTorch/TensorFlow).
+   - Total repository test suite: 647/647 passing across 23 test suites in 5.55s.
+   - Clean quality gates: Ruff check clean, Ruff format clean, Mypy clean (0 errors across 119 source files), git diff --check clean.
+
+**Why:** `[P§8]`, `[P§9]`, `[P§16]`, `[P§21]`, `[P§22]`, `[P§24]`, `[P§25]`, `[P§26]`, `[P§27]`, `[P§28]`, `[P§29.2]`, `[P§29.6]`, `[P§29.7]`, `[P§31]`, `[P§34]`, and ADR-0013. Stream and edge monitoring provides continuous operational observability and high-value data curation while strictly subordinating retraining execution to human governance.
+
+**Broke:** Nothing broken. 647 repository tests pass, all gates green.
+
+**Learned:** Statistical drift detectors must never synthesize distributions from scalar summaries (such as inventing Gaussians from means or fabricating raw samples from percentiles). Enforcing an authoritative baseline evidence carrier (`BaselineDistributionProfile`) directly linked to evaluation evidence ensures mathematical fidelity and preserves Baseline Primacy `[P§29.2]`.
+
+**Left open:** Push branch `feature/ajmunna/phase-2n-monitoring-subsystem` and open Pull Request for Official PM adversarial review.

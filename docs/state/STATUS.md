@@ -3,35 +3,41 @@
 > **Rewritten** every session. Describes **now**, never history — history lives in
 > `JOURNAL.md`. Hard cap: 60 lines. If it exceeds that, you are logging, not stating.
 
-**Updated:** 2026-09-20 · **Phase:** Phase 2M Complete → Phase 2N Ready · **Health:** green
+**Updated:** 2026-09-20 · **Phase:** Phase 2N Implemented → Verification & PR Ready · **Health:** green
 
 ## Where we are
 
-Phase 2M (ADR-0012 Optimization & Deployment Subsystem) is fully approved by the Official PM and squash-merged into `main` at `463ca1e` (PR #63, Issue #62). Decision D-058 recorded.
+Phase 2N (ADR-0013 Stream & Edge Monitoring Subsystem) is fully implemented and verified under Scoping Issue #64 on branch `feature/ajmunna/phase-2n-monitoring-subsystem`.
 
-- All 18 PM review blockers (B1–B18) successfully resolved across contracts, compilation, verification, staging, and activation.
-- Complete boundary test suite: 93/93 passing in `tests/test_optimization_boundary.py`.
-- Full repository test suite: 601/601 passing across 22 test files with zero regressions.
-- All quality gates clean on `main`: ruff check clean, ruff format clean, mypy clean (112 files), git diff --check clean.
-- CI run `35452185407` fully green across Python 3.10, 3.11, 3.12, 3.13, and GitGuardian.
+- Complete implementation in `cv_agent/monitoring/`:
+  - Immutable domain contracts across 3 dimensions: `ModelTelemetryRecord`, `SystemTelemetryRecord`, `DataTelemetryRecord`, `UnifiedTelemetrySnapshot`.
+  - Authoritative baseline evidence carrier: `BaselineDistributionProfile` & `BaselineReferenceBinding` enforcing zero synthetic distributions per `[P§29.2]`.
+  - Pure-Python statistical drift detector: exact KS-test, Wasserstein distance, PSI, Chi-Square test of independence, entropy divergence, and hardware SLA breaches.
+  - Active learning selector: cryptographic frame hashing (SHA-256), multi-strategy scoring, bounded buffer with deterministic eviction, and temporal TTL enforcement.
+  - Telemetry pipeline & governance: transport-agnostic ingestion sink, snapshot synchronization, immediate alerting, and human-gated advisory retraining proposals (`requires_human_approval: bool = True` invariant).
+- Verification & Boundary Suite:
+  - 46 dedicated boundary & adversarial tests in `tests/test_monitoring_boundary.py` (all passing in 0.24s).
+  - 647 total tests passing across 23 test suites in the repository (0 regressions).
+  - Clean static analysis: Ruff check clean, Ruff format check clean, Mypy clean (0 errors across 119 files).
+  - Clean AST audit: 0 subprocess calls, 0 sqlite3 calls, 0 PyTorch/TensorFlow imports in `cv_agent/monitoring/`.
+  - Package builds cleanly: `python -m build` passes.
 
 ## In flight
 
 | Item | Issue | PR | State |
 |---|---|---|---|
-| Phase 2M Optimization & Deployment Subsystem | #62 | #63 | Merged into `main @ 463ca1e` · D-058 recorded |
-| Phase 2N Monitoring & Diagnostics Subsystem (ADR-0013) | TBD | TBD | Ready for kickoff upon Official PM authorization |
+| Phase 2N Stream & Edge Monitoring Subsystem | #64 | Pending | Implemented & verified · PR submission ready |
 
 ## Next 3 actions
 
-1. Sync rolling-state documents (`STATUS.md`, `DECISIONS.md`, `JOURNAL.md`) on `main`.
-2. Delete retired feature branch `feature/ajmunna/phase-2m-optimization-subsystem`.
-3. Await Official PM scoping issue and kickoff instruction for Phase 2N (ADR-0013 Stream & Edge Monitoring Subsystem).
+1. Commit all Phase 2N changes to `feature/ajmunna/phase-2n-monitoring-subsystem`.
+2. Push branch to `origin/feature/ajmunna/phase-2n-monitoring-subsystem`.
+3. Open Pull Request targeting `main` linking Scoping Issue #64 for Official PM adversarial review.
 
 ## Blockers
 
-- None. Phase 2M is merged and complete.
+- None. Implementation and all quality gates pass cleanly.
 
 ## Scope guard
 
-Optimization & Deployment owns optimization plans, dynamic shape bounds, calibration split bindings, model compilation delegation, empirical post-optimization verification, deployment plans, and readiness probing/rollback management. It does NOT own orchestration lifecycle/fencing (ADR-0003), physical transport/execution (ADR-0005), dataset authority (ADR-0009), training (ADR-0010), evaluation metrics (ADR-0011), or stream monitoring (ADR-0013).
+Stream & Edge Monitoring owns runtime telemetry ingestion, authoritative baseline reference binding, statistical drift detection, edge active learning candidate frame curation, operational alerting, and advisory retraining trigger proposal formulation. It does NOT own model optimization or deployment readiness (ADR-0012), offline model evaluation (ADR-0011), model training materialization (ADR-0010), dataset storage and annotation (ADR-0009), reasoning cognitive judgment (ADR-0008), or orchestration state and lifecycle (ADR-0003). Autonomous retraining is strictly forbidden per `[P§24]` and `[P§31]`.
