@@ -3,45 +3,45 @@
 > **Rewritten** every session. Describes **now**, never history — history lives in
 > `JOURNAL.md`. Hard cap: 60 lines. If it exceeds that, you are logging, not stating.
 
-**Updated:** 2026-09-20 · **Phase:** Phase 2N Blockers B19–B22 Remediated → PM Re-Review Ready · **Health:** green
+**Updated:** 2026-09-20 · **Phase:** Phase 2N Blockers B20 & B21 Fully Discharged → PM Final Re-Review Ready · **Health:** green
 
 ## Where we are
 
-Official PM review blockers B19–B22 on PR #65 (Phase 2N Stream & Edge Monitoring Subsystem) under Scoping Issue #64 are fully remediated on branch `feature/ajmunna/phase-2n-monitoring-subsystem`.
+Official PM adversarial re-review findings on PR #65 (Phase 2N Stream & Edge Monitoring Subsystem) under Scoping Issue #64 are fully discharged on branch `feature/ajmunna/phase-2n-monitoring-subsystem`.
 
-- B19 Remediated (Zero Synthetic Baseline Fallbacks):
-  - Strictly deleted all synthetic defaults (30.0, 20.0, 35.0, 50.0, 0.85) and throughput multiplier inference (`* 0.70`).
-  - `extract_baseline_reference_binding()` fails closed (`BaselineMismatchError`) whenever system benchmarks, confidence metrics, or authoritative `fps_p05` are missing or incompatible.
-- B20 Remediated (Mathematical Grounding & Precision):
-  - Added `parse_numeric_histogram()` enforcing canonical `<lower>-<upper>` numeric bounds, contiguity, and non-negative counts.
-  - Implemented exact piecewise-constant Riemann integral for 1D Wasserstein distance ($\sum |F_1 - F_2| \Delta x$).
-  - Characterized Kolmogorov-Smirnov test honestly as reconstructed binned empirical CDF comparison evaluated over partition cut-points and baseline quantiles.
-- B21 Remediated (Evidence Authenticity Boundary):
-  - Disentangled identity binding (`distribution_ref`), cohort consistency (sample count and class vocabulary matching `EvaluationResult`), and cryptographic content integrity (`compute_distribution_profile_hash()` SHA-256 digest validation).
-  - Eliminated loose caller arguments in `extract_baseline_reference_binding()`.
-- B22 Remediated (Chi-Square Formulation & Terminology):
-  - Re-implemented `CHI_SQUARE_INDEPENDENCE` as a true $2 \times K$ contingency table test of independence between baseline and live cohorts.
-  - Added `CHI_SQUARE_GOODNESS_OF_FIT` for one-sample tests.
+- B20 Discharged (Exact Wasserstein Integration & Mathematical Grounding):
+  - Formulated uniform-within-bin histogram semantics yielding continuous, piecewise-linear CDFs.
+  - Implemented exact closed-form linear CDF difference integration across partition sub-intervals: trapezoidal rule for constant sign ($0.5 (|d_1| + |d_2|) \Delta x$) and zero-crossing triangle decomposition for sign changes ($0.5 \Delta x (d_1^2 + d_2^2) / (|d_1| + |d_2|)$).
+  - Added analytical regression case expecting $0.20$ (where flawed endpoint-rectangle method yielded $0.10$, failing by 2x).
+  - Corrected unequal-bin test to analytically exact $0.50$ (where flawed endpoint method produced $0.40$).
+  - Maintained honest reconstructed binned empirical CDF characterization for KS tests.
+- B21 Discharged (Evidence Authenticity & Provenance Boundary):
+  - Enforced strict fail-closed boundary preventing caller-supplied profiles from manufacturing authority via self-computed digests.
+  - Required authoritative evidence hash sourced from ADR-0011 `EvaluationResult` metadata (quality metrics or evaluation plan requirements) or explicit external authoritative ledger argument.
+  - Discovered and validated cryptographic SHA-256 digest against canonical profile JSON.
+  - Retained secondary consistency validation (identity binding, cohort sample count, class distribution vocabulary).
+- B19 Tightened (Fail-Closed Seam Quality):
+  - `baseline_fps_p05: float | None = None` ensures omitting the argument raises typed `BaselineMismatchError` rather than Python `TypeError`.
 - Verification & Quality Gates:
-  - 51 tests in `tests/test_monitoring_boundary.py` passing in 0.30s.
-  - 652 total tests passing across workspace with 0 regressions.
+  - 51/51 tests in `tests/test_monitoring_boundary.py` passing in 0.20s.
+  - 652/652 total tests passing across workspace with zero regressions.
   - Ruff check clean, Ruff format clean, Mypy clean (0 errors across 119 files), git diff --check clean.
 
 ## In flight
 
 | Item | Issue | PR | State |
 |---|---|---|---|
-| Phase 2N Stream & Edge Monitoring Subsystem | #64 | #65 | Remediated B19–B22 · Awaiting PM Re-Review |
+| Phase 2N Stream & Edge Monitoring Subsystem | #64 | #65 | B19–B22 Discharged · Ready for PM Final Re-Review |
 
 ## Next 3 actions
 
-1. Commit all remediation changes to `feature/ajmunna/phase-2n-monitoring-subsystem`.
+1. Commit B20 & B21 remediation changes to `feature/ajmunna/phase-2n-monitoring-subsystem`.
 2. Push branch to `origin/feature/ajmunna/phase-2n-monitoring-subsystem`.
-3. Post formal response on PR #65 for Official PM adversarial re-review.
+3. Submit formal response on PR #65 for Official PM final re-review and merge authorization.
 
 ## Blockers
 
-- None. All four blockers B19–B22 remediated and all quality gates pass cleanly.
+- None. All four blockers B19–B22 fully discharged and all quality gates pass cleanly.
 
 ## Scope guard
 

@@ -947,10 +947,21 @@ def test_extract_baseline_reference_binding_from_evaluation_result() -> None:
         timing_source="cuda_event",
     )
 
+    profile = BaselineDistributionProfile(
+        distribution_ref="eval-evidence://eval-20260920-offline-v1/distributions",
+        confidence_histogram={"0.0-0.5": 100, "0.5-1.0": 900},
+        confidence_quantiles=(0.2, 0.5, 0.7, 0.9),
+        class_distribution={"person": 0.70, "vehicle": 0.30},
+        prediction_entropy_mean=0.28,
+        sample_count=1000,
+    )
+    expected_evidence_hash = compute_distribution_profile_hash(profile)
+
     qm = MetricResult(
         metric=plan.metrics[0],
         primary_value=0.89,
         sample_count=1000,
+        metadata={"evidence_hash": str(expected_evidence_hash)},
     )
 
     env = EvaluationEnvironmentRecord(
@@ -974,15 +985,6 @@ def test_extract_baseline_reference_binding_from_evaluation_result() -> None:
         completed_at=datetime.now(timezone.utc),
     )
 
-    profile = BaselineDistributionProfile(
-        distribution_ref="eval-evidence://eval-20260920-offline-v1/distributions",
-        confidence_histogram={"0.0-0.5": 100, "0.5-1.0": 900},
-        confidence_quantiles=(0.2, 0.5, 0.7, 0.9),
-        class_distribution={"person": 0.70, "vehicle": 0.30},
-        prediction_entropy_mean=0.28,
-        sample_count=1000,
-    )
-
     binding = extract_baseline_reference_binding(
         evaluation_result=eval_result,
         distribution_profile=profile,
@@ -996,7 +998,7 @@ def test_extract_baseline_reference_binding_from_evaluation_result() -> None:
     assert binding.baseline_confidence_mean == 0.89
     assert binding.distribution_profile.sample_count == 1000
     assert binding.distribution_profile.class_distribution["person"] == 0.70
-    assert binding.evidence_hash is not None
+    assert binding.evidence_hash == expected_evidence_hash
 
 
 # =============================================================================
@@ -1446,10 +1448,21 @@ def test_b19_zero_synthetic_baseline_fallbacks() -> None:
         timing_source="cuda_event",
     )
 
+    profile = BaselineDistributionProfile(
+        distribution_ref="eval-evidence://eval-20260920-b19-failclosed/distributions",
+        confidence_histogram={"0.0-0.5": 100, "0.5-1.0": 900},
+        confidence_quantiles=(0.2, 0.5, 0.7, 0.9),
+        class_distribution={"person": 0.70, "vehicle": 0.30},
+        prediction_entropy_mean=0.28,
+        sample_count=1000,
+    )
+    profile_hash = compute_distribution_profile_hash(profile)
+
     qm = MetricResult(
         metric=plan.metrics[0],
         primary_value=0.88,
         sample_count=1000,
+        metadata={"evidence_hash": str(profile_hash)},
     )
 
     env = EvaluationEnvironmentRecord(
@@ -1461,15 +1474,6 @@ def test_b19_zero_synthetic_baseline_fallbacks() -> None:
         python_version="3.11.0",
         torch_version="2.4.0",
         target_hardware="jetson_orin_nano",
-    )
-
-    profile = BaselineDistributionProfile(
-        distribution_ref="eval-evidence://eval-20260920-b19-failclosed/distributions",
-        confidence_histogram={"0.0-0.5": 100, "0.5-1.0": 900},
-        confidence_quantiles=(0.2, 0.5, 0.7, 0.9),
-        class_distribution={"person": 0.70, "vehicle": 0.30},
-        prediction_entropy_mean=0.28,
-        sample_count=1000,
     )
 
     # 1. Missing system_benchmarks -> fail closed (no 30.0 / 20.0 / 35.0 defaults)
@@ -1489,7 +1493,7 @@ def test_b19_zero_synthetic_baseline_fallbacks() -> None:
             baseline_fps_p05=45.0,
         )
 
-    # 2. Missing or zero baseline_fps_p05 -> fail closed (never infer from throughput * 0.70)
+    # 2a. Zero or negative baseline_fps_p05 -> fail closed (never infer from throughput * 0.70)
     eval_with_bm = EvaluationResult(
         evaluation_id=plan.evaluation_id,
         plan=plan,
@@ -1506,6 +1510,15 @@ def test_b19_zero_synthetic_baseline_fallbacks() -> None:
             eval_with_bm,
             profile,
             baseline_fps_p05=0.0,
+        )
+
+    # 2b. Omitting baseline_fps_p05 argument entirely -> raises typed BaselineMismatchError (not TypeError)
+    with pytest.raises(
+        BaselineMismatchError, match="baseline_fps_p05 must be explicitly provided"
+    ):
+        extract_baseline_reference_binding(
+            eval_with_bm,
+            profile,
         )
 
     # 3. baseline_fps_p05 exceeding baseline_fps_p50 -> fail closed
@@ -1578,21 +1591,40 @@ def test_b20_histogram_interval_validation_and_piecewise_wasserstein() -> None:
     with pytest.raises(DriftEvaluationError, match="bounds must be within"):
         parse_numeric_histogram({"0.0-1.2": 10})
 
-    # 6. Exact piecewise-constant Riemann integral with unequal bin widths
-    # Distribution 1: 100% mass in [0.0, 0.4]
-    # Distribution 2: 100% mass in [0.4, 1.0]
-    # On [0.0, 0.4]: Delta x = 0.4, |F1(0.4) - F2(0.4)| = |1.0 - 0.0| = 1.0 -> 0.40
-    # On [0.4, 1.0]: Delta x = 0.6, |F1(1.0) - F2(1.0)| = |1.0 - 1.0| = 0.0 -> 0.00
-    # Exact integral = 0.40
+    # 6. Exact piecewise-linear CDF integral with unequal bin widths
+    # Distribution 1: 100% mass in [0.0, 0.4] (uniform-within-bin CDF: F1(x) = x/0.4 on [0, 0.4], 1 on [0.4, 1.0])
+    # Distribution 2: 100% mass in [0.4, 1.0] (uniform-within-bin CDF: F2(x) = 0 on [0, 0.4], (x-0.4)/0.6 on [0.4, 1.0])
+    # Analytically on [0.0, 0.4]: Delta x = 0.4, |F1 - F2| grows linearly from 0 to 1 -> integral = 0.5 * 0.4 * 1.0 = 0.20
+    # Analytically on [0.4, 1.0]: Delta x = 0.6, |F1 - F2| decreases linearly from 1 to 0 -> integral = 0.5 * 0.6 * 1.0 = 0.30
+    # Exact integral W_1 = 0.20 + 0.30 = 0.50 (the previous flawed endpoint-rectangle method yielded 0.40)
     hist1 = {"0.0-0.4": 100, "0.4-1.0": 0}
     hist2 = {"0.0-0.4": 0, "0.4-1.0": 100}
     wass_res = detector._compute_confidence_wasserstein(hist1, hist2)
-    assert math.isclose(wass_res.statistic_value, 0.40, abs_tol=1e-3)
+    assert math.isclose(wass_res.statistic_value, 0.50, abs_tol=1e-3)
     assert (
         wass_res.details["mathematical_formulation"]
-        == "exact_piecewise_constant_riemann_integral"
+        == "exact_piecewise_linear_cdf_integral"
     )
+    assert wass_res.details["distribution_representation"] == "uniform_within_bin"
     assert wass_res.details["sub_intervals_count"] == 2
+
+    # 7. Regression case whose analytically expected answer is 0.20
+    # (proves that endpoint-rectangle method fails: old method gave 0.10, off by 2x)
+    # Distribution A: 100% mass in [0.0, 0.1] -> E[X] = 0.05
+    # Distribution B: 100% mass in [0.1, 0.4] -> E[Y] = 0.25
+    # Since X <= 0.1 <= Y almost surely, W_1 = E[Y] - E[X] = 0.25 - 0.05 = 0.20
+    # - On [0.0, 0.1]: Delta x = 0.1, |FA - FB| grows linearly from 0 to 1 -> integral = 0.5 * 0.1 * 1.0 = 0.05
+    # - On [0.1, 0.4]: Delta x = 0.3, |FA - FB| decreases linearly from 1 to 0 -> integral = 0.5 * 0.3 * 1.0 = 0.15
+    # Total W_1 = 0.05 + 0.15 = 0.20
+    hist_a = {"0.0-0.1": 100, "0.1-0.4": 0}
+    hist_b = {"0.0-0.1": 0, "0.1-0.4": 100}
+    wass_02 = detector._compute_confidence_wasserstein(hist_a, hist_b)
+    assert math.isclose(wass_02.statistic_value, 0.20, abs_tol=1e-3)
+    assert (
+        wass_02.details["mathematical_formulation"]
+        == "exact_piecewise_linear_cdf_integral"
+    )
+    assert wass_02.details["distribution_representation"] == "uniform_within_bin"
 
 
 def test_b20_binned_cdf_ks_test_evaluation() -> None:
@@ -1750,7 +1782,7 @@ def test_b21_authoritative_evidence_binding_and_tamper_rejection() -> None:
             baseline_fps_p05=45.0,
         )
 
-    # 4. Cryptographic evidence hash tamper detection
+    # 4. Caller-supplied profile with NO authoritative evidence hash cannot establish authority
     valid_profile = BaselineDistributionProfile(
         distribution_ref="eval-evidence://eval-20260920-b21-auth/distributions",
         confidence_histogram={"0.0-0.5": 500, "0.5-1.0": 1500},
@@ -1760,9 +1792,64 @@ def test_b21_authoritative_evidence_binding_and_tamper_rejection() -> None:
         sample_count=2000,
     )
     computed_hash = compute_distribution_profile_hash(valid_profile)
-    tampered_hash = ContentHash("f" * 64)
+    profile_with_self_hash = valid_profile.model_copy(
+        update={"evidence_hash": computed_hash}
+    )
 
-    # Tampered hash fails closed
+    # When EvaluationResult does not provide an authoritative evidence hash (and no evidence_hash param),
+    # the factory FAILS CLOSED rather than self-generating an evidence hash
+    with pytest.raises(
+        BaselineMismatchError,
+        match="does not provide an authoritative distribution evidence hash",
+    ):
+        extract_baseline_reference_binding(
+            eval_result,
+            profile_with_self_hash,
+            baseline_fps_p05=45.0,
+            evidence_hash=None,
+        )
+
+    # 5. Authoritative evidence hash carried directly in EvaluationResult metadata succeeds
+    eval_with_auth_hash = eval_result.model_copy(
+        update={
+            "quality_metrics": (
+                eval_result.quality_metrics[0].model_copy(
+                    update={"metadata": {"evidence_hash": str(computed_hash)}}
+                ),
+            )
+        }
+    )
+    binding_from_eval = extract_baseline_reference_binding(
+        eval_with_auth_hash,
+        valid_profile,
+        baseline_fps_p05=45.0,
+    )
+    assert binding_from_eval.evidence_hash == computed_hash
+
+    # 6. Explicit external authoritative evidence_hash succeeds
+    binding_from_arg = extract_baseline_reference_binding(
+        eval_result,
+        valid_profile,
+        baseline_fps_p05=45.0,
+        evidence_hash=computed_hash,
+    )
+    assert binding_from_arg.evidence_hash == computed_hash
+
+    # 7. Mismatch between caller explicit evidence_hash and EvaluationResult metadata fails closed
+    conflicting_hash = ContentHash("e" * 64)
+    with pytest.raises(
+        BaselineMismatchError,
+        match="does not match authoritative evidence_hash in EvaluationResult metadata",
+    ):
+        extract_baseline_reference_binding(
+            eval_with_auth_hash,
+            valid_profile,
+            baseline_fps_p05=45.0,
+            evidence_hash=conflicting_hash,
+        )
+
+    # 8. Tampered profile digest against authoritative evidence_hash fails closed
+    tampered_hash = ContentHash("f" * 64)
     with pytest.raises(
         BaselineMismatchError,
         match="Cryptographic evidence hash verification failed",
@@ -1773,15 +1860,6 @@ def test_b21_authoritative_evidence_binding_and_tamper_rejection() -> None:
             baseline_fps_p05=45.0,
             evidence_hash=tampered_hash,
         )
-
-    # Authentic hash succeeds
-    binding = extract_baseline_reference_binding(
-        eval_result,
-        valid_profile,
-        baseline_fps_p05=45.0,
-        evidence_hash=computed_hash,
-    )
-    assert binding.evidence_hash == computed_hash
 
 
 def test_b22_contingency_table_independence_test_and_goodness_of_fit() -> None:

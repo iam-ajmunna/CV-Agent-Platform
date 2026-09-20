@@ -64,23 +64,67 @@ from cv_agent.monitoring.types import (
 )
 
 
+def _extract_authoritative_evidence_hash(
+    evaluation_result: EvaluationResult,
+    explicit_evidence_hash: ContentHash | str | None,
+) -> ContentHash | None:
+    """Discover authoritative distribution evidence hash from EvaluationResult metadata or explicit argument.
+
+    Provenance Hierarchy:
+    1. Explicit caller-provided authoritative evidence hash (e.g. from ADR-0011 ledger / signed artifact).
+    2. Quality metric metadata (e.g. 'evidence_hash', 'distribution_evidence_hash', 'distribution_profile_hash').
+    3. Evaluation plan requirements ('evaluation_requirements' or 'reproducibility_requirements').
+    """
+    if explicit_evidence_hash is not None:
+        return ContentHash(str(explicit_evidence_hash))
+
+    # Inspect MetricResult metadata
+    for qm in evaluation_result.quality_metrics:
+        for key in (
+            "evidence_hash",
+            "distribution_evidence_hash",
+            "distribution_profile_hash",
+            "distribution_hash",
+        ):
+            val = qm.metadata.get(key)
+            if val:
+                return ContentHash(str(val))
+
+    # Inspect EvaluationPlan requirements
+    for key in (
+        "evidence_hash",
+        "distribution_evidence_hash",
+        "distribution_profile_hash",
+        "distribution_hash",
+    ):
+        val = evaluation_result.plan.evaluation_requirements.get(
+            key
+        ) or evaluation_result.plan.reproducibility_requirements.get(key)
+        if val:
+            return ContentHash(str(val))
+
+    return None
+
+
 def extract_baseline_reference_binding(
     evaluation_result: EvaluationResult,
     distribution_profile: BaselineDistributionProfile,
     *,
-    baseline_fps_p05: float,
+    baseline_fps_p05: float | None = None,
     baseline_fps_p50: float | None = None,
-    evidence_hash: ContentHash | None = None,
+    evidence_hash: ContentHash | str | None = None,
 ) -> BaselineReferenceBinding:
     """Factory helper to construct an authoritative BaselineReferenceBinding from an ADR-0011 EvaluationResult.
 
     Enforces:
     - B19: Zero synthetic fallback. Fails closed if system benchmarks or confidence metrics are missing.
       fps_p05 must be authoritative and explicitly provided; never inferred from throughput [P§29.2].
+      Omitting baseline_fps_p05 raises typed BaselineMismatchError fail-closed.
     - B21: Disentangled evidence authenticity boundary:
       * evaluation provenance: EvaluationResult is the authoritative source [ADR-0011].
       * distribution_ref: Identity binding referencing evaluation_id.
-      * evidence_hash: Cryptographic SHA-256 content integrity check.
+      * evidence_hash: Cryptographic SHA-256 content integrity check against authoritative ADR-0011 evidence.
+        Self-generating an evidence hash from caller-supplied profile data is strictly prohibited.
       * Cohort consistency: Sample count and class distribution vocabulary alignment.
     """
     if not isinstance(evaluation_result, EvaluationResult):
@@ -186,15 +230,42 @@ def extract_baseline_reference_binding(
                         f"do not match MetricResult ({qm.metric.name}) per_class_values keys {sorted(eval_classes)}."
                     )
 
-    # 6. B21: Content Hash Integrity Verification
-    computed_hash = compute_distribution_profile_hash(distribution_profile)
-    effective_evidence_hash = evidence_hash or distribution_profile.evidence_hash
-    if effective_evidence_hash is not None and str(computed_hash) != str(
-        effective_evidence_hash
+    # 6. B21: Authoritative Evidence Provenance & Cryptographic Verification (Fail-Closed)
+    authoritative_evidence_hash = _extract_authoritative_evidence_hash(
+        evaluation_result, evidence_hash
+    )
+    if authoritative_evidence_hash is None:
+        raise BaselineMismatchError(
+            "ADR-0011 EvaluationResult does not provide an authoritative distribution evidence hash "
+            "(and no external authoritative evidence_hash was provided). "
+            "Self-generating an evidence hash from caller-supplied profile data to manufacture "
+            "an authoritative baseline is strictly prohibited [ADR-0013, B21, P§29.2]."
+        )
+
+    eval_metadata_hash = _extract_authoritative_evidence_hash(evaluation_result, None)
+    if (
+        evidence_hash is not None
+        and eval_metadata_hash is not None
+        and str(evidence_hash) != str(eval_metadata_hash)
     ):
         raise BaselineMismatchError(
+            f"Explicit evidence_hash ({evidence_hash}) does not match "
+            f"authoritative evidence_hash in EvaluationResult metadata ({eval_metadata_hash}) [B21]."
+        )
+
+    computed_hash = compute_distribution_profile_hash(distribution_profile)
+    if str(computed_hash) != str(authoritative_evidence_hash):
+        raise BaselineMismatchError(
             f"Cryptographic evidence hash verification failed: computed profile digest {computed_hash} "
-            f"does not match authoritative evidence_hash {effective_evidence_hash} [ADR-0013, B21]."
+            f"does not match authoritative evidence_hash {authoritative_evidence_hash} [ADR-0013, B21]."
+        )
+
+    if distribution_profile.evidence_hash is not None and str(
+        distribution_profile.evidence_hash
+    ) != str(authoritative_evidence_hash):
+        raise BaselineMismatchError(
+            f"Profile evidence_hash ({distribution_profile.evidence_hash}) does not match "
+            f"authoritative evidence_hash ({authoritative_evidence_hash}) [ADR-0013, B21]."
         )
 
     eval_plan = evaluation_result.plan
@@ -204,7 +275,7 @@ def extract_baseline_reference_binding(
         model_checkpoint_hash=eval_plan.model_artifact.weights_hash,
         baseline_distribution_ref=distribution_profile.distribution_ref,
         distribution_profile=distribution_profile,
-        evidence_hash=effective_evidence_hash or computed_hash,
+        evidence_hash=authoritative_evidence_hash,
         baseline_fps_p50=fps_p50,
         baseline_fps_p05=baseline_fps_p05,
         baseline_latency_p95_ms=lat_p95,

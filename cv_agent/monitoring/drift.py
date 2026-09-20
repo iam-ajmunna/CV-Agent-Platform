@@ -460,12 +460,19 @@ class DefaultStatisticalDriftDetector:
         live_hist: Mapping[str, int],
         base_hist: Mapping[str, int],
     ) -> DriftMetricResult:
-        """Compute exact 1D Wasserstein distance for the piecewise distribution represented by validated histograms.
+        """Compute exact 1D Wasserstein distance for uniform-within-bin histogram distributions.
 
         Mathematical Grounding & Precision (B20):
-        The Wasserstein calculation is exact for the piecewise distribution represented by the validated histogram,
-        integrating absolute CDF differences over all partition sub-intervals [x_m, x_{m+1}]:
-        W_1 = integral_0^1 |F_live(x) - F_base(x)| dx = sum_m |F_live(x_{m+1}) - F_base(x_{m+1})| * Delta x_m
+        Under validated histogram semantics, probability mass is distributed uniformly within each bin,
+        yielding a continuous, piecewise-linear cumulative distribution function (CDF).
+        On each partition sub-interval [x_left, x_right] formed by the sorted union of all bin boundaries,
+        both F_live(x) and F_base(x) are affine linear functions, making their difference
+        D(x) = F_live(x) - F_base(x) strictly linear.
+        The exact integral of |D(x)| is evaluated analytically in closed form:
+        - If D(x) preserves sign (d_left * d_right >= 0): Trapezoidal rule:
+          0.5 * (|d_left| + |d_right|) * delta_x
+        - If D(x) changes sign (d_left * d_right < 0): Sum of two triangles:
+          0.5 * delta_x * (d_left^2 + d_right^2) / (|d_left| + |d_right|)
         """
         live_bins = parse_numeric_histogram(live_hist)
         base_bins = parse_numeric_histogram(base_hist)
@@ -490,9 +497,25 @@ class DefaultStatisticalDriftDetector:
             if delta_x <= 0.0:
                 continue
 
-            f_live = _eval_hist_cdf(live_bins, sum_live, x_right)
-            f_base = _eval_hist_cdf(base_bins, sum_base, x_right)
-            w1 += abs(f_live - f_base) * delta_x
+            f_live_left = _eval_hist_cdf(live_bins, sum_live, x_left)
+            f_base_left = _eval_hist_cdf(base_bins, sum_base, x_left)
+            d_left = f_live_left - f_base_left
+
+            f_live_right = _eval_hist_cdf(live_bins, sum_live, x_right)
+            f_base_right = _eval_hist_cdf(base_bins, sum_base, x_right)
+            d_right = f_live_right - f_base_right
+
+            if d_left * d_right >= 0.0:
+                w1 += 0.5 * (abs(d_left) + abs(d_right)) * delta_x
+            else:
+                abs_l = abs(d_left)
+                abs_r = abs(d_right)
+                w1 += (
+                    0.5
+                    * delta_x
+                    * (d_left * d_left + d_right * d_right)
+                    / (abs_l + abs_r)
+                )
 
         drift_detected = w1 >= self.wasserstein_threshold
         if w1 >= self.wasserstein_threshold * 2.0:
@@ -514,7 +537,8 @@ class DefaultStatisticalDriftDetector:
             severity=severity,
             details={
                 "sub_intervals_count": len(cut_points) - 1,
-                "mathematical_formulation": "exact_piecewise_constant_riemann_integral",
+                "mathematical_formulation": "exact_piecewise_linear_cdf_integral",
+                "distribution_representation": "uniform_within_bin",
             },
         )
 

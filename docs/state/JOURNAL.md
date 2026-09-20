@@ -1979,3 +1979,38 @@ Remediated all three architectural blockers identified in the Official PM's seco
 
 **Left open:** Submit PR #65 update for final Official PM re-review and merge authorization.
 
+---
+
+## 2026-09-20 — Phase 2N PM Re-Review Findings Fully Discharged (B20 & B21 Precision & Provenance on PR #65)
+
+**Did:**
+1. Fully Discharged B20 (Wasserstein Mathematical Grounding & Analytical Precision):
+   - Formally adopted and documented uniform-within-bin histogram semantics, yielding continuous, piecewise-linear cumulative distribution functions (CDFs).
+   - Replaced endpoint-rectangle Riemann sums with exact, closed-form piecewise-linear CDF difference integration across merged partition sub-intervals:
+     * When CDF difference $D(x) = F_{\text{live}}(x) - F_{\text{base}}(x)$ preserves sign across $[x_{\text{left}}, x_{\text{right}}]$, integrated via exact trapezoidal rule: $0.5 \cdot (|d_{\text{left}}| + |d_{\text{right}}|) \cdot \Delta x$.
+     * When $D(x)$ changes sign across the sub-interval, decomposed into two triangles at the exact zero-crossing point: $0.5 \cdot \Delta x \cdot \frac{d_{\text{left}}^2 + d_{\text{right}}^2}{|d_{\text{left}}| + |d_{\text{right}}|}$.
+   - Added analytical regression test expecting $0.20$ for non-overlapping uniform distributions supported on $[0.0, 0.1]$ ($E[X] = 0.05$) and $[0.1, 0.4]$ ($E[Y] = 0.25$) where $W_1 = E[Y] - E[X] = 0.20$, demonstrating that the flawed endpoint-rectangle method yielded $0.10$ (off by 2x).
+   - Corrected unequal-bin adversarial test case to analytical expectation $0.50$ ($0.20$ on $[0, 0.4]$ and $0.30$ on $[0.4, 1.0]$), replacing the flawed $0.40$ value.
+   - Retained honest characterization of KS tests as reconstructed binned empirical CDF evaluations.
+2. Fully Discharged B21 (Authoritative Evidence Provenance & Cryptographic Validation):
+   - Prohibited caller-supplied profiles from manufacturing authority merely by computing and presenting a self-generated content hash.
+   - Required an independently authoritative evidence hash anchor originating from ADR-0011 `EvaluationResult` metadata (quality metrics or evaluation plan requirements) or an explicit external authoritative ledger parameter; fails closed with `BaselineMismatchError` if neither is provided.
+   - Validated that if both caller explicit `evidence_hash` and `EvaluationResult` metadata hash are present, they must match.
+   - Cryptographically verified computed profile SHA-256 digest against the authoritative evidence hash, failing closed on tampering.
+   - Retained secondary consistency validations (evaluation ID identity binding, sample count cohort matching, class distribution vocabulary matching).
+3. Tightened B19 (Fail-Closed Seam Quality):
+   - Updated `baseline_fps_p05: float | None = None` in `extract_baseline_reference_binding()` to ensure omitting the argument raises typed `BaselineMismatchError` rather than Python `TypeError`.
+4. Verification & Quality Gates:
+   - 51/51 tests in `tests/test_monitoring_boundary.py` passing in 0.20s.
+   - 652/652 total tests passing across workspace with zero regressions.
+   - Ruff check clean, Ruff format clean, Mypy clean (0 errors across 119 source files), git diff --check clean.
+
+**Why:** Addresses the Official PM adversarial re-review findings on PR #65. Prevents mathematical inaccuracies in Wasserstein distance evaluation on non-uniform bins and enforces an unbroken cryptographic chain of custody from ADR-0011 evaluation evidence to ADR-0013 runtime monitoring baselines.
+
+**Broke:** Nothing broken. 652 repository tests pass, all gates green.
+
+**Learned:** When telemetry histograms define piecewise continuous uniform distributions within bins, optimal transport integrals must account for the linear slope of the CDF across the entire sub-interval rather than discretizing at endpoints. Furthermore, cryptographic integrity hashes must never be self-attested; they must anchor into an authoritative external evaluation manifest to establish true provenance.
+
+**Left open:** Final PM re-review on PR #65 and merge authorization to `main`.
+
+
