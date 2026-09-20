@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 from collections.abc import Mapping
 from datetime import datetime
@@ -425,6 +427,10 @@ class BaselineDistributionProfile(BaseModel):
         default=None,
         description="Optional centroid vector in feature space for baseline representation distance.",
     )
+    evidence_hash: ContentHash | None = Field(
+        default=None,
+        description="SHA-256 hash of the authoritative distribution artifact payload.",
+    )
 
     @field_validator("prediction_entropy_mean")
     @classmethod
@@ -485,6 +491,13 @@ class BaselineDistributionProfile(BaseModel):
             return tuple(v)
         return None
 
+    @field_validator("evidence_hash")
+    @classmethod
+    def _validate_evidence_hash(cls, v: ContentHash | None) -> ContentHash | None:
+        if v is not None:
+            return validate_content_hash(str(v))
+        return None
+
 
 class BaselineReferenceBinding(BaseModel):
     """Immutable binding to the validated offline baseline from ADR-0011."""
@@ -510,6 +523,10 @@ class BaselineReferenceBinding(BaseModel):
     distribution_profile: BaselineDistributionProfile = Field(
         ...,
         description="Authoritative statistical distribution profile from ADR-0011 evaluation.",
+    )
+    evidence_hash: ContentHash | None = Field(
+        default=None,
+        description="Optional cryptographic content hash of the authoritative distribution evidence artifact.",
     )
     baseline_fps_p50: float = Field(
         ...,
@@ -545,6 +562,15 @@ class BaselineReferenceBinding(BaseModel):
     @classmethod
     def _validate_content_hashes(cls, v: ContentHash) -> ContentHash:
         return validate_content_hash(str(v))
+
+    @field_validator("evidence_hash")
+    @classmethod
+    def _validate_binding_evidence_hash(
+        cls, v: ContentHash | None
+    ) -> ContentHash | None:
+        if v is not None:
+            return validate_content_hash(str(v))
+        return None
 
     @field_validator(
         "baseline_fps_p50",
@@ -588,7 +614,46 @@ class BaselineReferenceBinding(BaseModel):
                 f"baseline_distribution_ref ({self.baseline_distribution_ref}) does not match "
                 f"distribution_profile.distribution_ref ({self.distribution_profile.distribution_ref})"
             )
+        if (
+            self.evidence_hash is not None
+            and self.distribution_profile.evidence_hash is not None
+            and self.evidence_hash != self.distribution_profile.evidence_hash
+        ):
+            raise ValueError(
+                f"evidence_hash ({self.evidence_hash}) does not match "
+                f"distribution_profile.evidence_hash ({self.distribution_profile.evidence_hash})"
+            )
         return self
+
+
+def compute_distribution_profile_hash(
+    profile: BaselineDistributionProfile,
+) -> ContentHash:
+    """Compute deterministic SHA-256 content hash of BaselineDistributionProfile evidence.
+
+    Canonicalizes all distribution profile fields into a stable JSON representation per [P§25],
+    guaranteeing cryptographic content integrity independent of in-memory formatting.
+    """
+    payload = {
+        "class_distribution": dict(sorted(profile.class_distribution.items())),
+        "confidence_histogram": dict(sorted(profile.confidence_histogram.items())),
+        "confidence_quantiles": [
+            round(float(q), 6) for q in profile.confidence_quantiles
+        ],
+        "distribution_ref": profile.distribution_ref,
+        "feature_embedding_centroid": (
+            [round(float(c), 6) for c in profile.feature_embedding_centroid]
+            if profile.feature_embedding_centroid is not None
+            else None
+        ),
+        "prediction_entropy_mean": round(float(profile.prediction_entropy_mean), 6),
+        "sample_count": int(profile.sample_count),
+    }
+    canonical_bytes = json.dumps(
+        payload, sort_keys=True, separators=(",", ":")
+    ).encode()
+    digest = hashlib.sha256(canonical_bytes).hexdigest()
+    return ContentHash(digest)
 
 
 class DriftMetricResult(BaseModel):

@@ -19,6 +19,7 @@ AST Audits: Zero subprocess, zero os.system, zero sqlite3, zero PyTorch/TensorFl
 from __future__ import annotations
 
 import ast
+import math
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -56,6 +57,7 @@ from cv_agent.monitoring import (
     DefaultStatisticalDriftDetector,
     DefaultTelemetryPipeline,
     DriftEvaluationError,
+    DriftMetricType,
     DriftSeverity,
     ModelTelemetryRecord,
     MonitoringAlertRecord,
@@ -65,7 +67,9 @@ from cv_agent.monitoring import (
     TriggerProposalId,
     TriggerReason,
     UnifiedTelemetrySnapshot,
+    compute_distribution_profile_hash,
     extract_baseline_reference_binding,
+    parse_numeric_histogram,
 )
 from cv_agent.optimization.types import DeploymentId
 from cv_agent.tools import TargetId
@@ -918,8 +922,8 @@ def test_extract_baseline_reference_binding_from_evaluation_result() -> None:
         task_type=TaskType.DETECTION,
         metrics=(
             MetricDefinition(
-                metric_id=MetricId("map_50"),
-                name="mean_average_precision_50",
+                metric_id=MetricId("conf_mean"),
+                name="confidence_score_mean",
                 task_type=TaskType.DETECTION,
             ),
         ),
@@ -970,9 +974,8 @@ def test_extract_baseline_reference_binding_from_evaluation_result() -> None:
         completed_at=datetime.now(timezone.utc),
     )
 
-    binding = extract_baseline_reference_binding(
-        evaluation_result=eval_result,
-        baseline_distribution_ref="eval-evidence://eval-20260920-offline-v1/distributions",
+    profile = BaselineDistributionProfile(
+        distribution_ref="eval-evidence://eval-20260920-offline-v1/distributions",
         confidence_histogram={"0.0-0.5": 100, "0.5-1.0": 900},
         confidence_quantiles=(0.2, 0.5, 0.7, 0.9),
         class_distribution={"person": 0.70, "vehicle": 0.30},
@@ -980,11 +983,20 @@ def test_extract_baseline_reference_binding_from_evaluation_result() -> None:
         sample_count=1000,
     )
 
+    binding = extract_baseline_reference_binding(
+        evaluation_result=eval_result,
+        distribution_profile=profile,
+        baseline_fps_p05=45.0,
+    )
+
     assert binding.evaluation_id == "eval-20260920-offline-v1"
     assert binding.baseline_fps_p50 == 65.0
+    assert binding.baseline_fps_p05 == 45.0
     assert binding.baseline_latency_p95_ms == 15.0
+    assert binding.baseline_confidence_mean == 0.89
     assert binding.distribution_profile.sample_count == 1000
     assert binding.distribution_profile.class_distribution["person"] == 0.70
+    assert binding.evidence_hash is not None
 
 
 # =============================================================================
@@ -1378,3 +1390,458 @@ def test_deep_freeze_ensures_runtime_immutability() -> None:
 
     with pytest.raises(TypeError):
         snap.model_telemetry.confidence_histogram["0.0-0.1"] = 1000  # type: ignore[index]
+
+
+# =============================================================================
+# Adversarial Regression Tests for Official PM Blockers B19–B22
+# =============================================================================
+
+
+def test_b19_zero_synthetic_baseline_fallbacks() -> None:
+    """[B19] Verify fail-closed behavior on missing baseline evidence; zero synthetic fallbacks."""
+    plan = EvaluationPlan(
+        evaluation_id=EvaluationId("eval-20260920-b19-failclosed"),
+        experiment_id=ExperimentId("exp-20260920-b19"),
+        created_at=datetime.now(timezone.utc),
+        capability_id=CapabilityId("cv.eval.detector"),
+        dataset_binding=EvaluationDatasetBinding(
+            dataset_id=DatasetId("cv/dataset/eval-set"),
+            dataset_version=DatasetVersion("v1.0.0"),
+            split_name="test",
+            dataset_manifest_hash=ContentHash("1" * 64),
+        ),
+        model_artifact=ModelArtifactReference(
+            checkpoint_id=CheckpointId("ckpt-20260920-b19"),
+            architecture_name="yolov8x",
+            weights_hash=ContentHash("2" * 64),
+            weights_uri="file:///models/yolov8x.pt",
+            precision=TrainingPrecision.FP32,
+            input_resolution=(640, 640),
+        ),
+        task_type=TaskType.DETECTION,
+        metrics=(
+            MetricDefinition(
+                metric_id=MetricId("conf_metric"),
+                name="confidence_score_mean",
+                task_type=TaskType.DETECTION,
+            ),
+        ),
+    )
+
+    bm = BenchmarkResult(
+        benchmark_id=BenchmarkId("bm-sys-orin-01"),
+        batch_size=1,
+        precision=TrainingPrecision.FP16_AMP,
+        latency_min_ms=10.0,
+        latency_mean_ms=12.0,
+        latency_p50_ms=12.0,
+        latency_p90_ms=14.0,
+        latency_p95_ms=15.0,
+        latency_p99_ms=18.0,
+        latency_max_ms=20.0,
+        throughput_fps=65.0,
+        device_name="jetson_orin_nano",
+        target_id=TargetId("local_jetson"),
+        timing_synchronized=True,
+        timing_source="cuda_event",
+    )
+
+    qm = MetricResult(
+        metric=plan.metrics[0],
+        primary_value=0.88,
+        sample_count=1000,
+    )
+
+    env = EvaluationEnvironmentRecord(
+        git_commit_sha="c15a68d",
+        git_is_dirty=False,
+        dataset_manifest_hash=plan.dataset_binding.dataset_manifest_hash,
+        weights_hash=plan.model_artifact.weights_hash,
+        metric_definition_versions=("v1",),
+        python_version="3.11.0",
+        torch_version="2.4.0",
+        target_hardware="jetson_orin_nano",
+    )
+
+    profile = BaselineDistributionProfile(
+        distribution_ref="eval-evidence://eval-20260920-b19-failclosed/distributions",
+        confidence_histogram={"0.0-0.5": 100, "0.5-1.0": 900},
+        confidence_quantiles=(0.2, 0.5, 0.7, 0.9),
+        class_distribution={"person": 0.70, "vehicle": 0.30},
+        prediction_entropy_mean=0.28,
+        sample_count=1000,
+    )
+
+    # 1. Missing system_benchmarks -> fail closed (no 30.0 / 20.0 / 35.0 defaults)
+    eval_no_bm = EvaluationResult(
+        evaluation_id=plan.evaluation_id,
+        plan=plan,
+        verdict=EvaluationVerdict.PASSED,
+        quality_metrics=(qm,),
+        system_benchmarks=(),
+        environment=env,
+        completed_at=datetime.now(timezone.utc),
+    )
+    with pytest.raises(BaselineMismatchError, match="system_benchmarks evidence"):
+        extract_baseline_reference_binding(
+            eval_no_bm,
+            profile,
+            baseline_fps_p05=45.0,
+        )
+
+    # 2. Missing or zero baseline_fps_p05 -> fail closed (never infer from throughput * 0.70)
+    eval_with_bm = EvaluationResult(
+        evaluation_id=plan.evaluation_id,
+        plan=plan,
+        verdict=EvaluationVerdict.PASSED,
+        quality_metrics=(qm,),
+        system_benchmarks=(bm,),
+        environment=env,
+        completed_at=datetime.now(timezone.utc),
+    )
+    with pytest.raises(
+        BaselineMismatchError, match="baseline_fps_p05 must be explicitly provided"
+    ):
+        extract_baseline_reference_binding(
+            eval_with_bm,
+            profile,
+            baseline_fps_p05=0.0,
+        )
+
+    # 3. baseline_fps_p05 exceeding baseline_fps_p50 -> fail closed
+    with pytest.raises(BaselineMismatchError, match="cannot exceed baseline_fps_p50"):
+        extract_baseline_reference_binding(
+            eval_with_bm,
+            profile,
+            baseline_fps_p05=70.0,  # 70 > bm.throughput_fps (65.0)
+        )
+
+    # 4. Missing confidence metric in quality_metrics -> fail closed (no 0.85 default)
+    plan_no_conf = plan.model_copy(
+        update={
+            "metrics": (
+                MetricDefinition(
+                    metric_id=MetricId("map_50"),
+                    name="mean_average_precision_50",
+                    task_type=TaskType.DETECTION,
+                ),
+            )
+        }
+    )
+    qm_no_conf = MetricResult(
+        metric=plan_no_conf.metrics[0],
+        primary_value=0.75,
+        sample_count=1000,
+    )
+    eval_no_conf = EvaluationResult(
+        evaluation_id=plan.evaluation_id,
+        plan=plan_no_conf,
+        verdict=EvaluationVerdict.PASSED,
+        quality_metrics=(qm_no_conf,),
+        system_benchmarks=(bm,),
+        environment=env,
+        completed_at=datetime.now(timezone.utc),
+    )
+    with pytest.raises(
+        BaselineMismatchError, match="no authoritative confidence metric"
+    ):
+        extract_baseline_reference_binding(
+            eval_no_conf,
+            profile,
+            baseline_fps_p05=45.0,
+        )
+
+
+def test_b20_histogram_interval_validation_and_piecewise_wasserstein() -> None:
+    """[B20] Verify numeric interval validation, contiguity checks, and exact piecewise-constant Wasserstein integral."""
+    detector = DefaultStatisticalDriftDetector()
+
+    # 1. Non-numeric format or bounds fails closed
+    with pytest.raises(DriftEvaluationError, match="does not match numeric format"):
+        parse_numeric_histogram({"invalid_bin": 10})
+    with pytest.raises(DriftEvaluationError, match="non-numeric bounds"):
+        parse_numeric_histogram({"low-high": 10})
+
+    # 2. Inverted bounds fail closed
+    with pytest.raises(DriftEvaluationError, match="invalid: lower"):
+        parse_numeric_histogram({"0.8-0.2": 10})
+
+    # 3. Disjoint/non-contiguous intervals fail closed
+    with pytest.raises(DriftEvaluationError, match="intervals are not contiguous"):
+        parse_numeric_histogram({"0.0-0.4": 10, "0.5-1.0": 20})
+
+    # 4. Negative count fails closed
+    with pytest.raises(DriftEvaluationError, match="must be non-negative"):
+        parse_numeric_histogram({"0.0-0.5": -5, "0.5-1.0": 10})
+
+    # 5. Out of [0.0, 1.0] bounds fails closed
+    with pytest.raises(DriftEvaluationError, match="bounds must be within"):
+        parse_numeric_histogram({"0.0-1.2": 10})
+
+    # 6. Exact piecewise-constant Riemann integral with unequal bin widths
+    # Distribution 1: 100% mass in [0.0, 0.4]
+    # Distribution 2: 100% mass in [0.4, 1.0]
+    # On [0.0, 0.4]: Delta x = 0.4, |F1(0.4) - F2(0.4)| = |1.0 - 0.0| = 1.0 -> 0.40
+    # On [0.4, 1.0]: Delta x = 0.6, |F1(1.0) - F2(1.0)| = |1.0 - 1.0| = 0.0 -> 0.00
+    # Exact integral = 0.40
+    hist1 = {"0.0-0.4": 100, "0.4-1.0": 0}
+    hist2 = {"0.0-0.4": 0, "0.4-1.0": 100}
+    wass_res = detector._compute_confidence_wasserstein(hist1, hist2)
+    assert math.isclose(wass_res.statistic_value, 0.40, abs_tol=1e-3)
+    assert (
+        wass_res.details["mathematical_formulation"]
+        == "exact_piecewise_constant_riemann_integral"
+    )
+    assert wass_res.details["sub_intervals_count"] == 2
+
+
+def test_b20_binned_cdf_ks_test_evaluation() -> None:
+    """[B20] Verify KS calculation evaluates over binned empirical CDFs and preserves mathematical honesty."""
+    detector = DefaultStatisticalDriftDetector()
+    hist_base = {"0.0-0.5": 500, "0.5-1.0": 500}
+    hist_live = {"0.0-0.5": 100, "0.5-1.0": 900}
+    quantiles = (0.25, 0.5, 0.75)
+
+    ks_res = detector._compute_confidence_ks(
+        live_hist=hist_live,
+        base_hist=hist_base,
+        live_n=1000,
+        base_n=1000,
+        base_quantiles=quantiles,
+    )
+    # At x = 0.5: Base F = 0.50, Live F = 0.10. |0.10 - 0.50| = 0.40
+    assert math.isclose(ks_res.statistic_value, 0.40, abs_tol=1e-3)
+    assert ks_res.details["empirical_cdf_type"] == "reconstructed_binned_empirical_cdf"
+    assert (
+        ks_res.details["mathematical_characterization"]
+        == "binned_empirical_cdf_comparison"
+    )
+    # Evaluation points: {0.5, 1.0, 0.25, 0.75} -> count 4
+    assert ks_res.details["evaluation_points_count"] == 4
+
+
+def test_b21_authoritative_evidence_binding_and_tamper_rejection() -> None:
+    """[B21] Verify disentangled identity binding, cohort consistency, and cryptographic content integrity."""
+    plan = EvaluationPlan(
+        evaluation_id=EvaluationId("eval-20260920-b21-auth"),
+        experiment_id=ExperimentId("exp-20260920-b21"),
+        created_at=datetime.now(timezone.utc),
+        capability_id=CapabilityId("cv.eval.detector"),
+        dataset_binding=EvaluationDatasetBinding(
+            dataset_id=DatasetId("cv/dataset/eval-set"),
+            dataset_version=DatasetVersion("v1.0.0"),
+            split_name="test",
+            dataset_manifest_hash=ContentHash("1" * 64),
+        ),
+        model_artifact=ModelArtifactReference(
+            checkpoint_id=CheckpointId("ckpt-20260920-b21"),
+            architecture_name="yolov8x",
+            weights_hash=ContentHash("2" * 64),
+            weights_uri="file:///models/yolov8x.pt",
+            precision=TrainingPrecision.FP32,
+            input_resolution=(640, 640),
+        ),
+        task_type=TaskType.DETECTION,
+        metrics=(
+            MetricDefinition(
+                metric_id=MetricId("conf_score"),
+                name="confidence_score",
+                task_type=TaskType.DETECTION,
+            ),
+        ),
+    )
+
+    bm = BenchmarkResult(
+        benchmark_id=BenchmarkId("bm-sys-orin-01"),
+        batch_size=1,
+        precision=TrainingPrecision.FP16_AMP,
+        latency_min_ms=10.0,
+        latency_mean_ms=12.0,
+        latency_p50_ms=12.0,
+        latency_p90_ms=14.0,
+        latency_p95_ms=15.0,
+        latency_p99_ms=18.0,
+        latency_max_ms=20.0,
+        throughput_fps=65.0,
+        device_name="jetson_orin_nano",
+        target_id=TargetId("local_jetson"),
+        timing_synchronized=True,
+        timing_source="cuda_event",
+    )
+
+    qm = MetricResult(
+        metric=plan.metrics[0],
+        primary_value=0.88,
+        sample_count=2000,
+        per_class_values={"person": 0.88, "vehicle": 0.88},
+    )
+
+    env = EvaluationEnvironmentRecord(
+        git_commit_sha="c15a68d",
+        git_is_dirty=False,
+        dataset_manifest_hash=plan.dataset_binding.dataset_manifest_hash,
+        weights_hash=plan.model_artifact.weights_hash,
+        metric_definition_versions=("v1",),
+        python_version="3.11.0",
+        torch_version="2.4.0",
+        target_hardware="jetson_orin_nano",
+    )
+
+    eval_result = EvaluationResult(
+        evaluation_id=plan.evaluation_id,
+        plan=plan,
+        verdict=EvaluationVerdict.PASSED,
+        quality_metrics=(qm,),
+        system_benchmarks=(bm,),
+        environment=env,
+        completed_at=datetime.now(timezone.utc),
+    )
+
+    # 1. Identity binding check fails when distribution_ref points to different eval_id
+    foreign_profile = BaselineDistributionProfile(
+        distribution_ref="eval-evidence://different-eval-id/distributions",
+        confidence_histogram={"0.0-0.5": 500, "0.5-1.0": 1500},
+        confidence_quantiles=(0.2, 0.5, 0.7, 0.9),
+        class_distribution={"person": 0.60, "vehicle": 0.40},
+        prediction_entropy_mean=0.30,
+        sample_count=2000,
+    )
+    with pytest.raises(BaselineMismatchError, match="Identity check failed"):
+        extract_baseline_reference_binding(
+            eval_result,
+            foreign_profile,
+            baseline_fps_p05=45.0,
+        )
+
+    # 2. Cohort sample count mismatch fails closed
+    count_mismatch_profile = BaselineDistributionProfile(
+        distribution_ref="eval-evidence://eval-20260920-b21-auth/distributions",
+        confidence_histogram={"0.0-0.5": 250, "0.5-1.0": 750},
+        confidence_quantiles=(0.2, 0.5, 0.7, 0.9),
+        class_distribution={"person": 0.60, "vehicle": 0.40},
+        prediction_entropy_mean=0.30,
+        sample_count=1000,  # 1000 != qm.sample_count (2000)
+    )
+    with pytest.raises(BaselineMismatchError, match="Sample count mismatch"):
+        extract_baseline_reference_binding(
+            eval_result,
+            count_mismatch_profile,
+            baseline_fps_p05=45.0,
+        )
+
+    # 3. Class vocabulary mismatch fails closed
+    vocab_mismatch_profile = BaselineDistributionProfile(
+        distribution_ref="eval-evidence://eval-20260920-b21-auth/distributions",
+        confidence_histogram={"0.0-0.5": 500, "0.5-1.0": 1500},
+        confidence_quantiles=(0.2, 0.5, 0.7, 0.9),
+        class_distribution={
+            "cat": 0.60,
+            "dog": 0.40,
+        },  # Mismatch against person/vehicle
+        prediction_entropy_mean=0.30,
+        sample_count=2000,
+    )
+    with pytest.raises(
+        BaselineMismatchError, match="Class distribution vocabulary mismatch"
+    ):
+        extract_baseline_reference_binding(
+            eval_result,
+            vocab_mismatch_profile,
+            baseline_fps_p05=45.0,
+        )
+
+    # 4. Cryptographic evidence hash tamper detection
+    valid_profile = BaselineDistributionProfile(
+        distribution_ref="eval-evidence://eval-20260920-b21-auth/distributions",
+        confidence_histogram={"0.0-0.5": 500, "0.5-1.0": 1500},
+        confidence_quantiles=(0.2, 0.5, 0.7, 0.9),
+        class_distribution={"person": 0.60, "vehicle": 0.40},
+        prediction_entropy_mean=0.30,
+        sample_count=2000,
+    )
+    computed_hash = compute_distribution_profile_hash(valid_profile)
+    tampered_hash = ContentHash("f" * 64)
+
+    # Tampered hash fails closed
+    with pytest.raises(
+        BaselineMismatchError,
+        match="Cryptographic evidence hash verification failed",
+    ):
+        extract_baseline_reference_binding(
+            eval_result,
+            valid_profile,
+            baseline_fps_p05=45.0,
+            evidence_hash=tampered_hash,
+        )
+
+    # Authentic hash succeeds
+    binding = extract_baseline_reference_binding(
+        eval_result,
+        valid_profile,
+        baseline_fps_p05=45.0,
+        evidence_hash=computed_hash,
+    )
+    assert binding.evidence_hash == computed_hash
+
+
+def test_b22_contingency_table_independence_test_and_goodness_of_fit() -> None:
+    """[B22] Verify 2 x K contingency table test of independence and separate one-sample goodness-of-fit."""
+    detector = DefaultStatisticalDriftDetector()
+    baseline = _make_valid_baseline_binding()
+
+    # Baseline: person: 0.60, vehicle: 0.30, bicycle: 0.10, sample_count = 5000
+
+    # 1. Matching cohort: 600 person, 300 vehicle, 100 bicycle
+    matching_snap = _make_valid_telemetry_snapshot(
+        class_counts={"person": 600, "vehicle": 300, "bicycle": 100},
+        class_proportions={"person": 0.60, "vehicle": 0.30, "bicycle": 0.10},
+    )
+    matching_analysis = detector.evaluate_drift(matching_snap, baseline)
+
+    indep_matching = next(
+        r for r in matching_analysis.metric_results if r.metric_name == "class_chi2"
+    )
+    gof_matching = next(
+        r
+        for r in matching_analysis.metric_results
+        if r.metric_name == "class_chi2_goodness_of_fit"
+    )
+
+    assert indep_matching.drift_type == DriftMetricType.CHI_SQUARE_INDEPENDENCE
+    assert indep_matching.drift_detected is False
+    assert indep_matching.statistic_value < 1.0
+    assert indep_matching.p_value is not None and indep_matching.p_value > 0.90
+    assert indep_matching.details["contingency_table"] == "2x3"
+    assert indep_matching.details["degrees_of_freedom"] == 2
+
+    assert gof_matching.drift_type == DriftMetricType.CHI_SQUARE_GOODNESS_OF_FIT
+    assert gof_matching.drift_detected is False
+    assert gof_matching.statistic_value < 1.0
+    assert gof_matching.p_value is not None and gof_matching.p_value > 0.90
+    assert gof_matching.details["degrees_of_freedom"] == 2
+
+    # 2. Severely shifted cohort: 50 person, 900 vehicle, 50 bicycle
+    shifted_snap = _make_valid_telemetry_snapshot(
+        class_counts={"person": 50, "vehicle": 900, "bicycle": 50},
+        class_proportions={"person": 0.05, "vehicle": 0.90, "bicycle": 0.05},
+    )
+    shifted_analysis = detector.evaluate_drift(shifted_snap, baseline)
+
+    indep_shifted = next(
+        r for r in shifted_analysis.metric_results if r.metric_name == "class_chi2"
+    )
+    gof_shifted = next(
+        r
+        for r in shifted_analysis.metric_results
+        if r.metric_name == "class_chi2_goodness_of_fit"
+    )
+
+    assert indep_shifted.drift_detected is True
+    assert indep_shifted.statistic_value > 100.0
+    assert indep_shifted.p_value is not None and indep_shifted.p_value < 0.001
+    assert indep_shifted.severity == DriftSeverity.CRITICAL
+
+    assert gof_shifted.drift_detected is True
+    assert gof_shifted.statistic_value > 100.0
+    assert gof_shifted.p_value is not None and gof_shifted.p_value < 0.001
+    assert gof_shifted.severity == DriftSeverity.CRITICAL

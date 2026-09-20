@@ -1941,3 +1941,41 @@ Remediated all three architectural blockers identified in the Official PM's seco
 **Learned:** Statistical drift detectors must never synthesize distributions from scalar summaries (such as inventing Gaussians from means or fabricating raw samples from percentiles). Enforcing an authoritative baseline evidence carrier (`BaselineDistributionProfile`) directly linked to evaluation evidence ensures mathematical fidelity and preserves Baseline Primacy `[P§29.2]`.
 
 **Left open:** Push branch `feature/ajmunna/phase-2n-monitoring-subsystem` and open Pull Request for Official PM adversarial review.
+
+---
+
+## 2026-09-20 — Phase 2N PM Adversarial Review Blocker Remediation (B19–B22 on PR #65)
+
+**Did:**
+1. Remediated B19 (Synthetic baseline fallback):
+   - Strictly deleted all synthetic defaults (`30.0`, `20.0`, `35.0`, `50.0`, `0.85`) and heuristic multiplier inference (`fps_p05 = throughput * 0.70`) from `extract_baseline_reference_binding()`.
+   - Required authoritative system benchmark evidence in `EvaluationResult`, failing closed (`BaselineMismatchError`) if missing.
+   - Enforced explicit, authoritative `baseline_fps_p05` provided by caller; fails closed if omitted or if `fps_p05 > fps_p50`.
+   - Extracted baseline confidence mean from authoritative evaluation quality metrics; fails closed if no confidence metric exists.
+2. Remediated B21 (Evidence authenticity boundary):
+   - Disentangled `distribution_ref` (identity/location pointer), `evidence_hash` (cryptographic SHA-256 content hash), and evaluation provenance.
+   - Refactored `extract_baseline_reference_binding()` to eliminate loose caller arguments, accepting authoritative `BaselineDistributionProfile`.
+   - Verified that `distribution_profile.distribution_ref` identity aligns with `evaluation_result.evaluation_id`.
+   - Verified cohort sample count consistency between `distribution_profile.sample_count` and `EvaluationResult`.
+   - Verified class vocabulary consistency between `distribution_profile.class_distribution` and `EvaluationResult`.
+   - Introduced `compute_distribution_profile_hash()` computing deterministic SHA-256 digest over canonical JSON representation; validated declared `evidence_hash` against computed hash, failing closed on tampering.
+3. Remediated B20 (KS/Wasserstein mathematical grounding & precision):
+   - Implemented `parse_numeric_histogram()` enforcing canonical numeric bin edges (`<lower>-<upper>` with $0.0 \le \text{lower} < \text{upper} \le 1.0$), contiguity verification, and non-negative counts.
+   - Re-implemented 1D Wasserstein distance as exact piecewise-constant Riemann integral over validated partition sub-intervals: $\int_0^1 |F_{\text{live}}(x) - F_{\text{base}}(x)| dx = \sum |F_{\text{live}}(x_{m+1}) - F_{\text{base}}(x_{m+1})| \cdot \Delta x_m$.
+   - Re-implemented two-sample Kolmogorov-Smirnov test over binned empirical CDFs evaluated at all partition cut-points and baseline quantiles, explicitly documenting it as a reconstructed binned empirical CDF comparison.
+4. Remediated B22 (Chi-Square terminology & formulation):
+   - Re-implemented `CHI_SQUARE_INDEPENDENCE` as a true $2 \times K$ contingency table test of independence between the authoritative baseline cohort and live monitored cohort with $(2-1)(K-1) = K-1$ degrees of freedom.
+   - Added `CHI_SQUARE_GOODNESS_OF_FIT` (`DriftMetricType.CHI_SQUARE_GOODNESS_OF_FIT`) for one-sample tests comparing observed live counts against theoretical baseline proportions.
+5. Verification & Tests:
+   - Added 5 comprehensive adversarial regression test suites in `tests/test_monitoring_boundary.py` (51 total tests).
+   - Full test suite: 652/652 passing (0 regressions across 23 test suites).
+   - Static analysis: Ruff check clean, Ruff format clean, Mypy clean (0 errors across 119 source files), git diff --check clean.
+
+**Why:** Official PM review `5260577845` on PR #65 blocked merge on four architectural findings (B19–B22). The approved remediation plan enforces zero-synthetic Baseline Primacy per `[P§29.2]`, mathematical rigor and honesty per `[P§29.3]`, cryptographic evidence lineage per `[P§25]`, and formal statistical testing per ADR-0013.
+
+**Broke:** Nothing broken. 652 repository tests pass, all gates green.
+
+**Learned:** Subsystem boundaries must never invent defaults or use heuristics (e.g. `p05 = 0.7 * throughput`) to paper over missing evidence. Failing closed with actionable mismatch errors preserves Baseline Primacy and prevents silent runtime corruption. Additionally, statistical methods operating on binned histogram telemetry must be mathematically honest: continuous integrals must be exact piecewise Riemann sums over validated interval widths, and CDF tests must be explicitly characterized as binned empirical CDF comparisons.
+
+**Left open:** Submit PR #65 update for final Official PM re-review and merge authorization.
+

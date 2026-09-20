@@ -95,8 +95,9 @@ class DriftMetricType(str, Enum):
     )
     WASSERSTEIN_DISTANCE = "wasserstein_distance"  # Earth Mover's Distance
     CHI_SQUARE_INDEPENDENCE = (
-        "chi_square_independence"  # Discrete class distribution drift
+        "chi_square_independence"  # 2 x K contingency table independence test
     )
+    CHI_SQUARE_GOODNESS_OF_FIT = "chi_square_goodness_of_fit"  # One-sample goodness-of-fit against baseline proportions
     ENTROPY_DIVERGENCE = (
         "entropy_divergence"  # KL/JS divergence of prediction uncertainty
     )

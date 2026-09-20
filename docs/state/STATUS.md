@@ -3,40 +3,45 @@
 > **Rewritten** every session. Describes **now**, never history — history lives in
 > `JOURNAL.md`. Hard cap: 60 lines. If it exceeds that, you are logging, not stating.
 
-**Updated:** 2026-09-20 · **Phase:** Phase 2N Implemented → Verification & PR Ready · **Health:** green
+**Updated:** 2026-09-20 · **Phase:** Phase 2N Blockers B19–B22 Remediated → PM Re-Review Ready · **Health:** green
 
 ## Where we are
 
-Phase 2N (ADR-0013 Stream & Edge Monitoring Subsystem) is fully implemented and verified under Scoping Issue #64 on branch `feature/ajmunna/phase-2n-monitoring-subsystem`.
+Official PM review blockers B19–B22 on PR #65 (Phase 2N Stream & Edge Monitoring Subsystem) under Scoping Issue #64 are fully remediated on branch `feature/ajmunna/phase-2n-monitoring-subsystem`.
 
-- Complete implementation in `cv_agent/monitoring/`:
-  - Immutable domain contracts across 3 dimensions: `ModelTelemetryRecord`, `SystemTelemetryRecord`, `DataTelemetryRecord`, `UnifiedTelemetrySnapshot`.
-  - Authoritative baseline evidence carrier: `BaselineDistributionProfile` & `BaselineReferenceBinding` enforcing zero synthetic distributions per `[P§29.2]`.
-  - Pure-Python statistical drift detector: exact KS-test, Wasserstein distance, PSI, Chi-Square test of independence, entropy divergence, and hardware SLA breaches.
-  - Active learning selector: cryptographic frame hashing (SHA-256), multi-strategy scoring, bounded buffer with deterministic eviction, and temporal TTL enforcement.
-  - Telemetry pipeline & governance: transport-agnostic ingestion sink, snapshot synchronization, immediate alerting, and human-gated advisory retraining proposals (`requires_human_approval: bool = True` invariant).
-- Verification & Boundary Suite:
-  - 46 dedicated boundary & adversarial tests in `tests/test_monitoring_boundary.py` (all passing in 0.24s).
-  - 647 total tests passing across 23 test suites in the repository (0 regressions).
-  - Clean static analysis: Ruff check clean, Ruff format check clean, Mypy clean (0 errors across 119 files).
-  - Clean AST audit: 0 subprocess calls, 0 sqlite3 calls, 0 PyTorch/TensorFlow imports in `cv_agent/monitoring/`.
-  - Package builds cleanly: `python -m build` passes.
+- B19 Remediated (Zero Synthetic Baseline Fallbacks):
+  - Strictly deleted all synthetic defaults (30.0, 20.0, 35.0, 50.0, 0.85) and throughput multiplier inference (`* 0.70`).
+  - `extract_baseline_reference_binding()` fails closed (`BaselineMismatchError`) whenever system benchmarks, confidence metrics, or authoritative `fps_p05` are missing or incompatible.
+- B20 Remediated (Mathematical Grounding & Precision):
+  - Added `parse_numeric_histogram()` enforcing canonical `<lower>-<upper>` numeric bounds, contiguity, and non-negative counts.
+  - Implemented exact piecewise-constant Riemann integral for 1D Wasserstein distance ($\sum |F_1 - F_2| \Delta x$).
+  - Characterized Kolmogorov-Smirnov test honestly as reconstructed binned empirical CDF comparison evaluated over partition cut-points and baseline quantiles.
+- B21 Remediated (Evidence Authenticity Boundary):
+  - Disentangled identity binding (`distribution_ref`), cohort consistency (sample count and class vocabulary matching `EvaluationResult`), and cryptographic content integrity (`compute_distribution_profile_hash()` SHA-256 digest validation).
+  - Eliminated loose caller arguments in `extract_baseline_reference_binding()`.
+- B22 Remediated (Chi-Square Formulation & Terminology):
+  - Re-implemented `CHI_SQUARE_INDEPENDENCE` as a true $2 \times K$ contingency table test of independence between baseline and live cohorts.
+  - Added `CHI_SQUARE_GOODNESS_OF_FIT` for one-sample tests.
+- Verification & Quality Gates:
+  - 51 tests in `tests/test_monitoring_boundary.py` passing in 0.30s.
+  - 652 total tests passing across workspace with 0 regressions.
+  - Ruff check clean, Ruff format clean, Mypy clean (0 errors across 119 files), git diff --check clean.
 
 ## In flight
 
 | Item | Issue | PR | State |
 |---|---|---|---|
-| Phase 2N Stream & Edge Monitoring Subsystem | #64 | Pending | Implemented & verified · PR submission ready |
+| Phase 2N Stream & Edge Monitoring Subsystem | #64 | #65 | Remediated B19–B22 · Awaiting PM Re-Review |
 
 ## Next 3 actions
 
-1. Commit all Phase 2N changes to `feature/ajmunna/phase-2n-monitoring-subsystem`.
+1. Commit all remediation changes to `feature/ajmunna/phase-2n-monitoring-subsystem`.
 2. Push branch to `origin/feature/ajmunna/phase-2n-monitoring-subsystem`.
-3. Open Pull Request targeting `main` linking Scoping Issue #64 for Official PM adversarial review.
+3. Post formal response on PR #65 for Official PM adversarial re-review.
 
 ## Blockers
 
-- None. Implementation and all quality gates pass cleanly.
+- None. All four blockers B19–B22 remediated and all quality gates pass cleanly.
 
 ## Scope guard
 

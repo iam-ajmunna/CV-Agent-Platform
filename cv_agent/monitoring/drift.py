@@ -93,6 +93,81 @@ def _kolmogorov_sf(z: float) -> float:
     return max(0.0, min(1.0, p))
 
 
+def parse_numeric_histogram(
+    histogram: Mapping[str, int],
+) -> list[tuple[float, float, int]]:
+    """Parse and validate numeric histogram intervals formatted as '<lower>-<upper>'.
+
+    Enforces:
+    - B20: Numeric, validated histogram intervals with 0.0 <= lower < upper <= 1.0.
+    - Strict interval contiguity: bin[i] upper == bin[i+1] lower (within tolerance).
+    - Non-negative integer counts.
+    - Fails closed via DriftEvaluationError if non-numeric, disjoint, or inverted.
+    """
+    if not histogram:
+        raise DriftEvaluationError("Histogram cannot be empty.")
+
+    parsed_bins: list[tuple[float, float, int]] = []
+    for raw_k, count in histogram.items():
+        if count < 0:
+            raise DriftEvaluationError(
+                f"Histogram count for {raw_k!r} must be non-negative, got {count}"
+            )
+        parts = raw_k.split("-")
+        if len(parts) != 2:
+            raise DriftEvaluationError(
+                f"Histogram bin {raw_k!r} does not match numeric format '<lower>-<upper>'"
+            )
+        try:
+            lower = float(parts[0].strip())
+            upper = float(parts[1].strip())
+        except ValueError as err:
+            raise DriftEvaluationError(
+                f"Histogram bin {raw_k!r} has non-numeric bounds: {err}"
+            ) from err
+
+        if lower >= upper:
+            raise DriftEvaluationError(
+                f"Histogram bin {raw_k!r} invalid: lower ({lower}) >= upper ({upper})"
+            )
+        if lower < 0.0 or upper > 1.0:
+            raise DriftEvaluationError(
+                f"Histogram bin {raw_k!r} bounds must be within [0.0, 1.0], got [{lower}, {upper}]"
+            )
+        parsed_bins.append((lower, upper, int(count)))
+
+    parsed_bins.sort(key=lambda b: b[0])
+
+    for i in range(len(parsed_bins) - 1):
+        curr_upper = parsed_bins[i][1]
+        next_lower = parsed_bins[i + 1][0]
+        if not math.isclose(curr_upper, next_lower, abs_tol=1e-5):
+            raise DriftEvaluationError(
+                f"Histogram intervals are not contiguous: bin {i} upper ({curr_upper}) "
+                f"does not match bin {i + 1} lower ({next_lower})"
+            )
+
+    return parsed_bins
+
+
+def _eval_hist_cdf(bins: list[tuple[float, float, int]], total: int, x: float) -> float:
+    """Evaluate cumulative probability of binned histogram at query point x in [0.0, 1.0]."""
+    if x <= bins[0][0]:
+        return 0.0
+    if x >= bins[-1][1]:
+        return 1.0
+    cum = 0.0
+    for lower, upper, count in bins:
+        if x >= upper - 1e-9:
+            cum += count / total
+        elif x > lower:
+            cum += (count / total) * ((x - lower) / (upper - lower))
+            break
+        else:
+            break
+    return min(1.0, max(0.0, cum))
+
+
 @runtime_checkable
 class StatisticalDriftDetector(Protocol):
     """Contract for calculating distribution divergence against the validated baseline."""
@@ -197,6 +272,7 @@ class DefaultStatisticalDriftDetector:
             base_prof.confidence_histogram,
             model_t.total_inferences,
             base_prof.sample_count,
+            base_quantiles=base_prof.confidence_quantiles,
         )
         metric_results.append(ks_result)
 
@@ -217,12 +293,22 @@ class DefaultStatisticalDriftDetector:
         metric_results.append(psi_result)
 
         # ---------------------------------------------------------------------
-        # 4. Model Dimension: Chi-Square Test on Class Distribution
+        # 4a. Model Dimension: 2 x K Contingency Table Chi-Square Test of Independence
         # ---------------------------------------------------------------------
         chi2_result = self._compute_class_chi2(
-            model_t.class_counts, base_prof.class_distribution
+            model_t.class_counts,
+            base_prof.class_distribution,
+            base_prof.sample_count,
         )
         metric_results.append(chi2_result)
+
+        # ---------------------------------------------------------------------
+        # 4b. Model Dimension: One-Sample Chi-Square Goodness-of-Fit Test
+        # ---------------------------------------------------------------------
+        gof_result = self._compute_class_chi2_goodness_of_fit(
+            model_t.class_counts, base_prof.class_distribution
+        )
+        metric_results.append(gof_result)
 
         # ---------------------------------------------------------------------
         # 5. Model Dimension: Prediction Entropy & JS Divergence
@@ -306,23 +392,36 @@ class DefaultStatisticalDriftDetector:
         base_hist: Mapping[str, int],
         live_n: int,
         base_n: int,
+        base_quantiles: tuple[float, ...] | None = None,
     ) -> DriftMetricResult:
-        """Compute Kolmogorov-Smirnov distance between live and baseline confidence histograms."""
-        keys = sorted(set(live_hist.keys()) | set(base_hist.keys()))
-        total_live = max(1, live_n if live_n > 0 else sum(live_hist.values()))
-        total_base = max(1, base_n if base_n > 0 else sum(base_hist.values()))
+        """Compute two-sample Kolmogorov-Smirnov distance comparing reconstructed binned empirical CDFs.
 
-        cum_live = 0.0
-        cum_base = 0.0
+        Mathematical Grounding & Precision (B20):
+        Because input telemetry consists of binned numeric histograms rather than raw continuous observations,
+        this evaluates the supremum difference between the reconstructed empirical CDFs over all partition
+        cut-points and baseline evaluation quantiles. It is documented as a binned empirical CDF comparison,
+        not an exact unbinned continuous empirical KS test [ADR-0013, P§29.2].
+        """
+        live_bins = parse_numeric_histogram(live_hist)
+        base_bins = parse_numeric_histogram(base_hist)
+
+        total_live = max(1, live_n if live_n > 0 else sum(b[2] for b in live_bins))
+        total_base = max(1, base_n if base_n > 0 else sum(b[2] for b in base_bins))
+
+        # Evaluation points: union of upper bin boundaries from both histograms and baseline quantiles
+        eval_points = {b[1] for b in live_bins} | {b[1] for b in base_bins}
+        if base_quantiles:
+            eval_points |= set(base_quantiles)
+        sorted_eval_points = sorted(eval_points)
+
         max_d = 0.0
-
-        for k in keys:
-            cum_live += live_hist.get(k, 0) / total_live
-            cum_base += base_hist.get(k, 0) / total_base
-            diff = abs(cum_live - cum_base)
+        for x in sorted_eval_points:
+            f_live = _eval_hist_cdf(live_bins, total_live, x)
+            f_base = _eval_hist_cdf(base_bins, total_base, x)
+            diff = abs(f_live - f_base)
             max_d = max(max_d, diff)
 
-        # Asymptotic effective sample size
+        # Asymptotic effective sample size and two-sample Kolmogorov survival function
         n_eff = (total_live * total_base) / (total_live + total_base)
         z = max_d * math.sqrt(n_eff)
         p_val = _kolmogorov_sf(z)
@@ -347,7 +446,13 @@ class DefaultStatisticalDriftDetector:
             p_value_threshold=self.ks_p_value_threshold,
             drift_detected=drift_detected,
             severity=severity,
-            details={"effective_sample_size": n_eff, "z_statistic": round(z, 4)},
+            details={
+                "effective_sample_size": n_eff,
+                "z_statistic": round(z, 4),
+                "evaluation_points_count": len(sorted_eval_points),
+                "empirical_cdf_type": "reconstructed_binned_empirical_cdf",
+                "mathematical_characterization": "binned_empirical_cdf_comparison",
+            },
         )
 
     def _compute_confidence_wasserstein(
@@ -355,20 +460,39 @@ class DefaultStatisticalDriftDetector:
         live_hist: Mapping[str, int],
         base_hist: Mapping[str, int],
     ) -> DriftMetricResult:
-        """Compute Earth Mover's Distance between normalized cumulative histograms."""
-        keys = sorted(set(live_hist.keys()) | set(base_hist.keys()))
-        sum_live = max(1, sum(live_hist.values()))
-        sum_base = max(1, sum(base_hist.values()))
+        """Compute exact 1D Wasserstein distance for the piecewise distribution represented by validated histograms.
 
-        bin_width = 1.0 / max(1, len(keys))
-        cum_live = 0.0
-        cum_base = 0.0
+        Mathematical Grounding & Precision (B20):
+        The Wasserstein calculation is exact for the piecewise distribution represented by the validated histogram,
+        integrating absolute CDF differences over all partition sub-intervals [x_m, x_{m+1}]:
+        W_1 = integral_0^1 |F_live(x) - F_base(x)| dx = sum_m |F_live(x_{m+1}) - F_base(x_{m+1})| * Delta x_m
+        """
+        live_bins = parse_numeric_histogram(live_hist)
+        base_bins = parse_numeric_histogram(base_hist)
+
+        sum_live = max(1, sum(b[2] for b in live_bins))
+        sum_base = max(1, sum(b[2] for b in base_bins))
+
+        # Collect sorted unique boundary edges
+        cut_points = sorted(
+            {b[0] for b in live_bins}
+            | {b[1] for b in live_bins}
+            | {b[0] for b in base_bins}
+            | {b[1] for b in base_bins}
+        )
+
         w1 = 0.0
+        # Integrate piecewise across each sub-interval [x_m, x_{m+1}]
+        for m in range(len(cut_points) - 1):
+            x_left = cut_points[m]
+            x_right = cut_points[m + 1]
+            delta_x = x_right - x_left
+            if delta_x <= 0.0:
+                continue
 
-        for k in keys:
-            cum_live += live_hist.get(k, 0) / sum_live
-            cum_base += base_hist.get(k, 0) / sum_base
-            w1 += abs(cum_live - cum_base) * bin_width
+            f_live = _eval_hist_cdf(live_bins, sum_live, x_right)
+            f_base = _eval_hist_cdf(base_bins, sum_base, x_right)
+            w1 += abs(f_live - f_base) * delta_x
 
         drift_detected = w1 >= self.wasserstein_threshold
         if w1 >= self.wasserstein_threshold * 2.0:
@@ -388,7 +512,10 @@ class DefaultStatisticalDriftDetector:
             p_value_threshold=None,
             drift_detected=drift_detected,
             severity=severity,
-            details={"bin_count": len(keys), "bin_width": bin_width},
+            details={
+                "sub_intervals_count": len(cut_points) - 1,
+                "mathematical_formulation": "exact_piecewise_constant_riemann_integral",
+            },
         )
 
     def _compute_confidence_psi(
@@ -397,15 +524,21 @@ class DefaultStatisticalDriftDetector:
         base_hist: Mapping[str, int],
     ) -> DriftMetricResult:
         """Compute Population Stability Index between live and baseline confidence histograms."""
-        keys = sorted(set(live_hist.keys()) | set(base_hist.keys()))
-        sum_live = max(1, sum(live_hist.values()))
-        sum_base = max(1, sum(base_hist.values()))
+        live_bins = parse_numeric_histogram(live_hist)
+        base_bins = parse_numeric_histogram(base_hist)
+
+        sum_live = max(1, sum(b[2] for b in live_bins))
+        sum_base = max(1, sum(b[2] for b in base_bins))
         eps = 1e-4
 
+        live_map = {(b[0], b[1]): b[2] for b in live_bins}
+        base_map = {(b[0], b[1]): b[2] for b in base_bins}
+        all_intervals = sorted(set(live_map.keys()) | set(base_map.keys()))
+
         psi = 0.0
-        for k in keys:
-            p_live = (live_hist.get(k, 0) / sum_live) + eps
-            p_base = (base_hist.get(k, 0) / sum_base) + eps
+        for interval in all_intervals:
+            p_live = (live_map.get(interval, 0) / sum_live) + eps
+            p_base = (base_map.get(interval, 0) / sum_base) + eps
             psi += (p_live - p_base) * math.log(p_live / p_base)
 
         drift_detected = psi >= self.psi_warning_threshold
@@ -426,15 +559,25 @@ class DefaultStatisticalDriftDetector:
             p_value_threshold=None,
             drift_detected=drift_detected,
             severity=severity,
-            details={"critical_threshold": self.psi_critical_threshold},
+            details={
+                "critical_threshold": self.psi_critical_threshold,
+                "intervals_evaluated": len(all_intervals),
+            },
         )
 
     def _compute_class_chi2(
         self,
         live_counts: Mapping[str, int],
         base_proportions: Mapping[str, float],
+        base_sample_count: int = 1000,
     ) -> DriftMetricResult:
-        """Compute Chi-Square independence test comparing observed class detections to baseline expectation."""
+        """Compute 2 x K contingency table Chi-Square test of independence between live and baseline cohorts [B22].
+
+        Constructs a 2 x K contingency table:
+        - Row 1: Authoritative baseline cohort counts (derived from baseline sample_count * class_distribution)
+        - Row 2: Monitored live cohort counts from telemetry window
+        Degrees of freedom: (2 - 1) * (K - 1) = K - 1.
+        """
         classes = sorted(set(live_counts.keys()) | set(base_proportions.keys()))
         total_live = sum(live_counts.values())
 
@@ -449,17 +592,33 @@ class DefaultStatisticalDriftDetector:
                 p_value_threshold=self.chi2_p_value_threshold,
                 drift_detected=False,
                 severity=DriftSeverity.INFO,
-                details={"reason": "insufficient_detections"},
+                details={
+                    "reason": "insufficient_detections",
+                    "contingency_table": "2xK",
+                },
             )
 
-        eps = 1e-4
+        n_base = max(1, base_sample_count)
+        base_counts: dict[str, float] = {}
+        for c in classes:
+            base_counts[c] = max(1.0, round(base_proportions.get(c, 0.0) * n_base))
+
+        total_base = sum(base_counts.values())
+        grand_total = total_base + float(total_live)
+
         chi2 = 0.0
         for c in classes:
-            observed = float(live_counts.get(c, 0))
-            expected = total_live * base_proportions.get(c, eps)
-            if expected <= 0.0:
-                expected = eps
-            chi2 += ((observed - expected) ** 2) / expected
+            b_k = base_counts[c]
+            o_k = float(live_counts.get(c, 0))
+            col_total = b_k + o_k
+
+            e_base = (total_base * col_total) / grand_total
+            e_live = (float(total_live) * col_total) / grand_total
+
+            if e_base > 0:
+                chi2 += ((b_k - e_base) ** 2) / e_base
+            if e_live > 0:
+                chi2 += ((o_k - e_live) ** 2) / e_live
 
         df = max(1, len(classes) - 1)
         p_val = _chi2_sf(chi2, df)
@@ -482,7 +641,80 @@ class DefaultStatisticalDriftDetector:
             p_value_threshold=self.chi2_p_value_threshold,
             drift_detected=drift_detected,
             severity=severity,
-            details={"degrees_of_freedom": df, "total_detections": total_live},
+            details={
+                "degrees_of_freedom": df,
+                "contingency_table": f"2x{len(classes)}",
+                "baseline_cohort_size": int(total_base),
+                "live_cohort_size": int(total_live),
+                "test_formulation": "two_sample_contingency_independence",
+            },
+        )
+
+    def _compute_class_chi2_goodness_of_fit(
+        self,
+        live_counts: Mapping[str, int],
+        base_proportions: Mapping[str, float],
+    ) -> DriftMetricResult:
+        """Compute one-sample Chi-Square goodness-of-fit test against theoretical baseline proportions [B22].
+
+        Compares observed live counts O_k against expected frequencies E_k = N_live * p_base,k.
+        Degrees of freedom: K - 1.
+        """
+        classes = sorted(set(live_counts.keys()) | set(base_proportions.keys()))
+        total_live = sum(live_counts.values())
+
+        if total_live == 0 or len(classes) <= 1:
+            return DriftMetricResult(
+                dimension=TelemetryDimension.MODEL,
+                metric_name="class_chi2_goodness_of_fit",
+                drift_type=DriftMetricType.CHI_SQUARE_GOODNESS_OF_FIT,
+                statistic_value=0.0,
+                p_value=1.0,
+                statistic_threshold=15.0,
+                p_value_threshold=self.chi2_p_value_threshold,
+                drift_detected=False,
+                severity=DriftSeverity.INFO,
+                details={
+                    "reason": "insufficient_detections",
+                    "test_type": "goodness_of_fit",
+                },
+            )
+
+        eps = 1e-4
+        chi2 = 0.0
+        for c in classes:
+            observed = float(live_counts.get(c, 0))
+            expected = float(total_live) * base_proportions.get(c, eps)
+            if expected <= 0.0:
+                expected = eps
+            chi2 += ((observed - expected) ** 2) / expected
+
+        df = max(1, len(classes) - 1)
+        p_val = _chi2_sf(chi2, df)
+
+        drift_detected = p_val < self.chi2_p_value_threshold
+        if p_val < 0.001:
+            severity = DriftSeverity.CRITICAL
+        elif drift_detected:
+            severity = DriftSeverity.WARNING
+        else:
+            severity = DriftSeverity.INFO
+
+        return DriftMetricResult(
+            dimension=TelemetryDimension.MODEL,
+            metric_name="class_chi2_goodness_of_fit",
+            drift_type=DriftMetricType.CHI_SQUARE_GOODNESS_OF_FIT,
+            statistic_value=round(chi2, 4),
+            p_value=round(p_val, 6),
+            statistic_threshold=15.0,
+            p_value_threshold=self.chi2_p_value_threshold,
+            drift_detected=drift_detected,
+            severity=severity,
+            details={
+                "degrees_of_freedom": df,
+                "test_type": "one_sample_goodness_of_fit",
+                "total_detections": int(total_live),
+            },
         )
 
     def _compute_entropy_divergence(
@@ -678,3 +910,10 @@ class DefaultStatisticalDriftDetector:
         )
 
         return results
+
+
+__all__ = [
+    "DefaultStatisticalDriftDetector",
+    "StatisticalDriftDetector",
+    "parse_numeric_histogram",
+]
