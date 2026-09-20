@@ -1888,3 +1888,129 @@ Remediated all three architectural blockers identified in the Official PM's seco
 **Learned:** Rigorous adversarial review boundaries with tight iterative remediation cycles (B1–B10, B11–B14, B15–B17, B18) ensure that complex subsystems (optimization compilation, empirical verification, readiness probing, rollback safety index, and 4-tuple approval binding) achieve airtight contract purity without compromises or leakages across ADR boundaries.
 
 **Left open:** Phase 2M complete. Awaiting Official PM issue creation and kickoff instruction for Phase 2N (ADR-0013 Stream & Edge Monitoring Subsystem).
+
+---
+
+## 2026-09-20 — Phase 2N Implementation & Verification (ADR-0013, Issue #64)
+
+**Did:** Implemented and verified the Stream & Edge Monitoring Subsystem (`cv_agent/monitoring/`) per frozen ADR-0013 under Scoping Issue #64:
+1. **Immutable Domain Contracts (`cv_agent/monitoring/contracts.py`):**
+   - Tri-dimensional operational telemetry records: `ModelTelemetryRecord`, `SystemTelemetryRecord`, `DataTelemetryRecord`, and synchronized `UnifiedTelemetrySnapshot`.
+   - Authoritative baseline evidence models: `BaselineDistributionProfile` and `BaselineReferenceBinding`.
+   - Drift evaluation models: `DriftMetricResult`, `DriftAnalysisRecord`.
+   - Active learning curation models: `CandidateSample`, `ActiveLearningCandidateBatch`.
+   - Governance & alerting models: `MonitoringAlertRecord`, `RetrainingTriggerProposal`.
+2. **Baseline Primacy & Zero Synthetic Distribution (`[P§29.2]`):**
+   - Explicitly resolved the architectural blocker identified by the Official PM: eliminated synthetic distribution approximation.
+   - Bound continuous KS-test and Wasserstein distance to authoritative offline `confidence_quantiles` and `confidence_histogram`.
+   - Bound categorical Chi-Square and PSI tests to authoritative `class_distribution`.
+   - Bound information-theoretic divergence to authoritative `prediction_entropy_mean`.
+   - Required drift detector to fail closed (`BaselineMismatchError` / `DriftEvaluationError`) whenever baseline binding or distribution profile is incomplete or mismatched.
+3. **Pure-Python Statistical Drift Detector (`cv_agent/monitoring/drift.py`):**
+   - Implemented `DefaultStatisticalDriftDetector` with zero external heavy math/ML dependencies:
+     - Two-sample Kolmogorov-Smirnov test comparing empirical CDF against baseline quantiles.
+     - Wasserstein (Earth Mover's) distance via step-wise CDF integration.
+     - Population Stability Index (PSI) with epsilon smoothing.
+     - Pearson Chi-Square test of independence with survival-function p-value approximation.
+     - Prediction entropy divergence detection.
+     - Hardware latency SLA ceiling (`p99`) and warning threshold (`p95`) evaluation.
+     - Hardware throughput operational floor (`p05`) deficit detection.
+     - Optical degradation checks: defocus/blur variance and camera occlusion alerts.
+4. **Active Learning Candidate Frame Curator (`cv_agent/monitoring/active_learning.py`):**
+   - Implemented `DefaultActiveLearningSelector` with cryptographic SHA-256 frame payload hashing.
+   - Multi-strategy heuristic scoring: least confident, margin sampling, prediction entropy, optical blur, and low luminance.
+   - Bounded in-memory candidate buffer with deterministic eviction (drops lowest priority sample on capacity breach).
+   - Temporal TTL expiry enforcement (`expires_at` purging).
+   - Candidate batch assembly (`ActiveLearningCandidateBatch`) targeting ADR-0009 `DatasetId` without manifest tampering.
+5. **Telemetry Pipeline & Governance Coordinator (`cv_agent/monitoring/pipeline.py`):**
+   - Implemented `DefaultTelemetryPipeline` with decoupled ingestion sink interfaces (`TelemetryIngestionSink`).
+   - Windowed buffer management and cross-dimensional snapshot synchronization (`create_snapshot`).
+   - Operational alert dispatching (`MonitoringAlertRecord`).
+   - Retraining trigger proposal formulation (`RetrainingTriggerProposal`): strictly enforces Invariant 3 (Zero Autonomous Retraining) and Invariant 4 (Mandatory Human Approval) with `requires_human_approval: bool = True` invariant per `[P§24]` and `docs/APPROVALS.md`.
+6. **Factory Bridge (`cv_agent/monitoring/__init__.py`):**
+   - Provided `extract_baseline_reference_binding()` to seamlessly construct authoritative `BaselineReferenceBinding` from ADR-0011 `EvaluationResult`.
+7. **Comprehensive Boundary & Adversarial Test Suite (`tests/test_monitoring_boundary.py`):**
+   - 46 tests covering all 12 architectural invariants: baseline fail-closed enforcement, zero synthetic distributions, tri-dimensional snapshot validation, zero autonomous retraining, human approval requirements, cryptographic payload hashing, sub-millisecond drift execution, buffer eviction, AST audits (0 subprocess, 0 sqlite3, 0 PyTorch/TensorFlow).
+   - Total repository test suite: 647/647 passing across 23 test suites in 5.55s.
+   - Clean quality gates: Ruff check clean, Ruff format clean, Mypy clean (0 errors across 119 source files), git diff --check clean.
+
+**Why:** `[P§8]`, `[P§9]`, `[P§16]`, `[P§21]`, `[P§22]`, `[P§24]`, `[P§25]`, `[P§26]`, `[P§27]`, `[P§28]`, `[P§29.2]`, `[P§29.6]`, `[P§29.7]`, `[P§31]`, `[P§34]`, and ADR-0013. Stream and edge monitoring provides continuous operational observability and high-value data curation while strictly subordinating retraining execution to human governance.
+
+**Broke:** Nothing broken. 647 repository tests pass, all gates green.
+
+**Learned:** Statistical drift detectors must never synthesize distributions from scalar summaries (such as inventing Gaussians from means or fabricating raw samples from percentiles). Enforcing an authoritative baseline evidence carrier (`BaselineDistributionProfile`) directly linked to evaluation evidence ensures mathematical fidelity and preserves Baseline Primacy `[P§29.2]`.
+
+**Left open:** Push branch `feature/ajmunna/phase-2n-monitoring-subsystem` and open Pull Request for Official PM adversarial review.
+
+---
+
+## 2026-09-20 — Phase 2N PM Adversarial Review Blocker Remediation (B19–B22 on PR #65)
+
+**Did:**
+1. Remediated B19 (Synthetic baseline fallback):
+   - Strictly deleted all synthetic defaults (`30.0`, `20.0`, `35.0`, `50.0`, `0.85`) and heuristic multiplier inference (`fps_p05 = throughput * 0.70`) from `extract_baseline_reference_binding()`.
+   - Required authoritative system benchmark evidence in `EvaluationResult`, failing closed (`BaselineMismatchError`) if missing.
+   - Enforced explicit, authoritative `baseline_fps_p05` provided by caller; fails closed if omitted or if `fps_p05 > fps_p50`.
+   - Extracted baseline confidence mean from authoritative evaluation quality metrics; fails closed if no confidence metric exists.
+2. Remediated B21 (Evidence authenticity boundary):
+   - Disentangled `distribution_ref` (identity/location pointer), `evidence_hash` (cryptographic SHA-256 content hash), and evaluation provenance.
+   - Refactored `extract_baseline_reference_binding()` to eliminate loose caller arguments, accepting authoritative `BaselineDistributionProfile`.
+   - Verified that `distribution_profile.distribution_ref` identity aligns with `evaluation_result.evaluation_id`.
+   - Verified cohort sample count consistency between `distribution_profile.sample_count` and `EvaluationResult`.
+   - Verified class vocabulary consistency between `distribution_profile.class_distribution` and `EvaluationResult`.
+   - Introduced `compute_distribution_profile_hash()` computing deterministic SHA-256 digest over canonical JSON representation; validated declared `evidence_hash` against computed hash, failing closed on tampering.
+3. Remediated B20 (KS/Wasserstein mathematical grounding & precision):
+   - Implemented `parse_numeric_histogram()` enforcing canonical numeric bin edges (`<lower>-<upper>` with $0.0 \le \text{lower} < \text{upper} \le 1.0$), contiguity verification, and non-negative counts.
+   - Re-implemented 1D Wasserstein distance as exact piecewise-constant Riemann integral over validated partition sub-intervals: $\int_0^1 |F_{\text{live}}(x) - F_{\text{base}}(x)| dx = \sum |F_{\text{live}}(x_{m+1}) - F_{\text{base}}(x_{m+1})| \cdot \Delta x_m$.
+   - Re-implemented two-sample Kolmogorov-Smirnov test over binned empirical CDFs evaluated at all partition cut-points and baseline quantiles, explicitly documenting it as a reconstructed binned empirical CDF comparison.
+4. Remediated B22 (Chi-Square terminology & formulation):
+   - Re-implemented `CHI_SQUARE_INDEPENDENCE` as a true $2 \times K$ contingency table test of independence between the authoritative baseline cohort and live monitored cohort with $(2-1)(K-1) = K-1$ degrees of freedom.
+   - Added `CHI_SQUARE_GOODNESS_OF_FIT` (`DriftMetricType.CHI_SQUARE_GOODNESS_OF_FIT`) for one-sample tests comparing observed live counts against theoretical baseline proportions.
+5. Verification & Tests:
+   - Added 5 comprehensive adversarial regression test suites in `tests/test_monitoring_boundary.py` (51 total tests).
+   - Full test suite: 652/652 passing (0 regressions across 23 test suites).
+   - Static analysis: Ruff check clean, Ruff format clean, Mypy clean (0 errors across 119 source files), git diff --check clean.
+
+**Why:** Official PM review `5260577845` on PR #65 blocked merge on four architectural findings (B19–B22). The approved remediation plan enforces zero-synthetic Baseline Primacy per `[P§29.2]`, mathematical rigor and honesty per `[P§29.3]`, cryptographic evidence lineage per `[P§25]`, and formal statistical testing per ADR-0013.
+
+**Broke:** Nothing broken. 652 repository tests pass, all gates green.
+
+**Learned:** Subsystem boundaries must never invent defaults or use heuristics (e.g. `p05 = 0.7 * throughput`) to paper over missing evidence. Failing closed with actionable mismatch errors preserves Baseline Primacy and prevents silent runtime corruption. Additionally, statistical methods operating on binned histogram telemetry must be mathematically honest: continuous integrals must be exact piecewise Riemann sums over validated interval widths, and CDF tests must be explicitly characterized as binned empirical CDF comparisons.
+
+**Left open:** Submit PR #65 update for final Official PM re-review and merge authorization.
+
+---
+
+## 2026-09-20 — Phase 2N PM Re-Review Findings Fully Discharged (B20 & B21 Precision & Provenance on PR #65)
+
+**Did:**
+1. Fully Discharged B20 (Wasserstein Mathematical Grounding & Analytical Precision):
+   - Formally adopted and documented uniform-within-bin histogram semantics, yielding continuous, piecewise-linear cumulative distribution functions (CDFs).
+   - Replaced endpoint-rectangle Riemann sums with exact, closed-form piecewise-linear CDF difference integration across merged partition sub-intervals:
+     * When CDF difference $D(x) = F_{\text{live}}(x) - F_{\text{base}}(x)$ preserves sign across $[x_{\text{left}}, x_{\text{right}}]$, integrated via exact trapezoidal rule: $0.5 \cdot (|d_{\text{left}}| + |d_{\text{right}}|) \cdot \Delta x$.
+     * When $D(x)$ changes sign across the sub-interval, decomposed into two triangles at the exact zero-crossing point: $0.5 \cdot \Delta x \cdot \frac{d_{\text{left}}^2 + d_{\text{right}}^2}{|d_{\text{left}}| + |d_{\text{right}}|}$.
+   - Added analytical regression test expecting $0.20$ for non-overlapping uniform distributions supported on $[0.0, 0.1]$ ($E[X] = 0.05$) and $[0.1, 0.4]$ ($E[Y] = 0.25$) where $W_1 = E[Y] - E[X] = 0.20$, demonstrating that the flawed endpoint-rectangle method yielded $0.10$ (off by 2x).
+   - Corrected unequal-bin adversarial test case to analytical expectation $0.50$ ($0.20$ on $[0, 0.4]$ and $0.30$ on $[0.4, 1.0]$), replacing the flawed $0.40$ value.
+   - Retained honest characterization of KS tests as reconstructed binned empirical CDF evaluations.
+2. Fully Discharged B21 (Authoritative Evidence Provenance & Cryptographic Validation):
+   - Prohibited caller-supplied profiles from manufacturing authority merely by computing and presenting a self-generated content hash.
+   - Required an independently authoritative evidence hash anchor originating from ADR-0011 `EvaluationResult` metadata (quality metrics or evaluation plan requirements) or an explicit external authoritative ledger parameter; fails closed with `BaselineMismatchError` if neither is provided.
+   - Validated that if both caller explicit `evidence_hash` and `EvaluationResult` metadata hash are present, they must match.
+   - Cryptographically verified computed profile SHA-256 digest against the authoritative evidence hash, failing closed on tampering.
+   - Retained secondary consistency validations (evaluation ID identity binding, sample count cohort matching, class distribution vocabulary matching).
+3. Tightened B19 (Fail-Closed Seam Quality):
+   - Updated `baseline_fps_p05: float | None = None` in `extract_baseline_reference_binding()` to ensure omitting the argument raises typed `BaselineMismatchError` rather than Python `TypeError`.
+4. Verification & Quality Gates:
+   - 51/51 tests in `tests/test_monitoring_boundary.py` passing in 0.20s.
+   - 652/652 total tests passing across workspace with zero regressions.
+   - Ruff check clean, Ruff format clean, Mypy clean (0 errors across 119 source files), git diff --check clean.
+
+**Why:** Addresses the Official PM adversarial re-review findings on PR #65. Prevents mathematical inaccuracies in Wasserstein distance evaluation on non-uniform bins and enforces an unbroken cryptographic chain of custody from ADR-0011 evaluation evidence to ADR-0013 runtime monitoring baselines.
+
+**Broke:** Nothing broken. 652 repository tests pass, all gates green.
+
+**Learned:** When telemetry histograms define piecewise continuous uniform distributions within bins, optimal transport integrals must account for the linear slope of the CDF across the entire sub-interval rather than discretizing at endpoints. Furthermore, cryptographic integrity hashes must never be self-attested; they must anchor into an authoritative external evaluation manifest to establish true provenance.
+
+**Left open:** Final PM re-review on PR #65 and merge authorization to `main`.
+
+

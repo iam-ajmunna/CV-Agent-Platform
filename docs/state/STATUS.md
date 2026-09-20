@@ -3,35 +3,46 @@
 > **Rewritten** every session. Describes **now**, never history — history lives in
 > `JOURNAL.md`. Hard cap: 60 lines. If it exceeds that, you are logging, not stating.
 
-**Updated:** 2026-09-20 · **Phase:** Phase 2M Complete → Phase 2N Ready · **Health:** green
+**Updated:** 2026-09-20 · **Phase:** Phase 2N Blockers B20 & B21 Fully Discharged → PM Final Re-Review Ready · **Health:** green
 
 ## Where we are
 
-Phase 2M (ADR-0012 Optimization & Deployment Subsystem) is fully approved by the Official PM and squash-merged into `main` at `463ca1e` (PR #63, Issue #62). Decision D-058 recorded.
+Official PM adversarial re-review findings on PR #65 (Phase 2N Stream & Edge Monitoring Subsystem) under Scoping Issue #64 are fully discharged on branch `feature/ajmunna/phase-2n-monitoring-subsystem`.
 
-- All 18 PM review blockers (B1–B18) successfully resolved across contracts, compilation, verification, staging, and activation.
-- Complete boundary test suite: 93/93 passing in `tests/test_optimization_boundary.py`.
-- Full repository test suite: 601/601 passing across 22 test files with zero regressions.
-- All quality gates clean on `main`: ruff check clean, ruff format clean, mypy clean (112 files), git diff --check clean.
-- CI run `35452185407` fully green across Python 3.10, 3.11, 3.12, 3.13, and GitGuardian.
+- B20 Discharged (Exact Wasserstein Integration & Mathematical Grounding):
+  - Formulated uniform-within-bin histogram semantics yielding continuous, piecewise-linear CDFs.
+  - Implemented exact closed-form linear CDF difference integration across partition sub-intervals: trapezoidal rule for constant sign ($0.5 (|d_1| + |d_2|) \Delta x$) and zero-crossing triangle decomposition for sign changes ($0.5 \Delta x (d_1^2 + d_2^2) / (|d_1| + |d_2|)$).
+  - Added analytical regression case expecting $0.20$ (where flawed endpoint-rectangle method yielded $0.10$, failing by 2x).
+  - Corrected unequal-bin test to analytically exact $0.50$ (where flawed endpoint method produced $0.40$).
+  - Maintained honest reconstructed binned empirical CDF characterization for KS tests.
+- B21 Discharged (Evidence Authenticity & Provenance Boundary):
+  - Enforced strict fail-closed boundary preventing caller-supplied profiles from manufacturing authority via self-computed digests.
+  - Required authoritative evidence hash sourced from ADR-0011 `EvaluationResult` metadata (quality metrics or evaluation plan requirements) or explicit external authoritative ledger argument.
+  - Discovered and validated cryptographic SHA-256 digest against canonical profile JSON.
+  - Retained secondary consistency validation (identity binding, cohort sample count, class distribution vocabulary).
+- B19 Tightened (Fail-Closed Seam Quality):
+  - `baseline_fps_p05: float | None = None` ensures omitting the argument raises typed `BaselineMismatchError` rather than Python `TypeError`.
+- Verification & Quality Gates:
+  - 51/51 tests in `tests/test_monitoring_boundary.py` passing in 0.20s.
+  - 652/652 total tests passing across workspace with zero regressions.
+  - Ruff check clean, Ruff format clean, Mypy clean (0 errors across 119 files), git diff --check clean.
 
 ## In flight
 
 | Item | Issue | PR | State |
 |---|---|---|---|
-| Phase 2M Optimization & Deployment Subsystem | #62 | #63 | Merged into `main @ 463ca1e` · D-058 recorded |
-| Phase 2N Monitoring & Diagnostics Subsystem (ADR-0013) | TBD | TBD | Ready for kickoff upon Official PM authorization |
+| Phase 2N Stream & Edge Monitoring Subsystem | #64 | #65 | B19–B22 Discharged · Ready for PM Final Re-Review |
 
 ## Next 3 actions
 
-1. Sync rolling-state documents (`STATUS.md`, `DECISIONS.md`, `JOURNAL.md`) on `main`.
-2. Delete retired feature branch `feature/ajmunna/phase-2m-optimization-subsystem`.
-3. Await Official PM scoping issue and kickoff instruction for Phase 2N (ADR-0013 Stream & Edge Monitoring Subsystem).
+1. Commit B20 & B21 remediation changes to `feature/ajmunna/phase-2n-monitoring-subsystem`.
+2. Push branch to `origin/feature/ajmunna/phase-2n-monitoring-subsystem`.
+3. Submit formal response on PR #65 for Official PM final re-review and merge authorization.
 
 ## Blockers
 
-- None. Phase 2M is merged and complete.
+- None. All four blockers B19–B22 fully discharged and all quality gates pass cleanly.
 
 ## Scope guard
 
-Optimization & Deployment owns optimization plans, dynamic shape bounds, calibration split bindings, model compilation delegation, empirical post-optimization verification, deployment plans, and readiness probing/rollback management. It does NOT own orchestration lifecycle/fencing (ADR-0003), physical transport/execution (ADR-0005), dataset authority (ADR-0009), training (ADR-0010), evaluation metrics (ADR-0011), or stream monitoring (ADR-0013).
+Stream & Edge Monitoring owns runtime telemetry ingestion, authoritative baseline reference binding, statistical drift detection, edge active learning candidate frame curation, operational alerting, and advisory retraining trigger proposal formulation. It does NOT own model optimization or deployment readiness (ADR-0012), offline model evaluation (ADR-0011), model training materialization (ADR-0010), dataset storage and annotation (ADR-0009), reasoning cognitive judgment (ADR-0008), or orchestration state and lifecycle (ADR-0003). Autonomous retraining is strictly forbidden per `[P§24]` and `[P§31]`.
