@@ -93,12 +93,14 @@ from cv_agent.monitoring import (
     DataTelemetryRecord,
     DefaultStatisticalDriftDetector,
     DefaultTelemetryPipeline,
+    DeploymentBaselineBinding,
     DriftSeverity,
     ModelTelemetryRecord,
     RetrainingTriggerProposal,
     SystemTelemetryRecord,
     TriggerProposalId,
     TriggerReason,
+    bind_deployment_to_monitoring_baseline,
     compute_distribution_profile_hash,
     extract_baseline_reference_binding,
 )
@@ -121,6 +123,7 @@ from cv_agent.optimization.contracts import (
 from cv_agent.optimization.deployment import DefaultDeploymentManager
 from cv_agent.optimization.errors import (
     DeploymentApprovalRequiredError,
+    OptimizationValidationError,
     OptimizationVerificationError,
 )
 from cv_agent.optimization.types import (
@@ -206,6 +209,7 @@ def _make_approval_context(
     bound_resource_scope: str | None = None,
     bound_policy_version: str | None = None,
     expires_at: datetime | None = None,
+    request_payload_hash: str | None = None,
 ) -> tuple[OperationIdentity, ApprovalRequest, ApprovalDecision]:
     """Construct a cryptographically bound ADR-0003 approval security tuple."""
     extract_deployment_operation_payload(plan)
@@ -225,7 +229,7 @@ def _make_approval_context(
         session_id="sess-001",
         operation_id=OperationId(value=operation_id),
         operation_version=operation_version,
-        canonical_payload_hash=canonical_hash,
+        canonical_payload_hash=request_payload_hash or canonical_hash,
         policy_version=policy_version,
         action_type=operation_id,
         risk_level="HIGH",
@@ -497,8 +501,8 @@ def test_closed_loop_full_lifecycle_evidence_ledger(tmp_path: Path) -> None:
         input_resolution=(640, 640),
     )
 
-    eval_plan = EvaluationPlan(
-        evaluation_id=EvaluationId("eval-exp-traffic-v2"),
+    base_eval_plan = EvaluationPlan(
+        evaluation_id=EvaluationId("eval-exp-traffic-v2-baseline"),
         experiment_id=ExperimentId("exp-retrain-traffic-v2"),
         created_at=now,
         capability_id=CapabilityId("cv.eval.detector"),
@@ -533,7 +537,7 @@ def test_closed_loop_full_lifecycle_evidence_ledger(tmp_path: Path) -> None:
     eval_runner = DefaultEvaluationRunner()
     assert (
         eval_runner.validate_plan(
-            eval_plan,
+            base_eval_plan,
             dataset_manifest=dataset_manifest_v2,
             checkpoint_manifest=checkpoint_manifest,
         )
@@ -542,7 +546,7 @@ def test_closed_loop_full_lifecycle_evidence_ledger(tmp_path: Path) -> None:
 
     # Construct authoritative ADR-0011 baseline profile and evidence hash
     base_dist_profile = BaselineDistributionProfile(
-        distribution_ref=f"eval-evidence://{eval_plan.evaluation_id}/distributions",
+        distribution_ref=f"eval-evidence://{base_eval_plan.evaluation_id}/distributions",
         confidence_histogram={
             "0.0-0.2": 50,
             "0.2-0.4": 150,
@@ -557,19 +561,19 @@ def test_closed_loop_full_lifecycle_evidence_ledger(tmp_path: Path) -> None:
     )
     authoritative_evidence_hash = compute_distribution_profile_hash(base_dist_profile)
 
-    eval_result = EvaluationResult(
-        evaluation_id=eval_plan.evaluation_id,
-        plan=eval_plan,
+    base_eval_result = EvaluationResult(
+        evaluation_id=base_eval_plan.evaluation_id,
+        plan=base_eval_plan,
         verdict=EvaluationVerdict.PASSED,
         quality_metrics=(
             MetricResult(
-                metric=eval_plan.metrics[0],
+                metric=base_eval_plan.metrics[0],
                 primary_value=0.825,
                 sample_count=5000,
                 per_class_values={"vehicle": 0.825},
             ),
             MetricResult(
-                metric=eval_plan.metrics[1],
+                metric=base_eval_plan.metrics[1],
                 primary_value=0.865,
                 sample_count=5000,
                 metadata={"evidence_hash": str(authoritative_evidence_hash)},
@@ -622,9 +626,12 @@ def test_closed_loop_full_lifecycle_evidence_ledger(tmp_path: Path) -> None:
 
     # Assert Seam 3 → Seam 4 Boundary Invariant
     assert (
-        eval_result.plan.model_artifact.weights_hash == checkpoint_manifest.weights_hash
+        base_eval_result.plan.model_artifact.weights_hash
+        == checkpoint_manifest.weights_hash
     )
-    evidence_ledger["evaluation_evidence_hash"] = str(authoritative_evidence_hash)
+    evidence_ledger["baseline_evaluation_evidence_hash"] = str(
+        authoritative_evidence_hash
+    )
 
     # -------------------------------------------------------------------------
     # Step 5 (Seam 4 → Seam 5): Verified Model Optimization & Staged Deployment (ADR-0012)
@@ -683,21 +690,131 @@ def test_closed_loop_full_lifecycle_evidence_ledger(tmp_path: Path) -> None:
         created_at=now,
     )
 
+    # B23 Remediation: Genuine distinct candidate evaluation for the optimized artifact
+    cand_model_artifact = ModelArtifactReference(
+        checkpoint_id=CheckpointId(str(opt_artifact.artifact_id)),
+        architecture_name=training_plan.architecture_name,
+        weights_hash=opt_artifact.artifact_hash,
+        weights_uri=opt_artifact.artifact_uri,
+        precision=TrainingPrecision.FP16_AMP,
+        input_resolution=(640, 640),
+    )
+
+    cand_eval_plan = EvaluationPlan(
+        evaluation_id=EvaluationId("eval-cand-opt-traffic-v2-int8"),
+        experiment_id=ExperimentId("exp-retrain-traffic-v2"),
+        created_at=now,
+        capability_id=CapabilityId("cv.eval.detector"),
+        dataset_binding=EvaluationDatasetBinding(
+            dataset_id=dataset_manifest_v2.dataset_id,
+            dataset_version=dataset_manifest_v2.version,
+            dataset_manifest_hash=ContentHash(
+                dataset_manifest_v2.payload_root_checksum
+            ),
+            split_name="test",
+        ),
+        model_artifact=cand_model_artifact,
+        task_type=TaskType.DETECTION,
+        metrics=base_eval_plan.metrics,
+    )
+
+    cand_dist_profile = BaselineDistributionProfile(
+        distribution_ref=f"eval-evidence://{cand_eval_plan.evaluation_id}/distributions",
+        confidence_histogram={
+            "0.0-0.2": 55,
+            "0.2-0.4": 155,
+            "0.4-0.6": 310,
+            "0.6-0.8": 1530,
+            "0.8-1.0": 2950,
+        },
+        confidence_quantiles=(0.25, 0.45, 0.65, 0.82, 0.94),
+        class_distribution={"vehicle": 1.0},
+        sample_count=5000,
+        prediction_entropy_mean=0.285,
+    )
+    cand_evidence_hash = compute_distribution_profile_hash(cand_dist_profile)
+
+    cand_eval_result = EvaluationResult(
+        evaluation_id=cand_eval_plan.evaluation_id,
+        plan=cand_eval_plan,
+        verdict=EvaluationVerdict.PASSED,
+        quality_metrics=(
+            MetricResult(
+                metric=cand_eval_plan.metrics[0],
+                primary_value=0.820,  # 0.820 vs baseline 0.825 (accuracy drop 0.005 <= 0.015 tolerance)
+                sample_count=5000,
+                per_class_values={"vehicle": 0.820},
+            ),
+            MetricResult(
+                metric=cand_eval_plan.metrics[1],
+                primary_value=0.855,
+                sample_count=5000,
+                metadata={"evidence_hash": str(cand_evidence_hash)},
+            ),
+        ),
+        system_benchmarks=(
+            BenchmarkResult(
+                benchmark_id=BenchmarkId("bench-candidate-orin-01"),
+                batch_size=1,
+                precision=TrainingPrecision.FP16_AMP,
+                latency_min_ms=6.0,
+                latency_mean_ms=8.9,
+                latency_p50_ms=8.7,
+                latency_p90_ms=10.1,
+                latency_p95_ms=11.0,
+                latency_p99_ms=12.5,
+                latency_max_ms=14.0,
+                throughput_fps=112.4,  # speedup: 112.4 / 68.5 = 1.64x
+                peak_vram_gb=2.2,
+                cpu_utilization_pct=26.0,
+                gpu_utilization_pct=92.0,
+                device_name="NVIDIA Jetson AGX Orin 64GB",
+                target_id=TargetId("target-jetson-orin-01"),
+                timing_synchronized=True,
+                timing_source="cuda_event",
+            ),
+        ),
+        error_analysis=ErrorAnalysisRecord(
+            total_samples=5000,
+            failed_samples_count=900,
+            false_positive_count=360,
+            false_negative_count=540,
+            class_labels=("vehicle",),
+            confusion_matrix=((4100,),),
+        ),
+        environment=EvaluationEnvironmentRecord(
+            git_commit_sha="a88a9be" * 5 + "1234",
+            git_is_dirty=False,
+            dataset_manifest_hash=ContentHash(
+                dataset_manifest_v2.payload_root_checksum
+            ),
+            weights_hash=opt_artifact.artifact_hash,
+            metric_definition_versions=("1.0",),
+            python_version="3.11.0",
+            torch_version="2.4.0",
+            target_hardware="NVIDIA Jetson AGX Orin",
+        ),
+        completed_at=now,
+    )
+
     cand_binding = OptimizedArtifactEvaluationBinding(
         candidate_artifact_id=opt_artifact.artifact_id,
         candidate_artifact_hash=opt_artifact.artifact_hash,
-        evaluation_id=eval_result.evaluation_id,
+        evaluation_id=cand_eval_result.evaluation_id,
     )
 
     opt_verifier = DefaultOptimizationVerifier()
     opt_result = opt_verifier.verify(
         plan=opt_plan,
         artifact=opt_artifact,
-        baseline_evaluation=eval_result,
-        candidate_evaluation=eval_result,  # same accuracy within tolerance
+        baseline_evaluation=base_eval_result,
+        candidate_evaluation=cand_eval_result,
         candidate_artifact_binding=cand_binding,
     )
     assert opt_result.accuracy_retention_ratio >= 0.98
+    assert opt_result.speedup_ratio > 1.5
+    assert opt_result.verification_passed is True
+    evidence_ledger["candidate_evaluation_evidence_hash"] = str(cand_evidence_hash)
 
     # Stage and activate deployment via DefaultDeploymentManager
     target_id = TargetId("target-jetson-orin-01")
@@ -760,23 +877,50 @@ def test_closed_loop_full_lifecycle_evidence_ledger(tmp_path: Path) -> None:
     )
     assert active_record.status == DeploymentStatus.ACTIVE
     evidence_ledger["deployed_artifact_id"] = str(active_record.plan.artifact_id)
+    evidence_ledger["deployed_artifact_hash"] = str(opt_artifact.artifact_hash)
 
     # -------------------------------------------------------------------------
     # Step 6 (Seam 5 → Seam 6): Baseline Reference Binding & Drift Detection (ADR-0013)
     # -------------------------------------------------------------------------
+    # B24 Remediation: Extract baseline from candidate evaluation of the deployed optimized artifact
     baseline_binding = extract_baseline_reference_binding(
-        evaluation_result=eval_result,
-        distribution_profile=base_dist_profile,
-        baseline_fps_p05=55.0,  # explicitly provided, zero synthetic inference
-        baseline_fps_p50=68.5,
-        evidence_hash=authoritative_evidence_hash,
+        evaluation_result=cand_eval_result,
+        distribution_profile=cand_dist_profile,
+        baseline_fps_p05=85.0,  # explicitly provided, zero synthetic inference
+        baseline_fps_p50=112.4,
+        evidence_hash=cand_evidence_hash,
+        deployed_artifact_id=str(opt_artifact.artifact_id),
+        source_checkpoint_id=str(checkpoint_manifest.checkpoint_id),
+        deployment_record=active_record,
     )
 
-    # Assert Seam 5 Boundary Invariant
-    assert baseline_binding.evaluation_id == eval_result.evaluation_id
-    assert baseline_binding.evidence_hash == authoritative_evidence_hash
-    assert baseline_binding.model_checkpoint_hash == checkpoint_manifest.weights_hash
+    # Assert Seam 5 Baseline Invariants
+    assert baseline_binding.evaluation_id == cand_eval_result.evaluation_id
+    assert baseline_binding.evidence_hash == cand_evidence_hash
+    assert baseline_binding.model_checkpoint_hash == opt_artifact.artifact_hash
+    assert baseline_binding.deployed_artifact_id == str(active_record.plan.artifact_id)
+    assert baseline_binding.source_checkpoint_id == str(
+        checkpoint_manifest.checkpoint_id
+    )
     evidence_ledger["baseline_evidence_hash"] = str(baseline_binding.evidence_hash)
+
+    # Explicit immutable binding joining DeploymentRecord + Candidate Evaluation + BaselineReferenceBinding
+    dep_baseline_binding = bind_deployment_to_monitoring_baseline(
+        active_record,
+        baseline_binding,
+        optimization_result=opt_result,
+    )
+    assert isinstance(dep_baseline_binding, DeploymentBaselineBinding)
+    assert dep_baseline_binding.deployment_id == active_record.deployment_id
+    assert dep_baseline_binding.deployed_artifact_id == str(
+        active_record.plan.artifact_id
+    )
+    assert dep_baseline_binding.deployed_artifact_hash == opt_artifact.artifact_hash
+    assert dep_baseline_binding.evaluation_id == cand_eval_result.evaluation_id
+    assert dep_baseline_binding.evaluation_evidence_hash == cand_evidence_hash
+    assert dep_baseline_binding.source_checkpoint_id == str(
+        checkpoint_manifest.checkpoint_id
+    )
 
     # Ingest live telemetry into monitoring pipeline
     pipeline = DefaultTelemetryPipeline()
@@ -795,7 +939,7 @@ def test_closed_loop_full_lifecycle_evidence_ledger(tmp_path: Path) -> None:
             "0.6-0.8": 100,
             "0.8-1.0": 50,
         },
-        confidence_mean=0.52,  # down from baseline 0.865
+        confidence_mean=0.52,  # down from candidate baseline 0.855
         confidence_p10=0.25,
         confidence_p50=0.50,
         confidence_p90=0.72,
@@ -851,11 +995,11 @@ def test_closed_loop_full_lifecycle_evidence_ledger(tmp_path: Path) -> None:
     )
     assert snapshot is not None
 
-    # Evaluate drift against baseline
+    # Evaluate drift against baseline using the immutable deployment baseline binding
     drift_detector = DefaultStatisticalDriftDetector()
     drift_analysis = drift_detector.evaluate_drift(
         telemetry_window=snapshot,
-        baseline=baseline_binding,
+        baseline=dep_baseline_binding,
     )
 
     # -------------------------------------------------------------------------
@@ -885,11 +1029,15 @@ def test_closed_loop_full_lifecycle_evidence_ledger(tmp_path: Path) -> None:
     assert evidence_ledger["checkpoint_weights_hash"] == _compute_sha256(
         raw_weights_bytes
     )
-    assert evidence_ledger["evaluation_evidence_hash"] == str(
+    assert evidence_ledger["baseline_evaluation_evidence_hash"] == str(
         authoritative_evidence_hash
     )
-    assert evidence_ledger["baseline_evidence_hash"] == str(authoritative_evidence_hash)
+    assert evidence_ledger["candidate_evaluation_evidence_hash"] == str(
+        cand_evidence_hash
+    )
+    assert evidence_ledger["baseline_evidence_hash"] == str(cand_evidence_hash)
     assert evidence_ledger["deployed_artifact_id"] == "art-opt-traffic-v2-int8"
+    assert evidence_ledger["deployed_artifact_hash"] == str(opt_artifact.artifact_hash)
 
 
 # =============================================================================
@@ -1155,7 +1303,7 @@ def test_seam3_rejects_evaluation_on_tampered_checkpoint_id_or_weights() -> None
 def test_seam4_rejects_deployment_on_missing_or_mismatched_optimization_binding() -> (
     None
 ):
-    """Seam 4: DefaultDeploymentManager must reject staging when optimization result is missing or unverified."""
+    """Seam 4: Verification and deployment fail closed on missing/mismatched optimization binding (B23)."""
     now = datetime.now(timezone.utc)
     dep_manager = DefaultDeploymentManager()
     mock_executor = MockToolExecutor()
@@ -1180,7 +1328,7 @@ def test_seam4_rejects_deployment_on_missing_or_mismatched_optimization_binding(
         created_at=now,
     )
 
-    # 1. Missing OptimizationResult
+    # 1. Missing OptimizationResult in deployment staging
     with pytest.raises(
         OptimizationVerificationError, match="Mandatory OptimizationResult missing"
     ):
@@ -1190,6 +1338,302 @@ def test_seam4_rejects_deployment_on_missing_or_mismatched_optimization_binding(
             tool_id=ToolId("tool-deploy"),
             tool_executor=mock_executor,
             optimization_result=None,  # type: ignore[arg-type]
+        )
+
+    # 2. Build complete fixtures for verifier and deployment binding tests
+    source_ckpt = CheckpointId("ckpt-traffic-base")
+    source_hash = ContentHash("1" * 64)
+    opt_art_id = OptimizedArtifactId("art-001")
+    opt_art_hash = ContentHash("2" * 64)
+
+    opt_plan = OptimizationPlan(
+        plan_id=OptimizationPlanId("opt-001"),
+        source_checkpoint_id=source_ckpt,
+        source_weights_hash=source_hash,
+        technique=OptimizationTechnique.PTQ_QUANTIZATION,
+        target_precision=OptimizationPrecision.INT8,
+        target_platform="jetson",
+        target_compute_capability="8.7",
+        calibration_binding=CalibrationDatasetBinding(
+            dataset_id=DatasetId("ds-01"),
+            dataset_version=DatasetVersion("v1.0.0"),
+            dataset_manifest_hash=ContentHash("d" * 64),
+            split_name="calibration",
+            num_calibration_samples=100,
+        ),
+        verification_dataset_binding=EvaluationDatasetBinding(
+            dataset_id=DatasetId("ds-01"),
+            dataset_version=DatasetVersion("v1.0.0"),
+            dataset_manifest_hash=ContentHash("d" * 64),
+            split_name="test",
+        ),
+        created_at=now,
+    )
+
+    opt_artifact = OptimizedModelArtifact(
+        artifact_id=opt_art_id,
+        plan_id=opt_plan.plan_id,
+        source_checkpoint_id=source_ckpt,
+        technique=opt_plan.technique,
+        precision=opt_plan.target_precision,
+        runtime_format="tensorrt_engine",
+        target_device="jetson",
+        target_compute_capability="8.7",
+        artifact_hash=opt_art_hash,
+        artifact_uri="file:///models/art-001.engine",
+        artifact_size_bytes=10_000_000,
+        created_at=now,
+    )
+
+    metric_def = MetricDefinition(
+        metric_id=MetricId("m-map"),
+        name="map50",
+        task_type=TaskType.DETECTION,
+    )
+
+    base_eval = EvaluationResult(
+        evaluation_id=EvaluationId("eval-base-001"),
+        plan=EvaluationPlan(
+            evaluation_id=EvaluationId("eval-base-001"),
+            experiment_id=ExperimentId("exp-001"),
+            created_at=now,
+            capability_id=CapabilityId("cv.eval"),
+            dataset_binding=EvaluationDatasetBinding(
+                dataset_id=DatasetId("ds-01"),
+                dataset_version=DatasetVersion("v1.0.0"),
+                dataset_manifest_hash=ContentHash("d" * 64),
+                split_name="test",
+            ),
+            model_artifact=ModelArtifactReference(
+                checkpoint_id=source_ckpt,
+                architecture_name="yolo",
+                weights_hash=source_hash,
+                weights_uri="file:///models/base.pt",
+                precision=TrainingPrecision.FP16_AMP,
+                input_resolution=(640, 640),
+            ),
+            task_type=TaskType.DETECTION,
+            metrics=(metric_def,),
+        ),
+        verdict=EvaluationVerdict.PASSED,
+        quality_metrics=(
+            MetricResult(metric=metric_def, primary_value=0.80, sample_count=100),
+        ),
+        system_benchmarks=(
+            BenchmarkResult(
+                benchmark_id=BenchmarkId("bm-base"),
+                batch_size=1,
+                precision=TrainingPrecision.FP16_AMP,
+                latency_min_ms=10.0,
+                latency_mean_ms=15.0,
+                latency_p50_ms=15.0,
+                latency_p90_ms=18.0,
+                latency_p95_ms=19.0,
+                latency_p99_ms=20.0,
+                latency_max_ms=22.0,
+                throughput_fps=66.0,
+                device_name="Jetson",
+                target_id=TargetId("t1"),
+                timing_synchronized=True,
+                timing_source="cuda_event",
+            ),
+        ),
+        environment=EvaluationEnvironmentRecord(
+            git_commit_sha="c1",
+            git_is_dirty=False,
+            dataset_manifest_hash=ContentHash("d" * 64),
+            weights_hash=source_hash,
+            metric_definition_versions=("1.0",),
+            python_version="3.11.0",
+            torch_version="2.4.0",
+            target_hardware="jetson",
+        ),
+        completed_at=now,
+    )
+
+    cand_eval = EvaluationResult(
+        evaluation_id=EvaluationId("eval-cand-001"),
+        plan=EvaluationPlan(
+            evaluation_id=EvaluationId("eval-cand-001"),
+            experiment_id=ExperimentId("exp-001"),
+            created_at=now,
+            capability_id=CapabilityId("cv.eval"),
+            dataset_binding=EvaluationDatasetBinding(
+                dataset_id=DatasetId("ds-01"),
+                dataset_version=DatasetVersion("v1.0.0"),
+                dataset_manifest_hash=ContentHash("d" * 64),
+                split_name="test",
+            ),
+            model_artifact=ModelArtifactReference(
+                checkpoint_id=CheckpointId(str(opt_art_id)),
+                architecture_name="yolo",
+                weights_hash=opt_art_hash,
+                weights_uri="file:///models/art-001.engine",
+                precision=TrainingPrecision.FP16_AMP,
+                input_resolution=(640, 640),
+            ),
+            task_type=TaskType.DETECTION,
+            metrics=(metric_def,),
+        ),
+        verdict=EvaluationVerdict.PASSED,
+        quality_metrics=(
+            MetricResult(metric=metric_def, primary_value=0.795, sample_count=100),
+        ),
+        system_benchmarks=(
+            BenchmarkResult(
+                benchmark_id=BenchmarkId("bm-cand"),
+                batch_size=1,
+                precision=TrainingPrecision.FP16_AMP,
+                latency_min_ms=6.0,
+                latency_mean_ms=9.0,
+                latency_p50_ms=9.0,
+                latency_p90_ms=11.0,
+                latency_p95_ms=12.0,
+                latency_p99_ms=13.0,
+                latency_max_ms=15.0,
+                throughput_fps=110.0,
+                device_name="Jetson",
+                target_id=TargetId("t1"),
+                timing_synchronized=True,
+                timing_source="cuda_event",
+            ),
+        ),
+        environment=EvaluationEnvironmentRecord(
+            git_commit_sha="c1",
+            git_is_dirty=False,
+            dataset_manifest_hash=ContentHash("d" * 64),
+            weights_hash=opt_art_hash,
+            metric_definition_versions=("1.0",),
+            python_version="3.11.0",
+            torch_version="2.4.0",
+            target_hardware="jetson",
+        ),
+        completed_at=now,
+    )
+
+    valid_cand_binding = OptimizedArtifactEvaluationBinding(
+        candidate_artifact_id=opt_art_id,
+        candidate_artifact_hash=opt_art_hash,
+        evaluation_id=cand_eval.evaluation_id,
+    )
+
+    opt_verifier = DefaultOptimizationVerifier()
+
+    # 3. Candidate evaluation binding artifact ID mismatch
+    bad_binding_id = valid_cand_binding.model_copy(
+        update={"candidate_artifact_id": OptimizedArtifactId("art-forged")}
+    )
+    with pytest.raises(
+        OptimizationVerificationError,
+        match="Candidate artifact binding ID .* does not match artifact",
+    ):
+        opt_verifier.verify(
+            plan=opt_plan,
+            artifact=opt_artifact,
+            baseline_evaluation=base_eval,
+            candidate_evaluation=cand_eval,
+            candidate_artifact_binding=bad_binding_id,
+        )
+
+    # 4. Candidate evaluation binding artifact hash mismatch
+    bad_binding_hash = valid_cand_binding.model_copy(
+        update={"candidate_artifact_hash": ContentHash("f" * 64)}
+    )
+    with pytest.raises(
+        OptimizationVerificationError,
+        match="Candidate artifact binding hash .* does not match artifact hash",
+    ):
+        opt_verifier.verify(
+            plan=opt_plan,
+            artifact=opt_artifact,
+            baseline_evaluation=base_eval,
+            candidate_evaluation=cand_eval,
+            candidate_artifact_binding=bad_binding_hash,
+        )
+
+    # 5. Candidate evaluation binding evaluation_id mismatch
+    bad_binding_eval_id = valid_cand_binding.model_copy(
+        update={"evaluation_id": EvaluationId("eval-other")}
+    )
+    with pytest.raises(
+        OptimizationVerificationError,
+        match="Candidate artifact binding evaluation_id .* does not match candidate evaluation",
+    ):
+        opt_verifier.verify(
+            plan=opt_plan,
+            artifact=opt_artifact,
+            baseline_evaluation=base_eval,
+            candidate_evaluation=cand_eval,
+            candidate_artifact_binding=bad_binding_eval_id,
+        )
+
+    # 6. Candidate evaluation checkpoint lineage mismatch
+    tampered_ckpt_artifact = cand_eval.plan.model_artifact.model_copy(
+        update={"checkpoint_id": CheckpointId("ckpt-forged")}
+    )
+    tampered_cand_eval_ckpt = cand_eval.model_copy(
+        update={
+            "plan": cand_eval.plan.model_copy(
+                update={"model_artifact": tampered_ckpt_artifact}
+            )
+        }
+    )
+    with pytest.raises(
+        OptimizationVerificationError,
+        match="Candidate evaluation model checkpoint lineage .* does not match",
+    ):
+        opt_verifier.verify(
+            plan=opt_plan,
+            artifact=opt_artifact,
+            baseline_evaluation=base_eval,
+            candidate_evaluation=tampered_cand_eval_ckpt,
+            candidate_artifact_binding=valid_cand_binding,
+        )
+
+    # 7. Candidate evaluation weights hash mismatch
+    tampered_hash_artifact = cand_eval.plan.model_artifact.model_copy(
+        update={"weights_hash": ContentHash("9" * 64)}
+    )
+    tampered_cand_eval_hash = cand_eval.model_copy(
+        update={
+            "plan": cand_eval.plan.model_copy(
+                update={"model_artifact": tampered_hash_artifact}
+            )
+        }
+    )
+    with pytest.raises(
+        OptimizationVerificationError,
+        match="Candidate evaluation weights hash lineage .* does not match",
+    ):
+        opt_verifier.verify(
+            plan=opt_plan,
+            artifact=opt_artifact,
+            baseline_evaluation=base_eval,
+            candidate_evaluation=tampered_cand_eval_hash,
+            candidate_artifact_binding=valid_cand_binding,
+        )
+
+    # 8. Staging rejection when OptimizationResult artifact ID mismatches DeploymentPlan
+    valid_opt_result = opt_verifier.verify(
+        plan=opt_plan,
+        artifact=opt_artifact,
+        baseline_evaluation=base_eval,
+        candidate_evaluation=cand_eval,
+        candidate_artifact_binding=valid_cand_binding,
+    )
+    mismatched_dep_plan = dep_plan.model_copy(
+        update={"artifact_id": OptimizedArtifactId("art-different-target")}
+    )
+    with pytest.raises(
+        OptimizationValidationError,
+        match="does not match DeploymentPlan artifact",
+    ):
+        dep_manager.stage(
+            plan=mismatched_dep_plan,
+            target_id=target.target_id,
+            tool_id=ToolId("tool-deploy"),
+            tool_executor=mock_executor,
+            optimization_result=valid_opt_result,
         )
 
 
@@ -1218,7 +1662,7 @@ def test_seam5_rejects_baseline_binding_on_tampered_evaluation_evidence() -> Non
             dataset_binding=EvaluationDatasetBinding(
                 dataset_id=DatasetId("ds-01"),
                 dataset_version=DatasetVersion("v1.0.0"),
-                dataset_manifest_hash=ContentHash("m" * 64),
+                dataset_manifest_hash=ContentHash("d" * 64),
                 split_name="test",
             ),
             model_artifact=ModelArtifactReference(
@@ -1273,7 +1717,7 @@ def test_seam5_rejects_baseline_binding_on_tampered_evaluation_evidence() -> Non
         environment=EvaluationEnvironmentRecord(
             git_commit_sha="commit12345",
             git_is_dirty=False,
-            dataset_manifest_hash=ContentHash("m" * 64),
+            dataset_manifest_hash=ContentHash("d" * 64),
             weights_hash=ContentHash("0" * 64),
             metric_definition_versions=("1.0",),
             python_version="3.11.0",
@@ -1295,16 +1739,496 @@ def test_seam5_rejects_baseline_binding_on_tampered_evaluation_evidence() -> Non
         )
 
 
+def test_seam5_rejects_baseline_binding_on_deployed_artifact_id_mismatch() -> None:
+    """Seam 5: Baseline binding and deployment registration reject mismatched artifact IDs (B24)."""
+    now = datetime.now(timezone.utc)
+    profile = BaselineDistributionProfile(
+        distribution_ref="eval-evidence://eval-art-test/distributions",
+        confidence_histogram={"0.0-1.0": 500},
+        confidence_quantiles=(0.5,),
+        class_distribution={"vehicle": 1.0},
+        prediction_entropy_mean=0.25,
+        sample_count=500,
+    )
+    ev_hash = compute_distribution_profile_hash(profile)
+
+    eval_result = EvaluationResult(
+        evaluation_id=EvaluationId("eval-art-test"),
+        plan=EvaluationPlan(
+            evaluation_id=EvaluationId("eval-art-test"),
+            experiment_id=ExperimentId("exp-001"),
+            created_at=now,
+            capability_id=CapabilityId("cv.eval"),
+            dataset_binding=EvaluationDatasetBinding(
+                dataset_id=DatasetId("ds-01"),
+                dataset_version=DatasetVersion("v1.0.0"),
+                dataset_manifest_hash=ContentHash("d" * 64),
+                split_name="test",
+            ),
+            model_artifact=ModelArtifactReference(
+                checkpoint_id=CheckpointId("ckpt-art-test"),
+                architecture_name="yolo",
+                weights_hash=ContentHash("c" * 64),
+                weights_uri="file:///models/art.engine",
+                precision=TrainingPrecision.FP32,
+                input_resolution=(640, 640),
+            ),
+            task_type=TaskType.DETECTION,
+            metrics=(
+                MetricDefinition(
+                    metric_id=MetricId("m-conf"),
+                    name="confidence",
+                    task_type=TaskType.DETECTION,
+                ),
+            ),
+        ),
+        verdict=EvaluationVerdict.PASSED,
+        quality_metrics=(
+            MetricResult(
+                metric=MetricDefinition(
+                    metric_id=MetricId("m-conf"),
+                    name="confidence",
+                    task_type=TaskType.DETECTION,
+                ),
+                primary_value=0.88,
+                sample_count=500,
+                metadata={"evidence_hash": str(ev_hash)},
+            ),
+        ),
+        system_benchmarks=(
+            BenchmarkResult(
+                benchmark_id=BenchmarkId("b-art"),
+                batch_size=1,
+                precision=TrainingPrecision.FP32,
+                latency_min_ms=5.0,
+                latency_mean_ms=10.0,
+                latency_p50_ms=10.0,
+                latency_p90_ms=12.0,
+                latency_p95_ms=13.0,
+                latency_p99_ms=14.0,
+                latency_max_ms=15.0,
+                throughput_fps=100.0,
+                device_name="Jetson",
+                target_id=TargetId("t1"),
+                timing_synchronized=True,
+                timing_source="cuda_event",
+            ),
+        ),
+        environment=EvaluationEnvironmentRecord(
+            git_commit_sha="c1",
+            git_is_dirty=False,
+            dataset_manifest_hash=ContentHash("d" * 64),
+            weights_hash=ContentHash("c" * 64),
+            metric_definition_versions=("1.0",),
+            python_version="3.11.0",
+            torch_version="2.4.0",
+            target_hardware="Jetson",
+        ),
+        completed_at=now,
+    )
+
+    dep_rec = DeploymentRecord(
+        deployment_id=DeploymentId("dep-art-001"),
+        plan=DeploymentPlan(
+            deployment_id=DeploymentId("dep-art-001"),
+            artifact_id=OptimizedArtifactId("art-deployed-actual"),
+            target=DeploymentTarget(
+                target_id=TargetId("t1"),
+                hostname_or_ip="10.0.0.1",
+                platform_type="jetson",
+                gpu_device_name="Jetson",
+                compute_capability="8.7",
+                cuda_runtime_version="12.2",
+                driver_version="535.0",
+                max_memory_allocation_gb=32.0,
+            ),
+            runtime=DeploymentRuntime.STANDALONE_TENSORRT,
+            health_check=HealthCheckSpec(),
+            created_at=now,
+        ),
+        status=DeploymentStatus.ACTIVE,
+        target_id=TargetId("t1"),
+    )
+
+    # 1. extract_baseline_reference_binding rejects conflicting deployed_artifact_id
+    with pytest.raises(
+        BaselineMismatchError,
+        match="deployed_artifact_id .* conflicts with DeploymentRecord artifact_id",
+    ):
+        extract_baseline_reference_binding(
+            evaluation_result=eval_result,
+            distribution_profile=profile,
+            baseline_fps_p05=80.0,
+            deployed_artifact_id="art-conflicting-id",
+            deployment_record=dep_rec,
+        )
+
+    # 2. bind_deployment_to_monitoring_baseline rejects mismatched deployed artifact ID
+    baseline_binding = extract_baseline_reference_binding(
+        evaluation_result=eval_result,
+        distribution_profile=profile,
+        baseline_fps_p05=80.0,
+        deployed_artifact_id="art-candidate-target",
+    )
+    with pytest.raises(BaselineMismatchError, match="Deployed artifact ID mismatch"):
+        bind_deployment_to_monitoring_baseline(dep_rec, baseline_binding)
+
+
+def test_seam5_rejects_baseline_binding_on_deployed_artifact_hash_mismatch() -> None:
+    """Seam 5: bind_deployment_to_monitoring_baseline rejects mismatched artifact hashes (B24)."""
+    now = datetime.now(timezone.utc)
+    profile = BaselineDistributionProfile(
+        distribution_ref="eval-evidence://eval-hash-test/distributions",
+        confidence_histogram={"0.0-1.0": 500},
+        confidence_quantiles=(0.5,),
+        class_distribution={"vehicle": 1.0},
+        prediction_entropy_mean=0.25,
+        sample_count=500,
+    )
+    ev_hash = compute_distribution_profile_hash(profile)
+
+    eval_result = EvaluationResult(
+        evaluation_id=EvaluationId("eval-hash-test"),
+        plan=EvaluationPlan(
+            evaluation_id=EvaluationId("eval-hash-test"),
+            experiment_id=ExperimentId("exp-001"),
+            created_at=now,
+            capability_id=CapabilityId("cv.eval"),
+            dataset_binding=EvaluationDatasetBinding(
+                dataset_id=DatasetId("ds-01"),
+                dataset_version=DatasetVersion("v1.0.0"),
+                dataset_manifest_hash=ContentHash("d" * 64),
+                split_name="test",
+            ),
+            model_artifact=ModelArtifactReference(
+                checkpoint_id=CheckpointId("ckpt-art-test"),
+                architecture_name="yolo",
+                weights_hash=ContentHash("a" * 64),
+                weights_uri="file:///models/art.engine",
+                precision=TrainingPrecision.FP32,
+                input_resolution=(640, 640),
+            ),
+            task_type=TaskType.DETECTION,
+            metrics=(
+                MetricDefinition(
+                    metric_id=MetricId("m-conf"),
+                    name="confidence",
+                    task_type=TaskType.DETECTION,
+                ),
+            ),
+        ),
+        verdict=EvaluationVerdict.PASSED,
+        quality_metrics=(
+            MetricResult(
+                metric=MetricDefinition(
+                    metric_id=MetricId("m-conf"),
+                    name="confidence",
+                    task_type=TaskType.DETECTION,
+                ),
+                primary_value=0.88,
+                sample_count=500,
+                metadata={"evidence_hash": str(ev_hash)},
+            ),
+        ),
+        system_benchmarks=(
+            BenchmarkResult(
+                benchmark_id=BenchmarkId("b-art"),
+                batch_size=1,
+                precision=TrainingPrecision.FP32,
+                latency_min_ms=5.0,
+                latency_mean_ms=10.0,
+                latency_p50_ms=10.0,
+                latency_p90_ms=12.0,
+                latency_p95_ms=13.0,
+                latency_p99_ms=14.0,
+                latency_max_ms=15.0,
+                throughput_fps=100.0,
+                device_name="Jetson",
+                target_id=TargetId("t1"),
+                timing_synchronized=True,
+                timing_source="cuda_event",
+            ),
+        ),
+        environment=EvaluationEnvironmentRecord(
+            git_commit_sha="c1",
+            git_is_dirty=False,
+            dataset_manifest_hash=ContentHash("d" * 64),
+            weights_hash=ContentHash("a" * 64),
+            metric_definition_versions=("1.0",),
+            python_version="3.11.0",
+            torch_version="2.4.0",
+            target_hardware="Jetson",
+        ),
+        completed_at=now,
+    )
+
+    dep_rec = DeploymentRecord(
+        deployment_id=DeploymentId("dep-hash-001"),
+        plan=DeploymentPlan(
+            deployment_id=DeploymentId("dep-hash-001"),
+            artifact_id=OptimizedArtifactId("art-hash-test"),
+            target=DeploymentTarget(
+                target_id=TargetId("t1"),
+                hostname_or_ip="10.0.0.1",
+                platform_type="jetson",
+                gpu_device_name="Jetson",
+                compute_capability="8.7",
+                cuda_runtime_version="12.2",
+                driver_version="535.0",
+                max_memory_allocation_gb=32.0,
+            ),
+            runtime=DeploymentRuntime.STANDALONE_TENSORRT,
+            health_check=HealthCheckSpec(),
+            created_at=now,
+        ),
+        status=DeploymentStatus.ACTIVE,
+        target_id=TargetId("t1"),
+    )
+
+    baseline_binding = extract_baseline_reference_binding(
+        evaluation_result=eval_result,
+        distribution_profile=profile,
+        baseline_fps_p05=80.0,
+        deployed_artifact_id="art-hash-test",
+    )
+
+    # Deployed artifact hash differs from candidate evaluation weights hash
+    with pytest.raises(BaselineMismatchError, match="Deployed artifact hash mismatch"):
+        bind_deployment_to_monitoring_baseline(
+            dep_rec,
+            baseline_binding,
+            candidate_artifact_hash=ContentHash("b" * 64),
+        )
+
+
+def test_seam5_rejects_monitoring_baseline_on_rollback_artifact_mismatch() -> None:
+    """Seam 5: Rollback or replacement without corresponding baseline binding fails closed (B24)."""
+    now = datetime.now(timezone.utc)
+    profile = BaselineDistributionProfile(
+        distribution_ref="eval-evidence://eval-v2-int8/distributions",
+        confidence_histogram={"0.0-1.0": 500},
+        confidence_quantiles=(0.5,),
+        class_distribution={"vehicle": 1.0},
+        prediction_entropy_mean=0.25,
+        sample_count=500,
+    )
+    ev_hash = compute_distribution_profile_hash(profile)
+
+    eval_result_v2 = EvaluationResult(
+        evaluation_id=EvaluationId("eval-v2-int8"),
+        plan=EvaluationPlan(
+            evaluation_id=EvaluationId("eval-v2-int8"),
+            experiment_id=ExperimentId("exp-001"),
+            created_at=now,
+            capability_id=CapabilityId("cv.eval"),
+            dataset_binding=EvaluationDatasetBinding(
+                dataset_id=DatasetId("ds-01"),
+                dataset_version=DatasetVersion("v2.0.0"),
+                dataset_manifest_hash=ContentHash("d" * 64),
+                split_name="test",
+            ),
+            model_artifact=ModelArtifactReference(
+                checkpoint_id=CheckpointId("art-traffic-v2-int8"),
+                architecture_name="yolo",
+                weights_hash=ContentHash("2" * 64),
+                weights_uri="file:///models/v2.engine",
+                precision=TrainingPrecision.FP32,
+                input_resolution=(640, 640),
+            ),
+            task_type=TaskType.DETECTION,
+            metrics=(
+                MetricDefinition(
+                    metric_id=MetricId("m-conf"),
+                    name="confidence",
+                    task_type=TaskType.DETECTION,
+                ),
+            ),
+        ),
+        verdict=EvaluationVerdict.PASSED,
+        quality_metrics=(
+            MetricResult(
+                metric=MetricDefinition(
+                    metric_id=MetricId("m-conf"),
+                    name="confidence",
+                    task_type=TaskType.DETECTION,
+                ),
+                primary_value=0.85,
+                sample_count=500,
+                metadata={"evidence_hash": str(ev_hash)},
+            ),
+        ),
+        system_benchmarks=(
+            BenchmarkResult(
+                benchmark_id=BenchmarkId("b-v2"),
+                batch_size=1,
+                precision=TrainingPrecision.FP32,
+                latency_min_ms=5.0,
+                latency_mean_ms=8.0,
+                latency_p50_ms=8.0,
+                latency_p90_ms=10.0,
+                latency_p95_ms=11.0,
+                latency_p99_ms=12.0,
+                latency_max_ms=13.0,
+                throughput_fps=120.0,
+                device_name="Jetson",
+                target_id=TargetId("t1"),
+                timing_synchronized=True,
+                timing_source="cuda_event",
+            ),
+        ),
+        environment=EvaluationEnvironmentRecord(
+            git_commit_sha="c2",
+            git_is_dirty=False,
+            dataset_manifest_hash=ContentHash("d" * 64),
+            weights_hash=ContentHash("2" * 64),
+            metric_definition_versions=("1.0",),
+            python_version="3.11.0",
+            torch_version="2.4.0",
+            target_hardware="Jetson",
+        ),
+        completed_at=now,
+    )
+
+    baseline_binding_v2 = extract_baseline_reference_binding(
+        evaluation_result=eval_result_v2,
+        distribution_profile=profile,
+        baseline_fps_p05=95.0,
+        deployed_artifact_id="art-traffic-v2-int8",
+    )
+
+    # Active deployment running v2
+    dep_rec_v2 = DeploymentRecord(
+        deployment_id=DeploymentId("dep-intersection-01"),
+        plan=DeploymentPlan(
+            deployment_id=DeploymentId("dep-intersection-01"),
+            artifact_id=OptimizedArtifactId("art-traffic-v2-int8"),
+            target=DeploymentTarget(
+                target_id=TargetId("t1"),
+                hostname_or_ip="10.0.0.1",
+                platform_type="jetson",
+                gpu_device_name="Jetson",
+                compute_capability="8.7",
+                cuda_runtime_version="12.2",
+                driver_version="535.0",
+                max_memory_allocation_gb=32.0,
+            ),
+            runtime=DeploymentRuntime.STANDALONE_TENSORRT,
+            health_check=HealthCheckSpec(),
+            created_at=now,
+        ),
+        status=DeploymentStatus.ACTIVE,
+        target_id=TargetId("t1"),
+    )
+
+    # Valid binding for v2 succeeds
+    dep_baseline_v2 = bind_deployment_to_monitoring_baseline(
+        dep_rec_v2, baseline_binding_v2
+    )
+    assert dep_baseline_v2.deployed_artifact_id == "art-traffic-v2-int8"
+
+    # Emergency rollback to predecessor artifact v1 occurs on the deployment target
+    rollback_rec = DeploymentRecord(
+        deployment_id=DeploymentId("dep-intersection-01"),
+        plan=DeploymentPlan(
+            deployment_id=DeploymentId("dep-intersection-01"),
+            artifact_id=OptimizedArtifactId("art-traffic-v1-fp16"),  # ROLLED BACK
+            target=dep_rec_v2.plan.target,
+            runtime=DeploymentRuntime.STANDALONE_TENSORRT,
+            health_check=HealthCheckSpec(),
+            created_at=now,
+        ),
+        status=DeploymentStatus.ACTIVE,
+        target_id=TargetId("t1"),
+    )
+
+    # Attempting to re-bind the rolled-back deployment against v2 baseline fails closed
+    with pytest.raises(BaselineMismatchError, match="Deployed artifact ID mismatch"):
+        bind_deployment_to_monitoring_baseline(rollback_rec, baseline_binding_v2)
+
+    # Drift detector evaluation fails closed if telemetry deployment ID mismatches bound deployment
+    detector = DefaultStatisticalDriftDetector()
+    pipeline = DefaultTelemetryPipeline()
+    t0 = now + timedelta(minutes=1)
+    pipeline.ingest_model_telemetry(
+        ModelTelemetryRecord(
+            deployment_id=DeploymentId("dep-other-location"),
+            window_start=t0 - timedelta(seconds=60),
+            window_end=t0,
+            window_seconds=60.0,
+            total_inferences=100,
+            confidence_histogram={"0.0-1.0": 100},
+            confidence_mean=0.8,
+            confidence_p10=0.5,
+            confidence_p50=0.8,
+            confidence_p90=0.9,
+            class_counts={"vehicle": 100},
+            class_proportions={"vehicle": 1.0},
+            mean_detections_per_frame=1.0,
+            zero_detection_frame_ratio=0.0,
+            prediction_entropy_mean=0.2,
+        )
+    )
+    pipeline.ingest_system_telemetry(
+        SystemTelemetryRecord(
+            deployment_id=DeploymentId("dep-other-location"),
+            timestamp=t0,
+            hardware_target="Jetson",
+            throughput_fps=100.0,
+            latency_p50_ms=10.0,
+            latency_p95_ms=12.0,
+            latency_p99_ms=13.0,
+            dropped_frames_total=0,
+            dropped_frame_ratio=0.0,
+            gpu_utilization_pct=50.0,
+            cpu_utilization_pct=20.0,
+            vram_used_mb=2000.0,
+            vram_total_mb=32000.0,
+            ram_used_mb=2000.0,
+            gpu_temperature_celsius=40.0,
+        )
+    )
+    pipeline.ingest_data_telemetry(
+        DataTelemetryRecord(
+            stream_id="cam-01",
+            camera_id="cam-01",
+            timestamp=t0,
+            mean_luminance=100.0,
+            contrast_std=30.0,
+            blur_laplacian_variance=150.0,
+            overexposure_ratio=0.0,
+            underexposure_ratio=0.0,
+            resolution_width=1920,
+            resolution_height=1080,
+            stream_bitrate_kbps=4000.0,
+            packet_loss_ratio=0.0,
+        )
+    )
+    snapshot_diff_dep = pipeline.create_snapshot(
+        deployment_id=DeploymentId("dep-other-location"),
+        stream_id="cam-01",
+        timestamp=t0,
+    )
+    with pytest.raises(
+        BaselineMismatchError,
+        match="DeploymentId mismatch: live telemetry belongs to 'dep-other-location'",
+    ):
+        detector.evaluate_drift(snapshot_diff_dep, baseline=dep_baseline_v2)
+
+
 def test_seam6_exhaustive_approval_security_tuple_rejection() -> None:
     """Seam 6: Exhaustive ADR-0003 approval security tuple rejection.
 
-    Tests all 6 failure modes:
-    1. Mutate operation_id       → reject
-    2. Mutate operation_version  → reject
-    3. Mutate canonical_payload  → reject
-    4. Mutate target / resource  → reject
-    5. Mutate policy_version     → reject
-    6. Expire approval           → reject
+    Tests all failure modes:
+    1. Mutate operation_id                  → reject
+    2. Mutate operation_version             → reject
+    3. Mutate canonical_payload in decision → reject
+    4. Mutate canonical_payload in request  → reject
+    5. Mutate resource_scope in request     → reject
+    6. Mutate bound_resource_scope in dec   → reject
+    7. Mutate both scopes to unauthorized   → reject
+    8. Mutate target identity               → reject
+    9. Mutate policy_version                → reject
+    10. Expire approval                     → reject
     """
     now = datetime.now(timezone.utc)
     dep_manager = DefaultDeploymentManager()
@@ -1369,7 +2293,7 @@ def test_seam6_exhaustive_approval_security_tuple_rejection() -> None:
     )
     assert_activation_fails(op, req, dec, "is not authorized for deployment activation")
 
-    # 3. Mutate canonical payload hash
+    # 3. Mutate canonical payload hash in ApprovalDecision
     op, req, dec = _make_approval_context(
         dep_plan, bound_payload_hash="corrupted_hash" + "0" * 50
     )
@@ -1377,15 +2301,47 @@ def test_seam6_exhaustive_approval_security_tuple_rejection() -> None:
         op, req, dec, "ApprovalDecision bound_payload_hash mismatch"
     )
 
-    # 4. Mutate target identity / resource scope
+    # 4. Mutate canonical payload hash in ApprovalRequest (PM finding)
+    op, req, dec = _make_approval_context(
+        dep_plan, request_payload_hash="corrupted_req_hash" + "0" * 46
+    )
+    assert_activation_fails(
+        op, req, dec, "Canonical payload hash mismatch: ApprovalRequest has"
+    )
+
+    # 5. Mutate resource_scope in ApprovalRequest (PM finding)
+    op, req, dec = _make_approval_context(
+        dep_plan,
+        resource_scope="target:target-MUTATED",
+        bound_resource_scope=f"target:{dep_plan.target.target_id}",
+    )
+    assert_activation_fails(op, req, dec, "Bound resource scope mismatch")
+
+    # 6. Mutate bound_resource_scope in ApprovalDecision (PM finding)
+    op, req, dec = _make_approval_context(
+        dep_plan, bound_resource_scope="target:target-MUTATED"
+    )
+    assert_activation_fails(op, req, dec, "Bound resource scope mismatch")
+
+    # 7. Mutate both scopes to an unauthorized scope
+    op, req, dec = _make_approval_context(
+        dep_plan,
+        resource_scope="target:target-UNAUTHORIZED",
+        bound_resource_scope="target:target-UNAUTHORIZED",
+    )
+    assert_activation_fails(
+        op, req, dec, "ApprovalRequest resource_scope .* does not match"
+    )
+
+    # 8. Mutate target identity
     op, req, dec = _make_approval_context(dep_plan, target_identity="target-WRONG")
     assert_activation_fails(op, req, dec, "Target identity mismatch")
 
-    # 5. Mutate policy version
+    # 9. Mutate policy version
     op, req, dec = _make_approval_context(dep_plan, bound_policy_version="policy-v999")
     assert_activation_fails(op, req, dec, "Policy version mismatch")
 
-    # 6. Expire approval
+    # 10. Expire approval
     expired_time = now - timedelta(hours=2)
     op, req, dec = _make_approval_context(dep_plan, expires_at=expired_time)
     assert_activation_fails(op, req, dec, "expired at")

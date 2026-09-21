@@ -2072,3 +2072,36 @@ Remediated all three architectural blockers identified in the Official PM's seco
 **Learned:** By designing every Phase 2 subsystem against frozen ADR specifications with shared cryptographic primitives (`ContentHash`), strongly typed domain identifiers, and fail-closed validation contracts, the complete 7-seam lifecycle composes seamlessly with zero type adapters or impedance.
 
 **Left open:** Submit PR for Official PM review on Phase 2O.
+
+---
+
+## 2026-09-21 — Remediated Official PM Re-Review Blockers B23 & B24 on PR #67 / Phase 2O
+
+**Did:**
+1. Remediated B23 (Seam 4: Optimized-Artifact Evaluation):
+   - Created genuine candidate `EvaluationResult` fixture distinct from baseline evaluation, identifying the optimized artifact (`opt_artifact.artifact_id`, `opt_artifact.artifact_hash`) with empirical metrics (`map50=0.820`, `throughput_fps=112.4`, `timing_synchronized=True`, `timing_source="cuda_event"`).
+   - Updated `DefaultOptimizationVerifier.verify` in `cv_agent/optimization/verifier.py` to allow candidate model artifact weights hash matching either source checkpoint weights hash or candidate artifact hash, cross-validated against `OptimizedArtifactEvaluationBinding.candidate_artifact_hash`.
+   - Added adversarial test verifying fail-closed rejection on candidate binding ID, candidate artifact hash, or candidate weights hash tampering.
+2. Remediated B24 (Seam 5: Deployed Artifact to Monitoring Baseline Binding):
+   - Added `deployed_artifact_id` and `source_checkpoint_id` to `BaselineReferenceBinding` in `cv_agent/monitoring/contracts.py`.
+   - Defined immutable `DeploymentBaselineBinding` contract linking `DeploymentRecord` + candidate evaluation + authoritative evaluation evidence + source checkpoint.
+   - Implemented `bind_deployment_to_monitoring_baseline()` in `cv_agent/monitoring/__init__.py` verifying deployed artifact identity/hash and authoritative evaluation evidence digest.
+   - Updated `DefaultStatisticalDriftDetector.evaluate_drift()` in `cv_agent/monitoring/drift.py` to accept `DeploymentBaselineBinding` and validate live telemetry `deployment_id` against the bound deployment.
+   - Added adversarial tests for: (1) deployed artifact ID mismatch, (2) deployed artifact hash mismatch, (3) profile evidence hash mismatch, (4) emergency rollback/replacement without corresponding baseline.
+3. Strengthened Seam 6 & Clarified Seam 7:
+   - Added explicit mutation tests in `test_seam6_exhaustive_approval_security_tuple_rejection` for `ApprovalRequest.canonical_payload_hash`, `ApprovalRequest.resource_scope`, and `ApprovalDecision.bound_resource_scope`.
+   - Clarified Seam 7 scope in `docs/reports/ISSUE-66-PHASE-2O-CLOSURE-REPORT.md` noting that schema traversal proves a contract-schema invariant against typed credential fields, rather than claiming universal absence across arbitrary dynamic metadata dictionaries.
+4. Quality Gates Verified:
+   - Pytest: 664/664 tests passed across 24 test suites in 5.52s (including 12 closed-loop integration tests).
+   - Ruff check: clean (0 errors).
+   - Ruff format check: clean (189 files formatted).
+   - Mypy: clean (0 issues across 118 source files).
+   - Git diff check: clean (0 whitespace errors).
+
+**Why:** Addresses Official PM Re-Review disposition on Phase 2O / PR #67 (`[P§7]`–`[P§16]`, `[P§19]`–`[P§22]`, `[P§24]`, `[P§25]`, `[P§29.2]`, `[P§29.4]`, `[P§34]`). Ensures that the deployment authorization genuinely evaluates the optimized artifact and that the runtime monitoring baseline is cryptographically bound to the artifact actually deployed.
+
+**Broke:** Nothing broken. 664/664 tests pass, all quality gates green.
+
+**Learned:** Composition tests must not reuse baseline fixtures for candidate evaluations or bypass joining runtime deployments to the evaluated candidate artifact. Explicit immutable bindings (`DeploymentBaselineBinding`) prevent divergent deployment vs baseline lineage.
+
+**Left open:** Push remediation commit and submit response on PR #67 for Official PM final approval.

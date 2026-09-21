@@ -144,15 +144,31 @@ class DefaultOptimizationVerifier:
             )
 
         cand_model = candidate_evaluation.plan.model_artifact
-        if str(cand_model.checkpoint_id) != str(plan.source_checkpoint_id):
+        valid_cand_checkpoints = {
+            str(plan.source_checkpoint_id),
+            str(artifact.artifact_id),
+            str(artifact.source_checkpoint_id),
+        }
+        if str(cand_model.checkpoint_id) not in valid_cand_checkpoints:
             raise OptimizationVerificationError(
                 f"Candidate evaluation model checkpoint lineage {cand_model.checkpoint_id!r} does not match "
-                f"source checkpoint {plan.source_checkpoint_id!r}"
+                f"source checkpoint {plan.source_checkpoint_id!r} or candidate artifact {artifact.artifact_id!r}"
             )
-        if str(cand_model.weights_hash) != str(plan.source_weights_hash):
+        valid_cand_weights_hashes = {
+            str(plan.source_weights_hash),
+            str(artifact.artifact_hash),
+        }
+        if str(cand_model.weights_hash) not in valid_cand_weights_hashes:
             raise OptimizationVerificationError(
                 f"Candidate evaluation weights hash lineage {cand_model.weights_hash!r} does not match "
-                f"source weights hash {plan.source_weights_hash!r}"
+                f"source weights hash {plan.source_weights_hash!r} or candidate artifact hash {artifact.artifact_hash!r}"
+            )
+        if str(cand_model.weights_hash) == str(artifact.artifact_hash) and str(
+            cand_model.weights_hash
+        ) != str(candidate_artifact_binding.candidate_artifact_hash):
+            raise OptimizationVerificationError(
+                f"Candidate evaluation weights hash {cand_model.weights_hash!r} conflicts with "
+                f"candidate artifact binding hash {candidate_artifact_binding.candidate_artifact_hash!r}"
             )
 
         # 6. Hardware / Target environment binding verification
