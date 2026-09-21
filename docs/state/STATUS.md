@@ -25,11 +25,11 @@ Phase 2O (Closed-Loop Integration & Architecture Gap Review) is active under Sco
 
 | Item | Issue | PR | State |
 |---|---|---|---|
-| Phase 2O Closed-Loop Integration & Gap Review | #66 | — | Test Harness Complete · Verification Green · Ready for PR |
+| Phase 2O Closed-Loop Integration & Gap Review | #66 | #67 | PR Submitted · Verification Green · Awaiting PM Review |
 
 ## Next 3 actions
 
-1. Open Pull Request on GitHub against `main` for Official PM review.
+1. Monitor CI run for PR #67 across Python 3.10–3.13 matrix.
 2. Await Official PM review on Phase 2O.
 3. Prepare Phase 3 roadmap scoping upon acceptance.
 
