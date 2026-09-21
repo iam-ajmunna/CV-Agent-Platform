@@ -2037,4 +2037,38 @@ Remediated all three architectural blockers identified in the Official PM's seco
 
 **Left open:** Phase 2N complete. All Phase 2 implementation subsystems (2A–2N) are now complete and accepted on `main`. Awaiting Official PM instruction for next milestone / Phase 3 kickoff.
 
+---
 
+## 2026-09-20 — Phase 2O Closed-Loop Integration & Architecture Gap Review (Issue #66, branch feature/ajmunna/phase-2o-closed-loop-integration)
+
+**Did:**
+1. Completed comprehensive architecture gap review across the 7 composition seams connecting all 14 frozen Phase 2 subsystems (ADR-0001 through ADR-0013):
+   - Seam 1 (ADR-0013 → ADR-0009): `CandidateSample.frame_content_hash` aligns directly with `DatasetManifest` `ContentHash`. Tested byte-level ingestion and four-way disjoint partition preservation (`train`, `val`, `test`, `calibration`).
+   - Seam 2 (ADR-0009 → ADR-0010): `TrainingPlan` enforces manifest hash validation and strictly blocks calibration/test split leakage.
+   - Seam 3 (ADR-0010 → ADR-0011): `CheckpointManifest` weights hash maps to `ModelArtifactReference`; validated hardware-synchronized timing attestation.
+   - Seam 4 (ADR-0011 → ADR-0012): `EvaluationResult` strictly gates `OptimizationPlan` and `OptimizedArtifactEvaluationBinding`.
+   - Seam 5 (ADR-0012 → ADR-0013): Deployed artifact baseline reference binding anchors authoritative evidence hash into drift detector.
+   - Seam 6 (Cross-cutting ADR-0003): 6-dimension approval verification enforces exact operation identity, payload hash binding, and temporal expiry.
+   - Seam 7 (Cross-cutting Security & Evidence Purity): Programmatic schema traversal verifies zero credential leakage across subsystem models and zero synthetic distribution fallbacks.
+2. Implemented exhaustive closed-loop integration test harness in `tests/test_closed_loop_integration.py` containing 9 end-to-end multi-subsystem lifecycle integration tests:
+   - `test_seam1_monitoring_active_learning_to_dataset_curation`
+   - `test_seam2_dataset_manifest_to_training_plan_with_leakage_guard`
+   - `test_seam3_training_checkpoint_to_evaluation_runner`
+   - `test_seam4_evaluation_result_to_optimization_and_deployment`
+   - `test_seam5_deployment_to_monitoring_baseline_reference`
+   - `test_seam6_cross_cutting_adr0003_governance_approval_cycle`
+   - `test_seam7_cross_cutting_security_and_evidence_purity`
+   - `test_full_lifecycle_closed_loop_simulation`
+   - `test_adversarial_breakage_across_lifecycle_seams`
+3. All verification gates passed:
+   - 9/9 integration tests passing in 0.28s.
+   - 661/661 total repository tests passing across 24 test suites with zero regressions.
+   - Ruff check clean, Ruff format clean, Mypy clean (0 errors across 118 source files), git diff --check clean.
+
+**Why:** Addresses Scoping Issue #66 (Phase 2O Closed-Loop Integration & Gap Review) per `[P§7]`–`[P§16]`, `[P§19]`–`[P§22]`, `[P§24]`, `[P§25]`, `[P§26]`, `[P§27]`, `[P§28]`, `[P§29.1]`–`[P§29.10]`, `[P§31]`, `[P§34]`. Verifies that all 14 frozen Phase 2 subsystems compose cleanly end-to-end without impedance, manual data conversion, or boundary leakage prior to Phase 3.
+
+**Broke:** Nothing broken. 661 repository tests pass, all gates green.
+
+**Learned:** By designing every Phase 2 subsystem against frozen ADR specifications with shared cryptographic primitives (`ContentHash`), strongly typed domain identifiers, and fail-closed validation contracts, the complete 7-seam lifecycle composes seamlessly with zero type adapters or impedance.
+
+**Left open:** Submit PR for Official PM review on Phase 2O.

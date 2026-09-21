@@ -3,37 +3,35 @@
 > **Rewritten** every session. Describes **now**, never history — history lives in
 > `JOURNAL.md`. Hard cap: 60 lines. If it exceeds that, you are logging, not stating.
 
-**Updated:** 2026-09-20 · **Phase:** Phase 2 Complete (2A–2N Accepted on `main`) · **Health:** green
+**Updated:** 2026-09-21 · **Phase:** Phase 2O Closed-Loop Integration & Gap Review · **Health:** green
 
 ## Where we are
 
-Phase 2N (ADR-0013 Stream & Edge Monitoring Subsystem) is architecturally accepted by the Official PM and squash-merged to `main` at `a88a9be` via PR #65 (closing Scoping Issue #64).
+Phase 2O (Closed-Loop Integration & Architecture Gap Review) is active under Scoping Issue #66 on branch `feature/ajmunna/phase-2o-closed-loop-integration`.
 
-All four adversarial review blockers (B19–B22) are discharged:
-- B19: Zero synthetic fallback defaults or multiplier inferences in baseline reference binding.
-- B20: Exact closed-form piecewise-linear CDF difference integral for Wasserstein distance under uniform-within-bin semantics; honest binned empirical CDF comparison for KS tests.
-- B21: Cryptographic evidence hash provenance anchored to ADR-0011 EvaluationResult metadata / external ledger with SHA-256 digest validation and tamper rejection.
-- B22: True $2 \times K$ contingency table test of independence and separate one-sample goodness-of-fit test.
-
-Repository quality gates:
-- 51/51 Phase 2N boundary tests passing in 0.20s.
-- 652/652 tests passing across 23 test suites with zero regressions.
-- Static analysis clean: Ruff check clean, Ruff format clean, Mypy clean (0 errors across 119 source files), Git diff check clean.
-- CI fully green across Python 3.10–3.13 matrix and GitGuardian.
-
-With Phase 2N merged, all 14 Phase 2 implementation subsystems (2A–2N) are complete, frozen, and accepted on `main`.
+- Architecture Gap Audit across the 7 composition seams completed with zero impedance observed (documented in `docs/reports/ISSUE-66-PHASE-2O-CLOSURE-REPORT.md`):
+  1. Seam 1 (ADR-0013 → ADR-0009): `CandidateSample.frame_content_hash` aligns directly with `DatasetManifest` `ContentHash`; zero impedance.
+  2. Seam 2 (ADR-0009 → ADR-0010): `TrainingPlan` binds to `DatasetManifest` with isolated calibration and test splits; zero impedance.
+  3. Seam 3 (ADR-0010 → ADR-0011): `CheckpointManifest` maps to `ModelArtifactReference` with synchronized timing; zero impedance.
+  4. Seam 4 (ADR-0011 → ADR-0012): `EvaluationResult` strictly gates `OptimizationPlan` and `OptimizedArtifactEvaluationBinding`; zero impedance.
+  5. Seam 5 (ADR-0012 → ADR-0013): Deployed artifact and evaluation hash anchor into `BaselineReferenceBinding`; zero impedance.
+  6. Seam 6 (Cross-cutting ADR-0003): 4-tuple approval cross-validation and operation identities verified; zero impedance.
+  7. Seam 7 (Cross-cutting Security): Zero synthetic defaults, zero credential leakage, content hash integrity verified; zero impedance.
+- Implemented comprehensive closed-loop integration test harness in `tests/test_closed_loop_integration.py` (9 passing tests).
+- Repository test suite: 661/661 tests passing across 24 test suites with zero regressions.
+- Static analysis clean: Ruff check clean, Ruff format clean, Mypy clean (0 errors across 118 source files), Git diff check clean.
 
 ## In flight
 
 | Item | Issue | PR | State |
 |---|---|---|---|
-| None | — | — | All Phase 2 implementation tracks complete on `main` |
+| Phase 2O Closed-Loop Integration & Gap Review | #66 | — | Test Harness Complete · Verification Green · Ready for PR |
 
 ## Next 3 actions
 
-1. Receive Official PM instruction for next milestone / Phase 3 scoping.
-2. Await creation of Scoping Issue for next phase.
-3. Cut task branch from `main` when instructed.
+1. Open Pull Request on GitHub against `main` for Official PM review.
+2. Await Official PM review on Phase 2O.
+3. Prepare Phase 3 roadmap scoping upon acceptance.
 
 ## Blockers
 
@@ -41,4 +39,4 @@ With Phase 2N merged, all 14 Phase 2 implementation subsystems (2A–2N) are com
 
 ## Scope guard
 
-Stream & Edge Monitoring owns runtime telemetry ingestion, authoritative baseline reference binding, statistical drift detection, edge active learning candidate frame curation, operational alerting, and advisory retraining trigger proposal formulation. It does NOT own model optimization or deployment readiness (ADR-0012), offline model evaluation (ADR-0011), model training materialization (ADR-0010), dataset storage and annotation (ADR-0009), reasoning cognitive judgment (ADR-0008), or orchestration state and lifecycle (ADR-0003). Autonomous retraining is strictly forbidden per `[P§24]` and `[P§31]`.
+Phase 2O verifies closed-loop integration across the 14 frozen Phase 2 subsystems (ADR-0001 through ADR-0013). It does NOT introduce ADR-0014, Phase 3 autonomous orchestration, or new subsystem authority. Autonomous retraining is strictly forbidden per `[P§24]` and `[P§31]`.
