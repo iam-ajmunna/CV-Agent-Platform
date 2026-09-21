@@ -9,6 +9,7 @@ from typing import Any, Protocol, runtime_checkable
 
 from cv_agent.monitoring.contracts import (
     BaselineReferenceBinding,
+    DeploymentBaselineBinding,
     DriftAnalysisRecord,
     DriftMetricResult,
     UnifiedTelemetrySnapshot,
@@ -175,7 +176,7 @@ class StatisticalDriftDetector(Protocol):
     def evaluate_drift(
         self,
         telemetry_window: UnifiedTelemetrySnapshot,
-        baseline: BaselineReferenceBinding,
+        baseline: BaselineReferenceBinding | DeploymentBaselineBinding,
     ) -> DriftAnalysisRecord:
         """Compute statistical drift metrics against the ADR-0011 baseline."""
         ...
@@ -211,13 +212,28 @@ class DefaultStatisticalDriftDetector:
     def evaluate_drift(
         self,
         telemetry_window: UnifiedTelemetrySnapshot,
-        baseline: BaselineReferenceBinding,
+        baseline: BaselineReferenceBinding | DeploymentBaselineBinding,
     ) -> DriftAnalysisRecord:
         """Evaluate live multi-dimensional telemetry window against authoritative ADR-0011 baseline."""
+        dep_binding: DeploymentBaselineBinding | None = None
+        if isinstance(baseline, DeploymentBaselineBinding):
+            dep_binding = baseline
+            baseline = baseline.baseline_binding
+
         # 1. Validate baseline completeness per Baseline Primacy Invariant [P§29.2]
         if baseline is None or not isinstance(baseline, BaselineReferenceBinding):
             raise BaselineMismatchError(
                 "Authoritative BaselineReferenceBinding is mandatory for statistical drift evaluation per [P§29.2]"
+            )
+        if (
+            dep_binding is not None
+            and telemetry_window.model_telemetry is not None
+            and str(telemetry_window.model_telemetry.deployment_id)
+            != str(dep_binding.deployment_id)
+        ):
+            raise BaselineMismatchError(
+                f"DeploymentId mismatch: live telemetry belongs to {telemetry_window.model_telemetry.deployment_id!r} "
+                f"but DeploymentBaselineBinding is for {dep_binding.deployment_id!r} [B24]."
             )
         if not baseline.evaluation_id or not str(baseline.evaluation_id).strip():
             raise BaselineMismatchError(

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from cv_agent.dataset import ContentHash
 from cv_agent.evaluation.contracts import EvaluationResult
 from cv_agent.monitoring.active_learning import (
@@ -14,6 +16,7 @@ from cv_agent.monitoring.contracts import (
     BaselineReferenceBinding,
     CandidateSample,
     DataTelemetryRecord,
+    DeploymentBaselineBinding,
     DriftAnalysisRecord,
     DriftMetricResult,
     ModelTelemetryRecord,
@@ -113,6 +116,9 @@ def extract_baseline_reference_binding(
     baseline_fps_p05: float | None = None,
     baseline_fps_p50: float | None = None,
     evidence_hash: ContentHash | str | None = None,
+    deployed_artifact_id: str | None = None,
+    source_checkpoint_id: str | None = None,
+    deployment_record: Any | None = None,
 ) -> BaselineReferenceBinding:
     """Factory helper to construct an authoritative BaselineReferenceBinding from an ADR-0011 EvaluationResult.
 
@@ -268,6 +274,15 @@ def extract_baseline_reference_binding(
             f"authoritative evidence_hash ({authoritative_evidence_hash}) [ADR-0013, B21]."
         )
 
+    if deployment_record is not None:
+        rec_art_id = str(deployment_record.plan.artifact_id)
+        if deployed_artifact_id is not None and deployed_artifact_id != rec_art_id:
+            raise BaselineMismatchError(
+                f"deployed_artifact_id ({deployed_artifact_id!r}) conflicts with "
+                f"DeploymentRecord artifact_id ({rec_art_id!r}) [B24]."
+            )
+        deployed_artifact_id = rec_art_id
+
     eval_plan = evaluation_result.plan
     return BaselineReferenceBinding(
         evaluation_id=evaluation_result.evaluation_id,
@@ -282,6 +297,104 @@ def extract_baseline_reference_binding(
         baseline_latency_p99_ms=lat_p99,
         baseline_confidence_mean=baseline_conf_mean,
         baseline_class_distribution=distribution_profile.class_distribution,
+        deployed_artifact_id=deployed_artifact_id,
+        source_checkpoint_id=source_checkpoint_id,
+    )
+
+
+def bind_deployment_to_monitoring_baseline(
+    deployment_record: Any,
+    baseline_binding: BaselineReferenceBinding,
+    *,
+    candidate_artifact_hash: ContentHash | str | None = None,
+    optimization_result: Any | None = None,
+) -> DeploymentBaselineBinding:
+    """Explicitly binds an active DeploymentRecord to an authoritative BaselineReferenceBinding.
+
+    Enforces B24 [P§29.2, ADR-0012, ADR-0013]:
+    1. Deployed artifact ID in deployment_record matches baseline_binding.deployed_artifact_id (if set).
+    2. Deployed artifact hash matches baseline_binding.model_checkpoint_hash.
+    3. Evaluation evidence hash is authoritative and present.
+    4. If optimization_result is provided, cross-validates candidate artifact binding and evaluation_id.
+    5. Fails closed on any lineage, hash, identity, or evidence tampering.
+    """
+    from cv_agent.optimization.types import DeploymentStatus
+
+    if deployment_record.status not in (
+        DeploymentStatus.ACTIVE,
+        DeploymentStatus.VERIFYING,
+    ):
+        raise BaselineMismatchError(
+            f"DeploymentRecord {deployment_record.deployment_id} is not in ACTIVE or VERIFYING status "
+            f"(status={deployment_record.status.value})"
+        )
+
+    deployed_art_id = str(deployment_record.plan.artifact_id)
+    if (
+        baseline_binding.deployed_artifact_id is not None
+        and str(baseline_binding.deployed_artifact_id) != deployed_art_id
+    ):
+        raise BaselineMismatchError(
+            f"Deployed artifact ID mismatch: DeploymentRecord has {deployed_art_id!r} "
+            f"but BaselineReferenceBinding expects {baseline_binding.deployed_artifact_id!r} [B24]."
+        )
+
+    expected_hash = candidate_artifact_hash
+    if optimization_result is not None:
+        opt_art = optimization_result.artifact
+        if str(opt_art.artifact_id) != deployed_art_id:
+            raise BaselineMismatchError(
+                f"OptimizationResult artifact_id {opt_art.artifact_id!r} does not match "
+                f"deployed artifact {deployed_art_id!r} [B24]."
+            )
+        if expected_hash is None:
+            expected_hash = opt_art.artifact_hash
+        elif str(expected_hash) != str(opt_art.artifact_hash):
+            raise BaselineMismatchError(
+                f"Candidate artifact hash {expected_hash!r} conflicts with "
+                f"OptimizationResult artifact hash {opt_art.artifact_hash!r} [B24]."
+            )
+        if (
+            optimization_result.candidate_artifact_binding.evaluation_id is not None
+            and str(baseline_binding.evaluation_id)
+            != str(optimization_result.candidate_artifact_binding.evaluation_id)
+        ):
+            raise BaselineMismatchError(
+                f"EvaluationId mismatch: BaselineReferenceBinding has {baseline_binding.evaluation_id!r} "
+                f"but OptimizationResult candidate binding has {optimization_result.candidate_artifact_binding.evaluation_id!r} [B24]."
+            )
+
+    if expected_hash is not None and str(baseline_binding.model_checkpoint_hash) != str(
+        expected_hash
+    ):
+        raise BaselineMismatchError(
+            f"Deployed artifact hash mismatch: BaselineReferenceBinding model_checkpoint_hash "
+            f"({baseline_binding.model_checkpoint_hash!r}) does not match deployed artifact hash ({expected_hash!r}) [B24]."
+        )
+
+    if baseline_binding.evidence_hash is None:
+        raise BaselineMismatchError(
+            "BaselineReferenceBinding lacks authoritative evidence_hash; cannot bind deployment [B24, B21]."
+        )
+
+    source_ckpt = baseline_binding.source_checkpoint_id
+    if source_ckpt is None and optimization_result is not None:
+        source_ckpt = str(optimization_result.plan.source_checkpoint_id)
+
+    actual_art_hash = (
+        expected_hash
+        if expected_hash is not None
+        else baseline_binding.model_checkpoint_hash
+    )
+
+    return DeploymentBaselineBinding(
+        deployment_id=deployment_record.deployment_id,
+        deployed_artifact_id=deployed_art_id,
+        deployed_artifact_hash=ContentHash(str(actual_art_hash)),
+        evaluation_id=baseline_binding.evaluation_id,
+        evaluation_evidence_hash=baseline_binding.evidence_hash,
+        baseline_binding=baseline_binding,
+        source_checkpoint_id=source_ckpt,
     )
 
 
@@ -301,6 +414,7 @@ __all__ = [
     "DefaultActiveLearningSelector",
     "DefaultStatisticalDriftDetector",
     "DefaultTelemetryPipeline",
+    "DeploymentBaselineBinding",
     "DriftAnalysisId",
     "DriftAnalysisRecord",
     "DriftEvaluationError",
@@ -323,6 +437,7 @@ __all__ = [
     "TriggerReason",
     "UnauthorizedRetrainingError",
     "UnifiedTelemetrySnapshot",
+    "bind_deployment_to_monitoring_baseline",
     "compute_distribution_profile_hash",
     "deep_freeze",
     "extract_baseline_reference_binding",

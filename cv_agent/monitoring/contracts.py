@@ -552,6 +552,14 @@ class BaselineReferenceBinding(BaseModel):
     baseline_class_distribution: Mapping[str, float] = Field(
         ..., description="Baseline class balance."
     )
+    deployed_artifact_id: str | None = Field(
+        default=None,
+        description="Optional deployed optimized artifact ID per ADR-0012 [B24].",
+    )
+    source_checkpoint_id: str | None = Field(
+        default=None,
+        description="Optional source checkpoint ID per ADR-0010 [B24].",
+    )
 
     @field_validator("evaluation_id")
     @classmethod
@@ -622,6 +630,55 @@ class BaselineReferenceBinding(BaseModel):
             raise ValueError(
                 f"evidence_hash ({self.evidence_hash}) does not match "
                 f"distribution_profile.evidence_hash ({self.distribution_profile.evidence_hash})"
+            )
+        return self
+
+
+class DeploymentBaselineBinding(BaseModel):
+    """Explicitly immutable join binding an active DeploymentRecord to its authoritative BaselineReferenceBinding per B24."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid", arbitrary_types_allowed=True)
+
+    deployment_id: DeploymentId
+    deployed_artifact_id: str
+    deployed_artifact_hash: ContentHash
+    evaluation_id: EvaluationId
+    evaluation_evidence_hash: ContentHash
+    baseline_binding: BaselineReferenceBinding
+    source_checkpoint_id: str | None = None
+
+    @field_validator("deployed_artifact_hash", "evaluation_evidence_hash")
+    @classmethod
+    def _validate_join_hashes(cls, v: ContentHash) -> ContentHash:
+        return validate_content_hash(str(v))
+
+    @model_validator(mode="after")
+    def _validate_binding_integrity(self) -> DeploymentBaselineBinding:
+        if str(self.baseline_binding.evaluation_id) != str(self.evaluation_id):
+            raise ValueError(
+                f"evaluation_id mismatch: baseline_binding has {self.baseline_binding.evaluation_id} "
+                f"but join declares {self.evaluation_id}"
+            )
+        if self.baseline_binding.evidence_hash is not None and str(
+            self.baseline_binding.evidence_hash
+        ) != str(self.evaluation_evidence_hash):
+            raise ValueError(
+                f"evidence_hash mismatch: baseline_binding has {self.baseline_binding.evidence_hash} "
+                f"but join declares {self.evaluation_evidence_hash}"
+            )
+        if self.baseline_binding.deployed_artifact_id is not None and str(
+            self.baseline_binding.deployed_artifact_id
+        ) != str(self.deployed_artifact_id):
+            raise ValueError(
+                f"deployed_artifact_id mismatch: baseline_binding has {self.baseline_binding.deployed_artifact_id} "
+                f"but join declares {self.deployed_artifact_id}"
+            )
+        if str(self.baseline_binding.model_checkpoint_hash) != str(
+            self.deployed_artifact_hash
+        ):
+            raise ValueError(
+                f"deployed_artifact_hash mismatch: baseline_binding model_checkpoint_hash "
+                f"has {self.baseline_binding.model_checkpoint_hash} but join declares {self.deployed_artifact_hash}"
             )
         return self
 
