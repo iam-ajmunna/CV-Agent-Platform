@@ -23,6 +23,7 @@ from cv_agent.domain.identifiers import CapabilityId, SkillId, ToolId
 from cv_agent.tools.contracts import (
     ActiveJobHandoff,
     ExecutionTargetDescriptor,
+    TargetId,
     TargetType,
     ToolResult,
     deep_freeze,
@@ -272,3 +273,70 @@ class SkillExecutionResult:
 
         object.__setattr__(self, "outputs", deep_freeze(self.outputs))
         object.__setattr__(self, "tool_results", tuple(self.tool_results))
+
+
+@dataclass(frozen=True)
+class CapabilityAvailabilitySummary:
+    """Inspection-only summary of capability resolution across candidate skills and targets."""
+
+    capability_id: CapabilityId
+    satisfying_skills: tuple[SkillDescriptor, ...]
+    selected_skill: SkillDescriptor | None
+    availability_state: AvailabilityState
+    target_id: TargetId | None = None
+    required_tools: tuple[ToolId, ...] = ()
+    resolved_tools: tuple[ToolId, ...] = ()
+    unavailability_reason: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "satisfying_skills", tuple(self.satisfying_skills))
+        object.__setattr__(self, "required_tools", tuple(self.required_tools))
+        object.__setattr__(self, "resolved_tools", tuple(self.resolved_tools))
+
+    @property
+    def is_executable(self) -> bool:
+        """Presentation projection: whether capability can be executed immediately."""
+        return self.availability_state == AvailabilityState.EXECUTABLE
+
+    @property
+    def is_merely_known(self) -> bool:
+        """Presentation projection: declared/known but unavailable or requiring hardware not present."""
+        return self.availability_state in (
+            AvailabilityState.KNOWN,
+            AvailabilityState.KNOWN_BUT_UNAVAILABLE,
+        )
+
+
+@dataclass(frozen=True)
+class SkillAvailabilitySummary:
+    """Inspection-only summary of skill availability on candidate targets."""
+
+    skill_id: SkillId
+    satisfies_capabilities: tuple[CapabilityId, ...]
+    availability_state: AvailabilityState
+    provenance: SkillProvenance
+    vendor: str | None = None
+    target_id: TargetId | None = None
+    required_tools: tuple[ToolId, ...] = ()
+    resolved_tools: tuple[ToolId, ...] = ()
+    unavailability_reason: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "satisfies_capabilities", tuple(self.satisfies_capabilities)
+        )
+        object.__setattr__(self, "required_tools", tuple(self.required_tools))
+        object.__setattr__(self, "resolved_tools", tuple(self.resolved_tools))
+
+    @property
+    def is_executable(self) -> bool:
+        """Presentation projection: whether skill can be executed immediately."""
+        return self.availability_state == AvailabilityState.EXECUTABLE
+
+    @property
+    def is_merely_known(self) -> bool:
+        """Presentation projection: declared/known but unavailable or requiring hardware not present."""
+        return self.availability_state in (
+            AvailabilityState.KNOWN,
+            AvailabilityState.KNOWN_BUT_UNAVAILABLE,
+        )

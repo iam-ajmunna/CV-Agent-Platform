@@ -39,8 +39,9 @@ def _resource_path(relative_path: str) -> Path:
 
 _DEFAULT_CONFIG_RESOURCE = resource_files("cv_agent").joinpath("resources/default.toml")
 _DEFAULT_REGISTRY_RESOURCE = resource_files("cv_agent").joinpath(
-    "resources/capability_registry.json"
+    "resources/spec/capability_registry.json"
 )
+
 
 
 def _default_config_path() -> Path | Traversable:

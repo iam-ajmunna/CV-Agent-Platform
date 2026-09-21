@@ -2167,3 +2167,28 @@ Remediated all three architectural blockers identified in the Official PM's seco
 **Learned:** Rigorous closed-loop integration testing across subsystem boundaries exposes subtle provenance and joining gaps—such as candidate evaluations carrying source model hashes or monitoring baselines drifting from deployed artifacts—that isolated unit test suites cannot detect. Formalizing immutable binding contracts (`OptimizedArtifactEvaluationBinding`, `DeploymentBaselineBinding`) establishes end-to-end cryptographic and semantic traceability.
 
 **Left open:** Phase 2 complete. All Phase 2 implementation tracks (2A–2N) and the integration/gap review (2O) are complete and accepted on `main`. Awaiting Official PM instruction for next milestone / Phase 3 kickoff.
+
+---
+
+## 2026-09-21 — Phase 3: Skills & NVIDIA Integration (D-065, Issue #68, PR pending)
+
+**Did:** Implemented Phase 3 Skills & NVIDIA Integration pursuant to Scoping Issue #68, frozen ADR-0007, and all 8 Official PM corrections:
+1. Exact CapabilityId: Bound quantization capability resolution strictly to authoritative ADR-0001 `CapabilityId("cv.deployment.optimization")`.
+2. Availability State Model: Implemented typed `CapabilityAvailabilitySummary` and `SkillAvailabilitySummary` dataclasses exposing the full ADR-0007 7-state taxonomy (`KNOWN`, `DISCOVERED`, `CONFIGURED`, `AVAILABLE`, `EXECUTABLE`, `UNAVAILABLE`, `KNOWN_BUT_UNAVAILABLE`) with `is_executable` and `is_merely_known` defined strictly as presentation projections.
+3. Strictly Inspection-Only Enumeration: Added `enumerate_capabilities()` and `enumerate_skills()` to `SkillResolver` and `DefaultSkillResolver`, with dedicated acceptance tests proving zero tool invocations, zero subprocesses, zero MCP calls, zero registry mutations, and zero background jobs.
+4. Generic Compatible Hardware Fixtures: Replaced specific "A100" assumptions with generic compatible remote NVIDIA GPU targets (`min_cuda_compute="8.0"`).
+5. Mechanically Enforceable AST Audit: Added `test_roadmap_exit_2_ast_audit_proves_zero_vendor_runtime_implementations` verifying zero CUDA kernel launches (`<<<...>>>`), zero direct CUDA runtime bindings (`cudaMalloc`, `cudaMemcpy`), zero TensorRT engine builders (`Builder`, `create_network`, `build_engine`), zero PyTorch training loops (`loss.backward()`, `optimizer.step()`), and zero vendor implementation imports (`tensorrt`, `modelopt`, `pycuda`, `cupy`, `torch.cuda`) in `cv_agent/skills/`.
+6. 10-Skill Local Host Evaluation Matrix: Tested local macOS workstation host against all 10 NVIDIA skills. 9 GPU/Jetson skills report `KNOWN_BUT_UNAVAILABLE` per D-022. The 10th skill (`nvidia.model_inspection.visualize`) allows `LOCAL` and evaluates against local tool availability (`tool.netron`, `tool.onnx`), avoiding blanket vendor classification.
+7. Canonical Host Target Detection: Added `detect_host_execution_target()` at ADR-0005 boundary (`cv_agent/tools/registry.py`) and wired `CVAgent.enumerate_capabilities()` and `CVAgent.enumerate_skills()` to default to this canonical target.
+8. Explicit Discovery Authority Transition: Added `promote_discovered_skill()` on `DefaultSkillRegistry` and tested that runtime-discovered candidates cannot overwrite authoritative registry entries without explicit promotion.
+9. Package Resource Fix: Updated `_DEFAULT_REGISTRY_RESOURCE` in `cv_agent/config/settings.py` to point to packaged `resources/spec/capability_registry.json`.
+10. CLI Presentation: Added `--list-skills` flag to `cv_agent/__main__.py`.
+11. Test Suite: Created `tests/test_skills_phase3_exit.py` (9 tests passing). Repository total: 674/674 passing across 25 suites. All quality gates green (Ruff check, Ruff format, Mypy, git diff).
+
+**Why:** Addresses Issue #68 and fulfills the core Phase 3 architectural mandate: "External expertise is invoked, not duplicated" (`[P§15]`, `[P§20]`, `[P§23]`, `[P§24]`, `[P§29.4]`, `[P§29.9]`, `[P§34]`).
+
+**Broke:** Nothing broken. Fixed pre-existing resource path omission in `cv_agent/config/settings.py` where `_DEFAULT_REGISTRY_RESOURCE` omitted the `spec/` subdirectory.
+
+**Learned:** AST audits provide a mechanical, airtight guarantee that a skills subsystem remains strictly declarative and delegates execution to tools rather than secretly embedding vendor runtime algorithms.
+
+**Left open:** PR creation and review by Official PM under Issue #68.

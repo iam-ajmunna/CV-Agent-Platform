@@ -13,20 +13,45 @@ from argparse import ArgumentParser
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Run a health check and print runtime status to stdout."""
+    """Run a health check or enumerate skills and print to stdout."""
     parser = ArgumentParser(
-        prog="cv-agent", description="CV Engineering Agent health check"
+        prog="cv-agent", description="CV Engineering Agent CLI and health check"
     )
-    parser.parse_args(argv)
+    parser.add_argument(
+        "--list-skills",
+        action="store_true",
+        help="Enumerate external and internal skills with operational availability",
+    )
+    args = parser.parse_args(argv)
     from cv_agent.runtime.agent import CVAgent
 
     try:
         agent = CVAgent()
-        health = agent.health_check()
     except Exception as exc:  # noqa: BLE001
         print(f"CV Engineering Agent — STARTUP FAILURE\n  {exc}", file=sys.stderr)
         return 2
 
+    if args.list_skills:
+        print("CV Engineering Agent — Skill Catalog & Operational Availability\n")
+        print(
+            f"{'Skill ID':<42} {'Vendor':<10} {'Availability State':<24} {'Presentation':<16}"
+        )
+        print("-" * 94)
+        for skill in agent.enumerate_skills():
+            if skill.is_executable:
+                presentation = "installed"
+            elif skill.is_merely_known:
+                presentation = "merely known"
+            else:
+                presentation = "unavailable"
+            vendor_str = skill.vendor or "internal"
+            print(
+                f"{skill.skill_id!s:<42} {vendor_str:<10} {skill.availability_state.value:<24} {presentation:<16}"
+            )
+
+        return 0
+
+    health = agent.health_check()
     lg_label = (
         f"available (v{health['langgraph_version']})"
         if health["langgraph_available"]

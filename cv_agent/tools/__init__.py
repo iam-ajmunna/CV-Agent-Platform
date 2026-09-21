@@ -34,7 +34,7 @@ from cv_agent.tools.contracts import (
     deep_freeze,
 )
 from cv_agent.tools.executor import DefaultToolExecutor
-from cv_agent.tools.registry import DefaultToolRegistry
+from cv_agent.tools.registry import DefaultToolRegistry, detect_host_execution_target
 from cv_agent.tools.security import (
     ToolSecurityError,
     check_approval_precondition,
@@ -67,6 +67,7 @@ __all__ = [
     "ToolSecurityError",
     "check_approval_precondition",
     "deep_freeze",
+    "detect_host_execution_target",
     "validate_argv_safety",
     "validate_secret_isolation",
     "validate_workspace_containment",

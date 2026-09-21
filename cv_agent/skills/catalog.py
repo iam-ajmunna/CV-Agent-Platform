@@ -6,7 +6,12 @@ All skills bind strictly to registered ADR-0001 capabilities per Blocker B1 reso
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from cv_agent.domain.identifiers import CapabilityId, SkillId, ToolId
+
+if TYPE_CHECKING:
+    from cv_agent.capabilities.registry import CapabilityRegistry
 from cv_agent.skills.contracts import (
     HardwareClass,
     SkillDescriptor,
@@ -339,3 +344,12 @@ def register_all_authoritative_skills(registry: DefaultSkillRegistry) -> None:
     """Register all 10 authoritative NVIDIA skills and internal skills into a DefaultSkillRegistry."""
     for skill in ALL_AUTHORITATIVE_SKILLS:
         registry.register_skill(skill)
+
+
+def load_default_skill_registry(
+    capability_registry: CapabilityRegistry | None = None,
+) -> DefaultSkillRegistry:
+    """Instantiate a DefaultSkillRegistry pre-populated with all authoritative skills."""
+    registry = DefaultSkillRegistry(capability_registry=capability_registry)
+    register_all_authoritative_skills(registry)
+    return registry

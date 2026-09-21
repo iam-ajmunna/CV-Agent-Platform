@@ -7,6 +7,7 @@ authoritative ToolIds declared by ADR-0001.
 
 from __future__ import annotations
 
+import platform
 from collections.abc import Mapping, Sequence
 
 from cv_agent.domain.identifiers import ToolId
@@ -171,3 +172,29 @@ class DefaultToolRegistry(ToolRegistry):
             target_reachable=True,
             runtime_verified=True,
         )
+
+
+def detect_host_execution_target() -> ExecutionTargetDescriptor:
+    """Detect and return canonical ExecutionTargetDescriptor for current host machine (ADR-0005 §3.4).
+
+    Identifies hardware architecture (Apple Silicon vs CPU), operating system, and returns
+    a canonical LOCAL target descriptor for operational use.
+    """
+    system = platform.system().lower()
+    machine = platform.machine().lower()
+
+    hardware = "cpu"
+    if system == "darwin" and ("arm" in machine or "aarch64" in machine):
+        hardware = "apple_silicon"
+
+    return ExecutionTargetDescriptor(
+        target_id=TargetId("target.local.host"),
+        target_type=TargetType.LOCAL,
+        is_available=True,
+        description=f"Host Local Workstation ({system} {machine})",
+        target_metadata={
+            "hardware": hardware,
+            "os": system,
+            "arch": machine,
+        },
+    )
