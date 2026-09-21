@@ -3,7 +3,7 @@
 **Issue:** [#66](https://github.com/iam-ajmunna/CV-Agent-Platform/issues/66)
 **PR:** [#67](https://github.com/iam-ajmunna/CV-Agent-Platform/pull/67)
 **Branch:** `feature/ajmunna/phase-2o-closed-loop-integration`
-**Status:** Implemented & Verified; 664/664 full-suite tests passing (including 12 closed-loop integration tests); all quality gates green.
+**Status:** Implemented & Verified; 665/665 full-suite tests passing (including 12 closed-loop integration tests); all quality gates green.
 **Phase:** Phase 2O (Closed-Loop Integration & Architecture Gap Review)
 
 ---
@@ -14,15 +14,16 @@ Phase 2O represents the final integrative gate of Phase 2 across the **14 frozen
 
 $$\text{Edge Telemetry} \longrightarrow \text{Active Learning} \longrightarrow \text{Dataset Ingestion} \longrightarrow \text{Approved Training} \longrightarrow \text{Synchronized Evaluation} \longrightarrow \text{Verified Optimization} \longrightarrow \text{Deployment} \longrightarrow \text{Monitoring Baseline}$$
 
-Following Official PM Re-Review of PR #67, two substantive composition gaps were remediated and verified:
+Following Official PM Re-Reviews of PR #67, three substantive composition and provenance gaps were remediated and verified:
 - **B23 (Seam 4):** Proved optimized-artifact evaluation by constructing a genuine candidate evaluation fixture distinct from baseline evaluation, binding it via `OptimizedArtifactEvaluationBinding`, and validating that empirical candidate metrics authorize deployment.
 - **B24 (Seam 5):** Bound the monitoring baseline directly to the artifact actually deployed via `DeploymentBaselineBinding`, validating deployed artifact identity/hash alignment, candidate evaluation evidence integrity, and fail-closed rejection on rollback or replacement mismatch.
+- **B25 (Seam 4):** Enforced strict candidate evaluation provenance in `DefaultOptimizationVerifier.verify()`, requiring `cand_model.checkpoint_id == artifact.artifact_id`, `cand_model.weights_hash == artifact.artifact_hash`, and `candidate_evaluation.environment.weights_hash == artifact.artifact_hash`, completely eliminating source checkpoint/weights bypass from candidate evaluation.
 
 The architectural audit and executable integration test harness in `tests/test_closed_loop_integration.py` confirm:
 1. **Verifiable Contract Composition:** All 7 composition seams interlock using native domain identifiers, shared cryptographic primitives (`ContentHash`, SHA-256 digests), and immutable Pydantic v2 schemas without requiring intermediary type adapters or manual data restructuring.
 2. **Strict Boundary Integrity:** No layer leakage was observed between Reasoning (ADR-0008), Orchestration (ADR-0003), Tool Execution (ADR-0005), and Subsystem Domains (ADR-0009–ADR-0013), directly satisfying `[P§19]`–`[P§22]`, `[P§31]`, and `[P§34]`.
 3. **Fail-Closed Governance:** Governance approval 4-tuples, split leakage auditors, evidence hash authenticators, and deployment readiness state machines fail closed under adversarial tamper, scope mismatch, or parameter deviation.
-4. **Phase 2 Completion:** Phase 2 is closed, sound, fully tested (664/664 tests passing), and ready to serve as the unshakeable foundation for Phase 3 autonomous orchestration.
+4. **Phase 2 Completion:** Phase 2 is closed, sound, fully tested (665/665 tests passing), and ready to serve as the unshakeable foundation for Phase 3 autonomous orchestration.
 
 ---
 
@@ -56,10 +57,10 @@ The architectural audit and executable integration test harness in `tests/test_c
 
 ### Seam 4: ADR-0011 (Evaluation Subsystem) $\longrightarrow$ ADR-0012 (Optimization & Deployment)
 - **Contract Boundary:** Optimization consumes baseline `EvaluationResult`, producing `OptimizationPlan` and `OptimizedModelArtifact`. Candidate evaluation evaluates the optimized artifact and produces empirical candidate metrics that authorize deployment via `OptimizedArtifactEvaluationBinding`.
-- **Remediation Findings (B23 Resolved):**
+- **Remediation Findings (B23 & B25 Resolved):**
   - The integration harness builds a genuine candidate `EvaluationResult` whose `ModelArtifactReference` explicitly identifies the optimized artifact (`opt_artifact.artifact_id`, `opt_artifact.artifact_hash`) with empirical candidate quality (`map50=0.820`) and system benchmarks (`throughput_fps=112.4`, `timing_synchronized=True`, `timing_source="cuda_event"`).
-  - `DefaultOptimizationVerifier` verifies accuracy retention and latency speedup against the baseline evaluation, cross-validating the candidate evaluation weights hash against the candidate artifact binding and artifact hash.
-  - Adversarial fixtures verify that tampering with `OptimizedArtifactEvaluationBinding.candidate_artifact_id`, `candidate_artifact_hash`, or candidate evaluation weights hash immediately fails closed with `OptimizationVerificationError` and prevents deployment activation.
+  - `DefaultOptimizationVerifier` enforces strict candidate evaluation lineage (B25): candidate model artifact `checkpoint_id` must match `artifact.artifact_id`, `weights_hash` must match `artifact.artifact_hash`, and `candidate_evaluation.environment.weights_hash` must match `artifact.artifact_hash`. Source checkpoint and source weights are strictly rejected for candidate evaluations.
+  - Adversarial fixtures verify that tampering with `OptimizedArtifactEvaluationBinding.candidate_artifact_id`, `candidate_artifact_hash`, candidate evaluation checkpoint/weights hash, or environment weights hash immediately fails closed with `OptimizationVerificationError` and prevents deployment activation.
 - **Impedance:** **Zero.** Verified empirical optimization gating linking candidate evaluation directly to optimized model identity.
 
 ### Seam 5: ADR-0012 (Optimization & Deployment) $\longrightarrow$ ADR-0013 (Monitoring Subsystem)
@@ -120,7 +121,7 @@ The closed-loop integration harness in `tests/test_closed_loop_integration.py` e
 | `test_prohibition_of_autonomous_retraining_loop` | Advisory proposal enforcement per `[P§24]` and `[P§31]` | Governance | PASSED |
 
 ### Full Repository Quality Gates
-- **Pytest Suite:** 664/664 passed across 24 test suites in 5.52s with 0 regressions.
+- **Pytest Suite:** 665/665 passed across 24 test suites in 5.30s with 0 regressions.
 - **Ruff Lint:** Clean (`ruff check .` reports 0 errors).
 - **Ruff Format:** Clean across all monitored workspace sources (`ruff format --check .` reports 189 files formatted).
 - **Mypy Type Check:** Clean (0 issues across 118 source files).
@@ -130,7 +131,7 @@ The closed-loop integration harness in `tests/test_closed_loop_integration.py` e
 
 ## 4. Architectural Readiness for Phase 3
 
-With the remediation of B23 and B24:
+With the remediation of B23, B24, and B25:
 1. **Subsystem Completeness:** All 14 Phase 2 architectural subsystems are implemented, frozen, and verified.
 2. **Zero Inventions / Zero Gaps:** No unaddressed questions or architectural gaps remain across the inter-subsystem contracts.
 3. **No Retraining Loops Without Human Authority:** The system enforces advisory retraining proposals, adhering strictly to `[P§24]` and `[P§31]`.

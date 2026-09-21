@@ -1580,7 +1580,7 @@ def test_seam4_rejects_deployment_on_missing_or_mismatched_optimization_binding(
     )
     with pytest.raises(
         OptimizationVerificationError,
-        match="Candidate evaluation model checkpoint lineage .* does not match",
+        match="Candidate evaluation must identify the optimized artifact",
     ):
         opt_verifier.verify(
             plan=opt_plan,
@@ -1603,13 +1603,63 @@ def test_seam4_rejects_deployment_on_missing_or_mismatched_optimization_binding(
     )
     with pytest.raises(
         OptimizationVerificationError,
-        match="Candidate evaluation weights hash lineage .* does not match",
+        match="Candidate evaluation must use the optimized artifact hash",
     ):
         opt_verifier.verify(
             plan=opt_plan,
             artifact=opt_artifact,
             baseline_evaluation=base_eval,
             candidate_evaluation=tampered_cand_eval_hash,
+            candidate_artifact_binding=valid_cand_binding,
+        )
+
+    # 7a. Candidate evaluation environment weights mismatch (B25 provenance)
+    tampered_env_cand = cand_eval.model_copy(
+        update={
+            "environment": cand_eval.environment.model_copy(
+                update={"weights_hash": ContentHash("9" * 64)}
+            )
+        }
+    )
+    with pytest.raises(
+        OptimizationVerificationError,
+        match="Candidate evaluation environment weights_hash must match the optimized artifact hash",
+    ):
+        opt_verifier.verify(
+            plan=opt_plan,
+            artifact=opt_artifact,
+            baseline_evaluation=base_eval,
+            candidate_evaluation=tampered_env_cand,
+            candidate_artifact_binding=valid_cand_binding,
+        )
+
+    # 7b. Candidate evaluation fraudulently carrying source checkpoint and source weights (B25)
+    fraudulent_cand_eval = cand_eval.model_copy(
+        update={
+            "plan": cand_eval.plan.model_copy(
+                update={
+                    "model_artifact": cand_eval.plan.model_artifact.model_copy(
+                        update={
+                            "checkpoint_id": CheckpointId(str(source_ckpt)),
+                            "weights_hash": source_hash,
+                        }
+                    )
+                }
+            ),
+            "environment": cand_eval.environment.model_copy(
+                update={"weights_hash": source_hash}
+            ),
+        }
+    )
+    with pytest.raises(
+        OptimizationVerificationError,
+        match="Candidate evaluation must identify the optimized artifact",
+    ):
+        opt_verifier.verify(
+            plan=opt_plan,
+            artifact=opt_artifact,
+            baseline_evaluation=base_eval,
+            candidate_evaluation=fraudulent_cand_eval,
             candidate_artifact_binding=valid_cand_binding,
         )
 

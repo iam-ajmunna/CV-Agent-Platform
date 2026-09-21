@@ -130,7 +130,7 @@ class DefaultOptimizationVerifier:
                 f"does not match candidate evaluation {candidate_evaluation.evaluation_id!r}"
             )
 
-        # 5. ADR-0011 Model / Checkpoint Lineage Verification
+        # 5. ADR-0011 Model / Checkpoint Lineage Verification (Strict B25 Lineage)
         base_model = baseline_evaluation.plan.model_artifact
         if str(base_model.checkpoint_id) != str(plan.source_checkpoint_id):
             raise OptimizationVerificationError(
@@ -142,30 +142,36 @@ class DefaultOptimizationVerifier:
                 f"Baseline evaluation weights hash {base_model.weights_hash!r} does not match "
                 f"plan source_weights_hash {plan.source_weights_hash!r}"
             )
+        if str(baseline_evaluation.environment.weights_hash) != str(
+            plan.source_weights_hash
+        ):
+            raise OptimizationVerificationError(
+                f"Baseline evaluation environment weights_hash {baseline_evaluation.environment.weights_hash!r} "
+                f"does not match plan source_weights_hash {plan.source_weights_hash!r}"
+            )
 
         cand_model = candidate_evaluation.plan.model_artifact
-        valid_cand_checkpoints = {
-            str(plan.source_checkpoint_id),
-            str(artifact.artifact_id),
-            str(artifact.source_checkpoint_id),
-        }
-        if str(cand_model.checkpoint_id) not in valid_cand_checkpoints:
+        if str(cand_model.checkpoint_id) != str(artifact.artifact_id):
             raise OptimizationVerificationError(
-                f"Candidate evaluation model checkpoint lineage {cand_model.checkpoint_id!r} does not match "
-                f"source checkpoint {plan.source_checkpoint_id!r} or candidate artifact {artifact.artifact_id!r}"
+                "Candidate evaluation must identify the optimized artifact "
+                f"{artifact.artifact_id!r}; got checkpoint "
+                f"{cand_model.checkpoint_id!r}"
             )
-        valid_cand_weights_hashes = {
-            str(plan.source_weights_hash),
-            str(artifact.artifact_hash),
-        }
-        if str(cand_model.weights_hash) not in valid_cand_weights_hashes:
+        if str(cand_model.weights_hash) != str(artifact.artifact_hash):
             raise OptimizationVerificationError(
-                f"Candidate evaluation weights hash lineage {cand_model.weights_hash!r} does not match "
-                f"source weights hash {plan.source_weights_hash!r} or candidate artifact hash {artifact.artifact_hash!r}"
+                "Candidate evaluation must use the optimized artifact hash "
+                f"{artifact.artifact_hash!r}; got {cand_model.weights_hash!r}"
             )
-        if str(cand_model.weights_hash) == str(artifact.artifact_hash) and str(
-            cand_model.weights_hash
-        ) != str(candidate_artifact_binding.candidate_artifact_hash):
+        if str(candidate_evaluation.environment.weights_hash) != str(
+            artifact.artifact_hash
+        ):
+            raise OptimizationVerificationError(
+                "Candidate evaluation environment weights_hash must match the optimized artifact hash "
+                f"{artifact.artifact_hash!r}; got {candidate_evaluation.environment.weights_hash!r}"
+            )
+        if str(cand_model.weights_hash) != str(
+            candidate_artifact_binding.candidate_artifact_hash
+        ):
             raise OptimizationVerificationError(
                 f"Candidate evaluation weights hash {cand_model.weights_hash!r} conflicts with "
                 f"candidate artifact binding hash {candidate_artifact_binding.candidate_artifact_hash!r}"

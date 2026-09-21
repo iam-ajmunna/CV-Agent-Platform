@@ -341,7 +341,25 @@ def _make_valid_dataset_manifest(has_calibration: bool = True) -> DatasetManifes
     )
 
 
-def _make_valid_evaluation_plan(eval_id: str, exp_id: str) -> EvaluationPlan:
+def _make_valid_evaluation_plan(
+    eval_id: str,
+    exp_id: str,
+    checkpoint_id: str | None = None,
+    weights_hash: str | None = None,
+) -> EvaluationPlan:
+    if checkpoint_id is None:
+        if "cand" in exp_id or "cand" in eval_id:
+            checkpoint_id = "art-opt-plan-001"
+        else:
+            checkpoint_id = "ckpt-yolo-v8x-001"
+    if weights_hash is None:
+        if "cand" in exp_id or "cand" in eval_id:
+            weights_hash = str(
+                compute_artifact_lineage_hash(_make_valid_optimization_plan())
+            )
+        else:
+            weights_hash = "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+
     return EvaluationPlan(
         evaluation_id=EvaluationId(eval_id),
         experiment_id=ExperimentId(exp_id),
@@ -349,12 +367,10 @@ def _make_valid_evaluation_plan(eval_id: str, exp_id: str) -> EvaluationPlan:
         capability_id=CapabilityId("cv.eval.detector"),
         dataset_binding=_make_valid_verification_binding(),
         model_artifact=ModelArtifactReference(
-            checkpoint_id=CheckpointId("ckpt-yolo-v8x-001"),
+            checkpoint_id=CheckpointId(checkpoint_id),
             architecture_name="yolov8x",
-            weights_hash=ContentHash(
-                "sha256:2222222222222222222222222222222222222222222222222222222222222222"
-            ),
-            weights_uri="s3://models/checkpoints/ckpt-yolo-v8x-001.pt",
+            weights_hash=ContentHash(weights_hash),
+            weights_uri=f"s3://models/checkpoints/{checkpoint_id}.pt",
             precision=TrainingPrecision.FP32,
             input_resolution=(640, 640),
         ),
@@ -371,16 +387,21 @@ def _make_valid_evaluation_plan(eval_id: str, exp_id: str) -> EvaluationPlan:
     )
 
 
-def _make_valid_evaluation_env() -> EvaluationEnvironmentRecord:
+def _make_valid_evaluation_env(
+    weights_hash: str | None = None,
+) -> EvaluationEnvironmentRecord:
+    w_hash = (
+        weights_hash
+        if weights_hash is not None
+        else "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+    )
     return EvaluationEnvironmentRecord(
         git_commit_sha="0" * 40,
         git_is_dirty=False,
         dataset_manifest_hash=ContentHash(
             "sha256:1111111111111111111111111111111111111111111111111111111111111111"
         ),
-        weights_hash=ContentHash(
-            "sha256:2222222222222222222222222222222222222222222222222222222222222222"
-        ),
+        weights_hash=ContentHash(w_hash),
         metric_definition_versions=("1.0",),
         python_version="3.11.0",
         torch_version="2.4.0",
@@ -394,6 +415,8 @@ def _make_valid_evaluation_result(
     fps: float = 65.0,
     latency_p50: float = 15.3,
     peak_vram_gb: float = 4.2,
+    checkpoint_id: str | None = None,
+    weights_hash: str | None = None,
 ) -> EvaluationResult:
     metric_def = MetricDefinition(
         metric_id=MetricId("val-map50"),
@@ -427,14 +450,21 @@ def _make_valid_evaluation_result(
         timing_synchronized=True,
         timing_source="cuda_event",
     )
-    plan = _make_valid_evaluation_plan(eval_id=f"eval-{exp_id}", exp_id=exp_id)
+    plan = _make_valid_evaluation_plan(
+        eval_id=f"eval-{exp_id}",
+        exp_id=exp_id,
+        checkpoint_id=checkpoint_id,
+        weights_hash=weights_hash,
+    )
     return EvaluationResult(
         evaluation_id=plan.evaluation_id,
         plan=plan,
         verdict=EvaluationVerdict.PASSED,
         quality_metrics=(metric_res,),
         system_benchmarks=(bench_res,),
-        environment=_make_valid_evaluation_env(),
+        environment=_make_valid_evaluation_env(
+            weights_hash=str(plan.model_artifact.weights_hash)
+        ),
         completed_at=datetime.now(timezone.utc),
     )
 
@@ -1170,7 +1200,9 @@ def test_verifier_missing_overlapping_metrics_fails_closed() -> None:
         plan=_make_valid_evaluation_plan("eval-cand", "exp-cand"),
         verdict=EvaluationVerdict.PASSED,
         quality_metrics=(m2,),
-        environment=_make_valid_evaluation_env(),
+        environment=_make_valid_evaluation_env(
+            weights_hash=str(artifact.artifact_hash)
+        ),
         completed_at=datetime.now(timezone.utc),
     )
 
@@ -2570,7 +2602,7 @@ def test_b9_verifier_dataset_binding_mismatch_fails_closed() -> None:
 
 
 def test_b9_verifier_candidate_artifact_binding_mismatch_fails_closed() -> None:
-    """[B9] Verify verifier rejects candidate evaluation if model checkpoint does not match source checkpoint."""
+    """[B9] Verify verifier rejects candidate evaluation if model checkpoint does not match optimized artifact."""
     verifier = DefaultOptimizationVerifier()
     plan = _make_valid_optimization_plan()
     artifact = _make_valid_artifact(plan)
@@ -2585,7 +2617,8 @@ def test_b9_verifier_candidate_artifact_binding_mismatch_fails_closed() -> None:
     cand_binding = _make_valid_candidate_binding(artifact, bad_cand_eval.evaluation_id)
 
     with pytest.raises(
-        OptimizationVerificationError, match="does not match source checkpoint"
+        OptimizationVerificationError,
+        match="Candidate evaluation must identify the optimized artifact",
     ):
         verifier.verify(
             artifact=artifact,
@@ -2603,12 +2636,11 @@ def test_b9_verifier_hardware_mismatch_fails_closed() -> None:
     artifact = _make_valid_artifact(plan)
     base_eval = _make_valid_evaluation_result("exp-base")
 
-    diff_env = base_eval.environment.model_copy(
+    cand_base = _make_valid_evaluation_result("exp-cand")
+    diff_env = cand_base.environment.model_copy(
         update={"target_hardware": "NVIDIA A100-SXM4-80GB"}
     )
-    cand_eval = _make_valid_evaluation_result("exp-cand").model_copy(
-        update={"environment": diff_env}
-    )
+    cand_eval = cand_base.model_copy(update={"environment": diff_env})
 
     with pytest.raises(
         OptimizationVerificationError, match="Hardware environment mismatch"
@@ -3093,8 +3125,9 @@ def test_b14_verifier_accepts_valid_candidate_binding_and_retains_adr0011_types(
     base_eval = _make_valid_evaluation_result("exp-base")
     cand_eval = _make_valid_evaluation_result("exp-cand")
 
-    # ADR-0011 ModelArtifactReference has source checkpoint ID, NOT an OptimizedArtifactId
-    assert cand_eval.plan.model_artifact.checkpoint_id == plan.source_checkpoint_id
+    # Candidate ModelArtifactReference identifies optimized artifact, typed as CheckpointId
+    assert str(cand_eval.plan.model_artifact.checkpoint_id) == str(artifact.artifact_id)
+    assert cand_eval.plan.model_artifact.weights_hash == artifact.artifact_hash
     assert isinstance(cand_eval.plan.model_artifact.checkpoint_id, str)
 
     binding = _make_valid_candidate_binding(artifact, cand_eval.evaluation_id)
@@ -3113,6 +3146,95 @@ def test_b14_verifier_accepts_valid_candidate_binding_and_retains_adr0011_types(
     assert (
         res.candidate_artifact_binding.candidate_artifact_hash == artifact.artifact_hash
     )
+
+
+def test_b25_verifier_rejects_candidate_evaluation_with_source_artifact_lineage() -> (
+    None
+):
+    """[B25] Verifier strictly rejects candidate evaluation carrying source checkpoint, weights, or env."""
+    verifier = DefaultOptimizationVerifier()
+    plan = _make_valid_optimization_plan()
+    artifact = _make_valid_artifact(plan)
+    base_eval = _make_valid_evaluation_result("exp-base")
+
+    # Candidate evaluation fraudulently carries source checkpoint and source weights
+    fraudulent_cand_eval = _make_valid_evaluation_result(
+        "exp-cand",
+        checkpoint_id=str(plan.source_checkpoint_id),
+        weights_hash=str(plan.source_weights_hash),
+    )
+    cand_binding = _make_valid_candidate_binding(
+        artifact, fraudulent_cand_eval.evaluation_id
+    )
+
+    # 1. Rejection on source checkpoint in candidate evaluation
+    with pytest.raises(
+        OptimizationVerificationError,
+        match="Candidate evaluation must identify the optimized artifact",
+    ):
+        verifier.verify(
+            artifact=artifact,
+            plan=plan,
+            baseline_evaluation=base_eval,
+            candidate_evaluation=fraudulent_cand_eval,
+            candidate_artifact_binding=cand_binding,
+        )
+
+    # 2. Rejection when checkpoint matches artifact but weights_hash carries source weights
+    cand_with_source_weights = fraudulent_cand_eval.model_copy(
+        update={
+            "plan": fraudulent_cand_eval.plan.model_copy(
+                update={
+                    "model_artifact": fraudulent_cand_eval.plan.model_artifact.model_copy(
+                        update={
+                            "checkpoint_id": CheckpointId(str(artifact.artifact_id))
+                        }
+                    )
+                }
+            )
+        }
+    )
+    with pytest.raises(
+        OptimizationVerificationError,
+        match="Candidate evaluation must use the optimized artifact hash",
+    ):
+        verifier.verify(
+            artifact=artifact,
+            plan=plan,
+            baseline_evaluation=base_eval,
+            candidate_evaluation=cand_with_source_weights,
+            candidate_artifact_binding=cand_binding,
+        )
+
+    # 3. Rejection when model_artifact matches artifact but environment weights_hash carries source weights
+    cand_with_mismatched_env = fraudulent_cand_eval.model_copy(
+        update={
+            "plan": fraudulent_cand_eval.plan.model_copy(
+                update={
+                    "model_artifact": fraudulent_cand_eval.plan.model_artifact.model_copy(
+                        update={
+                            "checkpoint_id": CheckpointId(str(artifact.artifact_id)),
+                            "weights_hash": artifact.artifact_hash,
+                        }
+                    )
+                }
+            ),
+            "environment": fraudulent_cand_eval.environment.model_copy(
+                update={"weights_hash": plan.source_weights_hash}
+            ),
+        }
+    )
+    with pytest.raises(
+        OptimizationVerificationError,
+        match="Candidate evaluation environment weights_hash.*must match the optimized artifact hash",
+    ):
+        verifier.verify(
+            artifact=artifact,
+            plan=plan,
+            baseline_evaluation=base_eval,
+            candidate_evaluation=cand_with_mismatched_env,
+            candidate_artifact_binding=cand_binding,
+        )
 
 
 # =============================================================================

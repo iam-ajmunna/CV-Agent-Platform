@@ -2105,3 +2105,37 @@ Remediated all three architectural blockers identified in the Official PM's seco
 **Learned:** Composition tests must not reuse baseline fixtures for candidate evaluations or bypass joining runtime deployments to the evaluated candidate artifact. Explicit immutable bindings (`DeploymentBaselineBinding`) prevent divergent deployment vs baseline lineage.
 
 **Left open:** Push remediation commit and submit response on PR #67 for Official PM final approval.
+
+---
+
+## 2026-09-21 — Remediated Official PM Re-Review Blocker B25 on PR #67 / Phase 2O (D-064)
+
+**Did:**
+1. Remediated B25 (Strict Candidate Evaluation Lineage & Provenance):
+   - Eliminated the B25 provenance bypass in `cv_agent/optimization/verifier.py`: candidate evaluation is strictly forbidden from identifying the source artifact or source weights.
+   - Mandated that in `DefaultOptimizationVerifier.verify()`:
+     - `str(cand_model.checkpoint_id) == str(artifact.artifact_id)` (fails closed with `OptimizationVerificationError` if not).
+     - `str(cand_model.weights_hash) == str(artifact.artifact_hash)` (fails closed with `OptimizationVerificationError` if not).
+     - `str(candidate_evaluation.environment.weights_hash) == str(artifact.artifact_hash)` (fails closed with `OptimizationVerificationError` if not).
+     - `str(baseline_evaluation.environment.weights_hash) == str(plan.source_weights_hash)` (already strictly verified).
+     - Source checkpoint ID and source weights hash are completely removed as admissible candidate values; they belong exclusively to `baseline_evaluation`.
+2. Added Comprehensive Adversarial Test Coverage:
+   - Added `test_b25_verifier_rejects_candidate_evaluation_with_source_artifact_lineage()` in `tests/test_optimization_boundary.py` explicitly asserting `OptimizationVerificationError` across 3 adversarial configurations: (a) candidate model artifact carrying source checkpoint ID, (b) candidate model artifact carrying source weights hash, and (c) candidate environment record carrying mismatched weights hash.
+   - Updated integration test harness `tests/test_closed_loop_integration.py` in `test_seam4_evaluation_result_to_optimization_and_deployment` with tests rejecting: (a) candidate evaluation fraudulently carrying source checkpoint and weights, and (b) candidate evaluation environment weights hash mismatch.
+3. Updated Test Harness Fixtures:
+   - Updated `tests/test_optimization_boundary.py` fixtures (`_make_valid_evaluation_plan`, `_make_valid_evaluation_env`, `_make_valid_evaluation_result`) to default candidate evaluation checkpoint ID to `"art-opt-plan-001"` and candidate weights hash to the artifact hash.
+   - Preserved ADR-0011 `ModelArtifactReference.checkpoint_id` typing using `CheckpointId(str(artifact.artifact_id))` to avoid type pollution.
+4. Quality Gates Verified:
+   - Pytest: 665/665 tests passed across 24 test suites in 5.3s (including 12 closed-loop integration tests).
+   - Ruff check: clean (0 errors).
+   - Ruff format check: clean (189 files formatted).
+   - Mypy: clean (0 issues across 118 source files).
+   - Git diff check: clean (0 whitespace errors).
+
+**Why:** Addresses Official PM Re-Review Blocker B25 on PR #67 (`[P§8]`, `[P§9]`, `[P§12]`, `[P§13]`, `[P§21]`, `[P§22]`, `[P§24]`, `[P§25]`, `[P§29.2]`, `[P§29.4]`, `[P§34]`). Eliminates any possibility that unoptimized baseline evaluation evidence can be paired with an optimized candidate binding to authorize deployment.
+
+**Broke:** Nothing broken. 665/665 tests pass, all quality gates green.
+
+**Learned:** Candidate verification must strictly validate both the model artifact reference inside the evaluation plan and the evaluated environment record against the compiled artifact's identity and cryptographic hash. Permitting set union or fallback matching against source artifacts creates a subtle provenance hole where unoptimized evaluations can masquerade as candidate proof.
+
+**Left open:** Push B25 remediation commit and submit response on PR #67 for Official PM final approval.
