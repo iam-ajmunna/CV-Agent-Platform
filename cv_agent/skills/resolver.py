@@ -16,17 +16,25 @@ from typing import Protocol, runtime_checkable
 
 from cv_agent.capabilities.registry import CapabilityRegistry
 from cv_agent.domain.contracts import AvailabilityState
-from cv_agent.domain.identifiers import CapabilityId
+from cv_agent.domain.identifiers import CapabilityId, SkillId, ToolId
 from cv_agent.skills.contracts import (
+    CapabilityAvailabilitySummary,
     HardwareClass,
+    SkillAvailabilitySummary,
     SkillDescriptor,
+    SkillProvenance,
     SkillResolution,
     is_hardware_compatible,
     parse_cuda_compute,
 )
 from cv_agent.skills.errors import UnknownCapabilityError
 from cv_agent.skills.registry import DiscoveryCache, SkillRegistry
-from cv_agent.tools.contracts import ExecutionTargetDescriptor, TargetType, ToolRegistry
+from cv_agent.tools.contracts import (
+    ExecutionTargetDescriptor,
+    TargetId,
+    TargetType,
+    ToolRegistry,
+)
 
 
 @runtime_checkable
@@ -41,6 +49,24 @@ class SkillResolver(Protocol):
         tool_registry: ToolRegistry | None = None,
     ) -> SkillResolution:
         """Resolve a capability to candidate skills and evaluate availability."""
+        ...
+
+    def enumerate_capabilities(
+        self,
+        available_targets: tuple[ExecutionTargetDescriptor, ...] = (),
+        *,
+        tool_registry: ToolRegistry | None = None,
+    ) -> tuple[CapabilityAvailabilitySummary, ...]:
+        """Inspection-only enumeration of all registered capabilities and their operational availability."""
+        ...
+
+    def enumerate_skills(
+        self,
+        available_targets: tuple[ExecutionTargetDescriptor, ...] = (),
+        *,
+        tool_registry: ToolRegistry | None = None,
+    ) -> tuple[SkillAvailabilitySummary, ...]:
+        """Inspection-only enumeration of all registered/known skills and their operational availability."""
         ...
 
 
@@ -390,3 +416,258 @@ class DefaultSkillResolver:
                     missing_prereqs.append(req_p)
 
         return tuple(missing_tools) + tuple(missing_prereqs)
+
+    def enumerate_capabilities(
+        self,
+        available_targets: tuple[ExecutionTargetDescriptor, ...] = (),
+        *,
+        tool_registry: ToolRegistry | None = None,
+    ) -> tuple[CapabilityAvailabilitySummary, ...]:
+        """Inspection-only enumeration of all registered capabilities and their operational availability.
+
+        Guarantees (Issue #68, ADR-0007):
+        - Inspection only: 0 tool executions, 0 registry mutations, 0 subprocesses, 0 MCP calls.
+        - Deterministic ordering by CapabilityId.
+        """
+        effective_tool_registry = tool_registry or self._tool_registry
+
+        # Gather capabilities from authoritative registry, skill registry, and discovery cache
+        cap_ids: set[CapabilityId] = set()
+        if self._capability_registry is not None:
+            cap_ids.update(
+                c.capability_id for c in self._capability_registry.list_capabilities()
+            )
+        for skill in self._skill_registry.list_skills():
+            cap_ids.update(skill.satisfies_capabilities)
+        if self._discovery_cache is not None:
+            for cand in self._discovery_cache.list_candidates():
+                cap_ids.update(cand.satisfies_capabilities)
+
+        summaries: list[CapabilityAvailabilitySummary] = []
+        for cap_id in sorted(cap_ids, key=lambda c: str(c)):
+            resolution = self.resolve(
+                cap_id, available_targets, tool_registry=effective_tool_registry
+            )
+            selected = resolution.selected_skill
+            target_id = (
+                resolution.target_descriptor.target_id
+                if resolution.target_descriptor is not None
+                else None
+            )
+            req_tools = selected.required_tools if selected is not None else ()
+            resolved_tools: list[ToolId] = []
+            if (
+                effective_tool_registry is not None
+                and target_id is not None
+                and req_tools
+            ):
+                for tid in req_tools:
+                    tool_desc = effective_tool_registry.get(tid)
+                    if tool_desc is not None:
+                        avail = effective_tool_registry.check_availability(
+                            tid, target_id
+                        )
+                        if avail.is_available:
+                            resolved_tools.append(tid)
+
+            summaries.append(
+                CapabilityAvailabilitySummary(
+                    capability_id=cap_id,
+                    satisfying_skills=resolution.candidate_skills,
+                    selected_skill=selected,
+                    availability_state=resolution.availability_state,
+                    target_id=target_id,
+                    required_tools=req_tools,
+                    resolved_tools=tuple(resolved_tools),
+                    unavailability_reason=resolution.unavailability_reason,
+                )
+            )
+
+        return tuple(summaries)
+
+    def enumerate_skills(
+        self,
+        available_targets: tuple[ExecutionTargetDescriptor, ...] = (),
+        *,
+        tool_registry: ToolRegistry | None = None,
+    ) -> tuple[SkillAvailabilitySummary, ...]:
+        """Inspection-only enumeration of all registered/known skills and their operational availability.
+
+        Guarantees (Issue #68, ADR-0007):
+        - Inspection only: 0 tool executions, 0 registry mutations, 0 subprocesses, 0 MCP calls.
+        - Evaluates each skill individually against available targets.
+        - Preserves D-022 hardware-aware KNOWN_BUT_UNAVAILABLE reporting for GPU skills on macOS.
+        - Accurately distinguishes non-GPU skills (e.g. nvidia.model_inspection.visualize) which allow LOCAL.
+        - Deterministic ordering by SkillId.
+        """
+        effective_tool_registry = tool_registry or self._tool_registry
+
+        # Gather authoritative skills and discovered candidates
+        skills_map: dict[SkillId, SkillDescriptor] = {}
+        for s in self._skill_registry.list_skills():
+            skills_map[s.skill_id] = s
+        if self._discovery_cache is not None:
+            for c in self._discovery_cache.list_candidates():
+                if c.skill_id not in skills_map:
+                    skills_map[c.skill_id] = c
+
+        summaries: list[SkillAvailabilitySummary] = []
+        for cand in sorted(skills_map.values(), key=lambda s: str(s.skill_id)):
+            req_tools = cand.required_tools
+
+            # Handle discovered candidate before promotion
+            if cand.provenance == SkillProvenance.DISCOVERED:
+                summaries.append(
+                    SkillAvailabilitySummary(
+                        skill_id=cand.skill_id,
+                        satisfies_capabilities=cand.satisfies_capabilities,
+                        availability_state=AvailabilityState.DISCOVERED,
+                        provenance=cand.provenance,
+                        vendor=cand.vendor,
+                        target_id=None,
+                        required_tools=req_tools,
+                        resolved_tools=(),
+                        unavailability_reason="Discovered candidate pending validation and registration",
+                    )
+                )
+                continue
+
+            # Case: zero execution targets configured
+            if not available_targets:
+                if cand.target_requirements.required_hardware != HardwareClass.ANY:
+                    state = AvailabilityState.KNOWN_BUT_UNAVAILABLE
+                    reason = "No execution targets configured; hardware prerequisites cannot be satisfied"
+                else:
+                    state = AvailabilityState.KNOWN
+                    reason = "Zero execution targets configured"
+                summaries.append(
+                    SkillAvailabilitySummary(
+                        skill_id=cand.skill_id,
+                        satisfies_capabilities=cand.satisfies_capabilities,
+                        availability_state=state,
+                        provenance=cand.provenance,
+                        vendor=cand.vendor,
+                        target_id=None,
+                        required_tools=req_tools,
+                        resolved_tools=(),
+                        unavailability_reason=reason,
+                    )
+                )
+                continue
+
+            # Case: evaluate candidate against available targets
+            cat1: list[ExecutionTargetDescriptor] = []
+            cat2: list[tuple[ExecutionTargetDescriptor, tuple[str, ...]]] = []
+            cat3: list[tuple[ExecutionTargetDescriptor, tuple[str, ...]]] = []
+
+            for target in available_targets:
+                eval_res = self._evaluate_candidate_target(
+                    cand, target, effective_tool_registry
+                )
+                if eval_res is None:
+                    continue  # Target incompatible (hardware/compute/allowed_targets mismatch)
+
+                missing = eval_res
+                if target.is_available:
+                    if not missing:
+                        cat1.append(target)
+                    else:
+                        cat2.append((target, missing))
+                else:
+                    cat3.append((target, missing))
+
+            target_id: TargetId | None = None
+            resolved_tools: list[ToolId] = []
+            unavail_reason: str | None = None
+
+            if cat1:
+                cat1.sort(key=lambda t: _candidate_target_key(cand, t))
+                best_target = cat1[0]
+                state = AvailabilityState.EXECUTABLE
+                target_id = best_target.target_id
+                if effective_tool_registry is not None:
+                    for tid in req_tools:
+                        if (
+                            effective_tool_registry.get(tid) is not None
+                            and effective_tool_registry.check_availability(
+                                tid, best_target.target_id
+                            ).is_available
+                        ):
+                            resolved_tools.append(tid)
+            elif cat2:
+                cat2.sort(
+                    key=lambda item: (
+                        len(item[1]),
+                        _candidate_target_key(cand, item[0]),
+                    )
+                )
+                best_target, missing = cat2[0]
+                state = AvailabilityState.UNAVAILABLE
+                target_id = best_target.target_id
+                unavail_reason = (
+                    f"Required tools or prerequisites missing on target {str(best_target.target_id)!r}: "
+                    f"{list(missing)}"
+                )
+                if effective_tool_registry is not None:
+                    for tid in req_tools:
+                        if (
+                            effective_tool_registry.get(tid) is not None
+                            and effective_tool_registry.check_availability(
+                                tid, best_target.target_id
+                            ).is_available
+                        ):
+                            resolved_tools.append(tid)
+            elif cat3:
+                cat3.sort(
+                    key=lambda item: (
+                        len(item[1]),
+                        _candidate_target_key(cand, item[0]),
+                    )
+                )
+                best_target, missing = cat3[0]
+                state = AvailabilityState.UNAVAILABLE
+                target_id = best_target.target_id
+                unavail_reason = (
+                    f"Target {str(best_target.target_id)!r} is offline or unavailable"
+                )
+            else:
+                # No compatible target found
+                requires_nvidia = (
+                    cand.target_requirements.required_hardware
+                    in (
+                        HardwareClass.NVIDIA_GPU,
+                        HardwareClass.JETSON,
+                        HardwareClass.JETSON_ORIN,
+                        HardwareClass.JETSON_XAVIER,
+                    )
+                    or cand.target_requirements.min_cuda_compute is not None
+                )
+                has_remote_or_mcp = any(
+                    t.target_type in (TargetType.REMOTE, TargetType.MCP_ENDPOINT)
+                    for t in available_targets
+                )
+                if requires_nvidia and not has_remote_or_mcp:
+                    state = AvailabilityState.KNOWN_BUT_UNAVAILABLE
+                    unavail_reason = (
+                        f"NVIDIA skill {str(cand.skill_id)!r} requires remote GPU/Jetson target with "
+                        f"CUDA compute, but only local macOS workstation is configured (D-022). Zero silent fallback permitted."
+                    )
+                else:
+                    state = AvailabilityState.UNAVAILABLE
+                    unavail_reason = "No configured execution target satisfies skill target requirements"
+
+            summaries.append(
+                SkillAvailabilitySummary(
+                    skill_id=cand.skill_id,
+                    satisfies_capabilities=cand.satisfies_capabilities,
+                    availability_state=state,
+                    provenance=cand.provenance,
+                    vendor=cand.vendor,
+                    target_id=target_id,
+                    required_tools=req_tools,
+                    resolved_tools=tuple(resolved_tools),
+                    unavailability_reason=unavail_reason,
+                )
+            )
+
+        return tuple(summaries)

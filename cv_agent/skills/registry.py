@@ -118,6 +118,51 @@ class DefaultSkillRegistry:
         """List all authoritative skills satisfying the specified capability."""
         return tuple(self._cap_to_skills.get(capability_id, ()))
 
+    def promote_discovered_skill(
+        self,
+        candidate: SkillDescriptor,
+        *,
+        promoted_provenance: SkillProvenance = SkillProvenance.EXTERNAL,
+    ) -> SkillDescriptor:
+        """Promote a validated discovered candidate into the authoritative registry.
+
+        Enforces:
+        - Candidate must have provenance == SkillProvenance.DISCOVERED.
+        - Promoted provenance must be INTERNAL or EXTERNAL.
+        - All declared capabilities must be verified under ADR-0001.
+        - Produces a new immutable SkillDescriptor with updated provenance and registers it.
+        """
+        if candidate.provenance != SkillProvenance.DISCOVERED:
+            raise ValueError(
+                f"Can only promote candidate with provenance=SkillProvenance.DISCOVERED, "
+                f"got {candidate.provenance!r}"
+            )
+        if promoted_provenance == SkillProvenance.DISCOVERED:
+            raise ValueError(
+                "Promoted provenance must be INTERNAL or EXTERNAL, not DISCOVERED"
+            )
+
+        promoted = SkillDescriptor(
+            skill_id=candidate.skill_id,
+            name=candidate.name,
+            description=candidate.description,
+            version=candidate.version,
+            provenance=promoted_provenance,
+            satisfies_capabilities=candidate.satisfies_capabilities,
+            required_tools=candidate.required_tools,
+            target_requirements=candidate.target_requirements,
+            parameter_schema=candidate.parameter_schema,
+            procedural_recipe=candidate.procedural_recipe,
+            vendor=candidate.vendor,
+            prerequisites=candidate.prerequisites,
+            timeout_seconds=candidate.timeout_seconds,
+            deprecated_in_favor_of=candidate.deprecated_in_favor_of,
+            requires_approval=candidate.requires_approval,
+            metadata=candidate.metadata,
+        )
+        self.register_skill(promoted)
+        return promoted
+
 
 class DiscoveryCache:
     """Ephemeral candidate pool for runtime-discovered skills (via MCP or remote probe).
