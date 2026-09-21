@@ -2138,4 +2138,32 @@ Remediated all three architectural blockers identified in the Official PM's seco
 
 **Learned:** Candidate verification must strictly validate both the model artifact reference inside the evaluation plan and the evaluated environment record against the compiled artifact's identity and cryptographic hash. Permitting set union or fallback matching against source artifacts creates a subtle provenance hole where unoptimized evaluations can masquerade as candidate proof.
 
-**Left open:** Push B25 remediation commit and submit response on PR #67 for Official PM final approval.
+**Left open:** PR #67 approved by Official PM and squash-merged to `main` at `4b7a679`.
+
+---
+
+## 2026-09-21 — Phase 2O Merge Acceptance Synchronization (D-062–D-064, PR #67, Issue #66)
+
+**Did:** Synchronized repository rolling state on `main` following Official PM final approval and squash-merge of PR #67 (`4b7a679`). Recorded decisions `D-062`, `D-063`, and `D-064` in `DECISIONS.md`. Updated `STATUS.md`. Phase 2O (Closed-Loop Integration & Architecture Gap Review) is fully closed on `main`:
+1. Validated and verified the 7 core composition seams across all 14 frozen Phase 2 subsystems (ADR-0001 through ADR-0013):
+   - Seam 1 (ADR-0013 -> ADR-0009): Active learning candidate sample payload ingestion to dataset manifests with disjoint split preservation.
+   - Seam 2 (ADR-0009 -> ADR-0010): Manifest-bound training plan configuration with calibration/test split leakage rejection.
+   - Seam 3 (ADR-0010 -> ADR-0011): Checkpoint manifest lineage handoff to evaluation runner with hardware timing synchronization.
+   - Seam 4 (ADR-0011 -> ADR-0012): Strict candidate evaluation provenance enforcing optimized artifact identity, artifact hash, and environment weights hash; fail-closed rejection of fraudulent unoptimized baseline evidence (B23, B25).
+   - Seam 5 (ADR-0012 -> ADR-0013): Immutable `DeploymentBaselineBinding` joining deployment record + candidate evaluation + evidence hash with fail-closed rejection on artifact mismatch or unlinked rollback (B24).
+   - Seam 6 (Cross-cutting ADR-0003): 4-tuple approval cross-validation and payload hash verification across lifecycle mutations.
+   - Seam 7 (Cross-cutting Security & Evidence Purity): Contract-schema traversal confirming zero typed credential fields and zero synthetic distribution fallbacks.
+2. 12 dedicated integration tests passing in `tests/test_closed_loop_integration.py`.
+3. 665 total repository tests passing across 24 test suites with zero regressions.
+4. Clean quality gates: Ruff check clean, Ruff format clean, Mypy clean across 118 source files, Git diff check clean.
+5. GitHub Actions CI run fully green across Python 3.10–3.13 matrix and GitGuardian.
+6. Formal architecture gap review and closure report delivered at `docs/reports/ISSUE-66-PHASE-2O-CLOSURE-REPORT.md`.
+7. Closed Scoping Issue #66 and pruned feature branch `feature/ajmunna/phase-2o-closed-loop-integration`.
+
+**Why:** `[P§7]`–`[P§16]`, `[P§19]`–`[P§22]`, `[P§24]`, `[P§25]`, `[P§26]`, `[P§27]`, `[P§28]`, `[P§29.1]`–`[P§29.10]`, `[P§31]`, `[P§34]`, and `AGENTS.md` rolling-state acceptance contract.
+
+**Broke:** Nothing broken. 665 repository tests pass, all quality gates green.
+
+**Learned:** Rigorous closed-loop integration testing across subsystem boundaries exposes subtle provenance and joining gaps—such as candidate evaluations carrying source model hashes or monitoring baselines drifting from deployed artifacts—that isolated unit test suites cannot detect. Formalizing immutable binding contracts (`OptimizedArtifactEvaluationBinding`, `DeploymentBaselineBinding`) establishes end-to-end cryptographic and semantic traceability.
+
+**Left open:** Phase 2 complete. All Phase 2 implementation tracks (2A–2N) and the integration/gap review (2O) are complete and accepted on `main`. Awaiting Official PM instruction for next milestone / Phase 3 kickoff.
