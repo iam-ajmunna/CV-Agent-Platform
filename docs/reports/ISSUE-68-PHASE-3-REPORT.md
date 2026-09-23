@@ -1,10 +1,11 @@
 # Issue #68 — Phase 3: Skills & NVIDIA Integration Report
 
-**Date:** 2026-09-21  
-**Branch:** `feature/ajmunna/phase-3-skills-nvidia-integration`  
-**Issue:** [Issue #68](https://github.com/iam-ajmunna/CV-Agent-Platform/issues/68)  
-**Authoritative Contracts:** Frozen `ADR-0007`, `ADR-0001`, `ADR-0005`, `[P§15]`, `[P§23]`, `[P§29.9]`  
-**Status:** COMPLETE & VERIFIED — Ready for Official PM Review  
+**Date:** 2026-09-22<br>
+**Branch:** `feature/ajmunna/phase-3-skills-nvidia-integration` (merged & deleted)<br>
+**Issue:** [Issue #68](https://github.com/iam-ajmunna/CV-Agent-Platform/issues/68) (CLOSED)<br>
+**Pull Request:** [PR #69](https://github.com/iam-ajmunna/CV-Agent-Platform/pull/69) (SQUASH-MERGED at `5996c95`)<br>
+**Authoritative Contracts:** Frozen `ADR-0007`, `ADR-0001`, `ADR-0005`, `[P§15]`, `[P§23]`, `[P§29.9]`<br>
+**Status:** ACCEPTED & MERGED ON MAIN
 
 ---
 
@@ -32,7 +33,7 @@ All 8 Official PM corrections from the scoping review were implemented and verif
 | # | Official PM Correction | Resolution & Implementation Detail |
 |---|---|---|
 | **1** | **Fix quantization capability ID** | Uses exact registered ADR-0001 `CapabilityId("cv.deployment.optimization")`. Confirmed mapping from `spec/capability_registry.json`. No alias or synthetic ID introduced. |
-| **2** | **Do not equate `AVAILABLE` with "installed"** | Implemented the full ADR-0007 7-state taxonomy (`KNOWN`, `DISCOVERED`, `CONFIGURED`, `AVAILABLE`, `EXECUTABLE`, `UNAVAILABLE`, `KNOWN_BUT_UNAVAILABLE`). `SkillAvailabilitySummary` and `CapabilityAvailabilitySummary` expose typed states and derive `is_executable` and `is_merely_known` strictly as presentation projections. |
+| **2** | **Do not equate `AVAILABLE` with "installed"** | Implemented the full ADR-0007 7-state taxonomy (`KNOWN`, `DISCOVERED`, `CONFIGURED`, `AVAILABLE`, `EXECUTABLE`, `UNAVAILABLE`, `KNOWN_BUT_UNAVAILABLE`). `SkillAvailabilitySummary` and `CapabilityAvailabilitySummary` expose typed states and derive `is_executable` and `is_merely_known` strictly as presentation projections. Architectural state `AVAILABLE` denotes target reachability + verified environment prerequisites; it is never conflated with or treated as synonymous with "installed". |
 | **3** | **Inspection-only enumeration** | `enumerate_capabilities()` and `enumerate_skills()` are guaranteed inspection-only: 0 `ToolExecutor` executions, 0 subprocesses, 0 MCP calls, 0 registry mutations, 0 candidate promotions, 0 background jobs. Verified by dedicated acceptance test. |
 | **4** | **No hardcoding of "A100"** | Test fixtures construct generic compatible NVIDIA GPU targets (`hardware="nvidia_gpu"`, `cuda_compute="8.0"`) satisfying descriptor requirements without turning specific hardware SKUs into architectural authority. |
 | **5** | **Mechanically enforceable AST audit** | `test_roadmap_exit_2_ast_audit_proves_zero_vendor_runtime_implementations` mechanically traverses all AST nodes in `cv_agent/skills/*.py`, asserting 0 CUDA kernel launches (`<<<...>>>`), 0 direct CUDA runtime bindings (`cudaMalloc`, `cudaMemcpy`), 0 TensorRT builders (`Builder`, `create_network`, `build_engine`), 0 PyTorch training loops (`loss.backward()`, `optimizer.step()`), and 0 vendor implementation imports (`tensorrt`, `modelopt`, `pycuda`, `cupy`, `torch.cuda`). |

@@ -2191,4 +2191,31 @@ Remediated all three architectural blockers identified in the Official PM's seco
 
 **Learned:** AST audits provide a mechanical, airtight guarantee that a skills subsystem remains strictly declarative and delegates execution to tools rather than secretly embedding vendor runtime algorithms.
 
-**Left open:** PR creation and review by Official PM under Issue #68.
+**Left open:** PR #69 approved by Official PM and squash-merged to `main` at `5996c95` (closing Issue #68).
+
+---
+
+## 2026-09-22 — Phase 3 Merge Acceptance Synchronization (D-065, PR #69, Issue #68)
+
+**Did:** Synchronized repository rolling state on `main` following Official PM final approval and squash-merge of PR #69 (`5996c95`). Recorded decision `D-065` in `DECISIONS.md`. Updated `STATUS.md`. Phase 3 (Skills & NVIDIA Integration) is fully closed on `main`:
+1. Verified PR #69 head was exactly commit `2b4dea6` with all 5/5 CI checks green across Python 3.10–3.13 matrix and GitGuardian before merge.
+2. Formally merged PR #69 into `main` via squash merge (`5996c95`), closing Scoping Issue #68 and deleting feature branch `feature/ajmunna/phase-3-skills-nvidia-integration`.
+3. Delivered authoritative resolution chain: `CapabilityId -> SkillDescriptor -> ToolDescriptor -> ExecutionTargetDescriptor`, strictly implementing "External expertise is invoked, not duplicated" (`[P§15]`, `[P§20]`, `[P§23]`, `[P§24]`, `[P§29.4]`, `[P§29.9]`, `[P§34]`).
+4. Discharged all 8 Official PM scoping review corrections:
+   - Capability ID: Exact registered ADR-0001 `CapabilityId("cv.deployment.optimization")`.
+   - Availability Model: 7-state taxonomy (`KNOWN`, `DISCOVERED`, `CONFIGURED`, `AVAILABLE`, `EXECUTABLE`, `UNAVAILABLE`, `KNOWN_BUT_UNAVAILABLE`) with `is_executable` and `is_merely_known` strictly as presentation projections; preserved distinction that `AVAILABLE` is an architectural state, not synonymous with "installed".
+   - Inspection Safety: Purely non-mutating, non-executing enumeration verified by acceptance tests.
+   - Generic Target Fixtures: Compatible remote GPU fixtures without hardcoded "A100".
+   - AST Boundary: Mechanical audit asserting 0 CUDA launches, 0 direct CUDA bindings, 0 TRT builders, 0 PyTorch loops, 0 vendor runtime imports in `cv_agent/skills/`.
+   - 10-Skill Local Host Matrix: 9 GPU/Jetson skills report `KNOWN_BUT_UNAVAILABLE` on local macOS workstation; `nvidia.model_inspection.visualize` is evaluated against local tool dependencies (`tool.netron`, `tool.onnx`).
+   - Canonical Target: `detect_host_execution_target()` at ADR-0005 boundary.
+   - Discovery Authority: `promote_discovered_skill()` on `DefaultSkillRegistry` enforcing explicit promotion.
+5. All 674 repository tests passing across 25 suites; all quality gates green (Ruff check, Ruff format, Mypy, git diff check).
+
+**Why:** `[P§15]`, `[P§20]`, `[P§23]`, `[P§24]`, `[P§29.4]`, `[P§29.9]`, `[P§34]`, and `AGENTS.md` rolling-state acceptance contract.
+
+**Broke:** Nothing broken. 674/674 repository tests pass, CI green.
+
+**Learned:** Clear boundaries between architectural state machines (the 7 ADR-0007 states) and presentation projections (`is_executable`, `is_merely_known`) ensure operational tools and CLIs can present user-friendly summaries without eroding the precise underlying state transitions or conflating target availability with tool installation.
+
+**Left open:** Phase 3 complete and accepted on `main`. Awaiting Official PM scoping instruction for Phase 4 (Reasoning Subsystem, ADR-0008).
