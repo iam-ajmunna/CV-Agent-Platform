@@ -31,6 +31,10 @@ from cv_agent.orchestration.contracts import (
     SessionId,
     ThreadId,
 )
+from cv_agent.orchestration.discover_define import (
+    DiscoverDefineGraphState,
+    create_discover_define_graph,
+)
 from cv_agent.orchestration.fencing import LeaseManager
 from cv_agent.orchestration.graph import (
     OrchestrationGraphState,
@@ -63,6 +67,7 @@ __all__ = [
     "ApprovalSecurityError",
     "ApprovalStatus",
     "CheckpointCorruptionError",
+    "DiscoverDefineGraphState",
     "ExecutionLease",
     "InvalidStateTransitionError",
     "LeaseManager",
@@ -87,6 +92,7 @@ __all__ = [
     "build_operation_envelope",
     "canonicalize_payload",
     "compute_payload_hash",
+    "create_discover_define_graph",
     "create_orchestration_graph",
     "validate_lifecycle_transition",
     "validate_operation_transition",

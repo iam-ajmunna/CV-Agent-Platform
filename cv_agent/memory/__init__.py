@@ -8,6 +8,7 @@ from cv_agent.memory.interfaces import (
     LearnedHeuristic,
     ProjectMemoryReader,
     ProjectMemoryWriter,
+    ProjectSpecification,
 )
 from cv_agent.memory.service import (
     GitProjectMemory,
@@ -25,5 +26,6 @@ __all__ = [
     "ProjectMemoryFormatError",
     "ProjectMemoryReader",
     "ProjectMemoryWriter",
+    "ProjectSpecification",
     "WorkspaceContainmentError",
 ]

@@ -10,7 +10,11 @@ Defines:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Any, Protocol
+
+
+class ProjectMemoryError(Exception):
+    """Base exception for project memory operations."""
 
 
 @dataclass(frozen=True)
@@ -47,6 +51,17 @@ class LearnedHeuristic:
     evidence_experiment_ids: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class ProjectSpecification:
+    """Authoritative structured project specification produced at DEFINE exit [ADR-0004, ADR-0008]."""
+
+    characterization: Any  # ProblemCharacterization
+    decomposition: Any  # CVTaskDecompositionDAG
+    hardware_constraints: HardwareConstraints
+    architectural_choices: tuple[ArchitecturalDecision, ...] = ()
+    dataset_lineage_notes: str = ""
+
+
 class ProjectMemoryReader(Protocol):
     """Read-only interface to Git-tracked structured project memory [P§33]."""
 
@@ -60,6 +75,10 @@ class ProjectMemoryReader(Protocol):
 
     def get_learned_heuristics(self) -> tuple[LearnedHeuristic, ...]:
         """Retrieve empirical engineering heuristics."""
+        ...
+
+    def get_project_specification(self) -> ProjectSpecification | None:
+        """Retrieve the persistent structured project specification if committed."""
         ...
 
 
@@ -76,4 +95,8 @@ class ProjectMemoryWriter(Protocol):
 
     def append_learned_heuristic(self, heuristic: LearnedHeuristic) -> None:
         """Append a newly validated empirical engineering heuristic."""
+        ...
+
+    def commit_project_specification(self, spec: ProjectSpecification) -> None:
+        """Atomically commit structured project specification, hardware constraints, and architectural choices."""
         ...

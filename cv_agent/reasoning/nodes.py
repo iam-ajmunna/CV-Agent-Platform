@@ -28,12 +28,14 @@ from cv_agent.reasoning.contracts import (
     BaselineSpec,
     CapabilityIntent,
     CitationRef,
+    CVTaskDecompositionDAG,
     DecisionId,
     DiagnosticReport,
     EmpiricalClaim,
     EmpiricalComparator,
     Hypothesis,
     NodeType,
+    OperationalInquiry,
     ProblemCharacterization,
     ReasoningContext,
     ReasoningOutput,
@@ -41,6 +43,7 @@ from cv_agent.reasoning.contracts import (
     Reversibility,
     RiskLevel,
     StrategyRecommendation,
+    TaskNode,
     generate_decision_id,
 )
 from cv_agent.reasoning.errors import (
@@ -321,6 +324,12 @@ class ProblemFramingNode(ReasoningNode):
         payload = ProblemCharacterization(
             task_type=raw_dict["task_type"],
             target_hardware=raw_dict["target_hardware"],
+            operational_definition=raw_dict.get("operational_definition", ""),
+            physical_environment=raw_dict.get("physical_environment", ""),
+            camera_infrastructure=raw_dict.get("camera_infrastructure", ""),
+            error_tolerance=raw_dict.get("error_tolerance", ""),
+            data_availability=raw_dict.get("data_availability", ""),
+            intervention_modality=raw_dict.get("intervention_modality", ""),
             latency_budget_ms=(
                 float(raw_dict["latency_budget_ms"])
                 if raw_dict.get("latency_budget_ms") is not None
@@ -442,3 +451,72 @@ class StrategyNode(ReasoningNode):
             capability_intents=capability_intents,
         )
         return payload, capability_intents, approval_rec
+
+
+class ElicitationNode(ReasoningNode):
+    """Stateless reasoning node for operational inquiry and problem characterization elicitation [P§5], [P§29.1]."""
+
+    @property
+    def node_type(self) -> NodeType:
+        return NodeType.ELICITATION
+
+    def _parse_payload(
+        self, raw_dict: dict[str, Any]
+    ) -> tuple[
+        OperationalInquiry,
+        tuple[CapabilityIntent, ...],
+        ApprovalRecommendation | None,
+    ]:
+        inquiry = OperationalInquiry(
+            inquiry_id=raw_dict["inquiry_id"],
+            unresolved_dimensions=tuple(raw_dict.get("unresolved_dimensions", ())),
+            targeted_questions=tuple(raw_dict.get("targeted_questions", ())),
+            context_summary=raw_dict.get("context_summary", ""),
+            assumptions_and_risks=tuple(raw_dict.get("assumptions_and_risks", ())),
+        )
+        return inquiry, (), None
+
+
+class TaskDecompositionNode(ReasoningNode):
+    """Stateless reasoning node for CV task DAG decomposition and capability intent expression [P§4], [P§6]."""
+
+    @property
+    def node_type(self) -> NodeType:
+        return NodeType.TASK_DECOMPOSITION
+
+    def _parse_payload(
+        self, raw_dict: dict[str, Any]
+    ) -> tuple[
+        CVTaskDecompositionDAG,
+        tuple[CapabilityIntent, ...],
+        ApprovalRecommendation | None,
+    ]:
+        raw_tasks = raw_dict.get("tasks", [])
+        tasks = tuple(
+            TaskNode(
+                task_id=t["task_id"],
+                task_type=t["task_type"],
+                description=t["description"],
+                inputs=tuple(t.get("inputs", ())),
+                outputs=tuple(t.get("outputs", ())),
+                dependencies=tuple(t.get("dependencies", ())),
+            )
+            for t in raw_tasks
+        )
+        dag = CVTaskDecompositionDAG(
+            tasks=tasks,
+            root_task_ids=tuple(raw_dict.get("root_task_ids", ())),
+            terminal_task_ids=tuple(raw_dict.get("terminal_task_ids", ())),
+        )
+
+        capability_intents = tuple(
+            CapabilityIntent(
+                capability_id=CapabilityId(ci["capability_id"]),
+                intent_description=ci["intent_description"],
+                parameter_intent=ci.get("parameter_intent", {}),
+                target_preference=ci.get("target_preference"),
+            )
+            for ci in raw_dict.get("capability_intents", ())
+        )
+
+        return dag, capability_intents, None

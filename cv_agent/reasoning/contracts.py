@@ -20,6 +20,7 @@ from types import MappingProxyType
 from typing import Any, NewType
 
 from cv_agent.domain.identifiers import CapabilityId
+from cv_agent.reasoning.errors import PrematureModelSelectionError
 
 # --- Decision Identification (ADR-0008, Gate M1/I1) ---
 
@@ -58,6 +59,8 @@ class NodeType(str, Enum):
     BASELINE_SELECTION = "baseline_selection"
     EXPERIMENT_DIAGNOSIS = "experiment_diagnosis"
     STRATEGY_FORMULATION = "strategy_formulation"
+    ELICITATION = "elicitation"
+    TASK_DECOMPOSITION = "task_decomposition"
 
 
 class RiskLevel(str, Enum):
@@ -288,18 +291,185 @@ class ApprovalRecommendation:
 # --- Domain Node Payload Contracts (ADR-0008 §3.2) ---
 
 
+# --- Prohibited Premature Model Architectures (PM Correction 1, [P§31], ROADMAP.md) ---
+
+_PROHIBITED_MODEL_TERMS = (
+    "yolo",
+    "yolov5",
+    "yolov7",
+    "yolov8",
+    "yolov9",
+    "yolov10",
+    "yolov11",
+    "rt-detr",
+    "rtdetr",
+    "faster-rcnn",
+    "faster_rcnn",
+    "mask-rcnn",
+    "mask_rcnn",
+    "retinanet",
+    "ssd",
+    "efficientdet",
+    "resnet",
+    "vit",
+    "vision transformer",
+)
+
+
+def assert_zero_prohibited_models(text: str, context_label: str = "output") -> None:
+    """Assert that text contains zero premature model architecture names [P§31], ROADMAP.md."""
+    lower = text.lower()
+    for term in _PROHIBITED_MODEL_TERMS:
+        pattern = r"\b" + re.escape(term) + r"\b"
+        if re.search(pattern, lower):
+            raise PrematureModelSelectionError(
+                f"Premature model architecture {term!r} detected in {context_label} "
+                f"prior to complete operational characterization [P§29.1], [P§31]"
+            )
+
+
+@dataclass(frozen=True)
+class OperationalInquiry:
+    """Targeted operational inquiry produced when problem characterization is incomplete."""
+
+    inquiry_id: str
+    unresolved_dimensions: tuple[str, ...]
+    targeted_questions: tuple[str, ...]
+    context_summary: str
+    assumptions_and_risks: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "inquiry_id", unicodedata.normalize("NFC", self.inquiry_id.strip())
+        )
+        object.__setattr__(
+            self,
+            "unresolved_dimensions",
+            tuple(
+                unicodedata.normalize("NFC", d.strip())
+                for d in self.unresolved_dimensions
+            ),
+        )
+        object.__setattr__(
+            self,
+            "targeted_questions",
+            tuple(
+                unicodedata.normalize("NFC", q.strip()) for q in self.targeted_questions
+            ),
+        )
+        object.__setattr__(
+            self,
+            "context_summary",
+            unicodedata.normalize("NFC", self.context_summary.strip()),
+        )
+        object.__setattr__(
+            self,
+            "assumptions_and_risks",
+            tuple(
+                unicodedata.normalize("NFC", r.strip())
+                for r in self.assumptions_and_risks
+            ),
+        )
+
+        # Enforce Anti-YOLO invariant at schema level (PM Correction 1)
+        assert_zero_prohibited_models(
+            self.context_summary, "OperationalInquiry.context_summary"
+        )
+        for q in self.targeted_questions:
+            assert_zero_prohibited_models(q, "OperationalInquiry.targeted_questions")
+
+
+def is_operationally_complete(char: ProblemCharacterization) -> bool:
+    """Evaluate deterministic domain completeness across the 8 canonical dimensions [P§5], [P§30]."""
+    if (
+        not isinstance(char.operational_definition, str)
+        or not char.operational_definition.strip()
+    ):
+        return False
+    if (
+        not isinstance(char.physical_environment, str)
+        or not char.physical_environment.strip()
+    ):
+        return False
+    if (
+        not isinstance(char.camera_infrastructure, str)
+        or not char.camera_infrastructure.strip()
+    ):
+        return False
+    if not isinstance(char.target_hardware, str) or not char.target_hardware.strip():
+        return False
+    if char.latency_budget_ms is None and char.throughput_fps is None:
+        return False
+    if not isinstance(char.error_tolerance, str) or not char.error_tolerance.strip():
+        return False
+    if (
+        not isinstance(char.data_availability, str)
+        or not char.data_availability.strip()
+    ):
+        return False
+    return bool(
+        isinstance(char.intervention_modality, str)
+        and char.intervention_modality.strip()
+    )
+
+
 @dataclass(frozen=True)
 class ProblemCharacterization:
     """Structured characterization produced by ProblemFramingNode."""
 
     task_type: str
     target_hardware: str
+    operational_definition: str = ""
+    physical_environment: str = ""
+    camera_infrastructure: str = ""
+    error_tolerance: str = ""
+    data_availability: str = ""
+    intervention_modality: str = ""
     latency_budget_ms: float | None = None
     throughput_fps: float | None = None
     compute_budget_hours: float | None = None
     constraints: Mapping[str, JsonValue] = field(default_factory=dict)
+    is_well_formed: bool = False
 
     def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "task_type", unicodedata.normalize("NFC", self.task_type.strip())
+        )
+        object.__setattr__(
+            self,
+            "target_hardware",
+            unicodedata.normalize("NFC", self.target_hardware.strip()),
+        )
+        object.__setattr__(
+            self,
+            "operational_definition",
+            unicodedata.normalize("NFC", self.operational_definition.strip()),
+        )
+        object.__setattr__(
+            self,
+            "physical_environment",
+            unicodedata.normalize("NFC", self.physical_environment.strip()),
+        )
+        object.__setattr__(
+            self,
+            "camera_infrastructure",
+            unicodedata.normalize("NFC", self.camera_infrastructure.strip()),
+        )
+        object.__setattr__(
+            self,
+            "error_tolerance",
+            unicodedata.normalize("NFC", self.error_tolerance.strip()),
+        )
+        object.__setattr__(
+            self,
+            "data_availability",
+            unicodedata.normalize("NFC", self.data_availability.strip()),
+        )
+        object.__setattr__(
+            self,
+            "intervention_modality",
+            unicodedata.normalize("NFC", self.intervention_modality.strip()),
+        )
         if self.latency_budget_ms is not None:
             object.__setattr__(
                 self, "latency_budget_ms", _normalize_float(self.latency_budget_ms)
@@ -317,6 +487,110 @@ class ProblemCharacterization:
         object.__setattr__(
             self, "constraints", validate_and_freeze_json_domain(self.constraints)
         )
+        computed_well_formed = is_operationally_complete(self)
+        object.__setattr__(self, "is_well_formed", computed_well_formed)
+
+
+@dataclass(frozen=True)
+class TaskNode:
+    """Single node in the domain CV task decomposition DAG [P§4], [P§6].
+
+    task_type represents a domain decomposition concept (e.g. object_detection,
+    tracking, spatial_geometry, action_recognition, temporal_reasoning), NOT an ADR-0001 CapabilityId.
+    """
+
+    task_id: str
+    task_type: str
+    description: str
+    inputs: tuple[str, ...] = ()
+    outputs: tuple[str, ...] = ()
+    dependencies: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "task_id", unicodedata.normalize("NFC", self.task_id.strip())
+        )
+        object.__setattr__(
+            self, "task_type", unicodedata.normalize("NFC", self.task_type.strip())
+        )
+        object.__setattr__(
+            self,
+            "description",
+            unicodedata.normalize("NFC", self.description.strip()),
+        )
+        object.__setattr__(
+            self,
+            "inputs",
+            tuple(unicodedata.normalize("NFC", x.strip()) for x in self.inputs),
+        )
+        object.__setattr__(
+            self,
+            "outputs",
+            tuple(unicodedata.normalize("NFC", x.strip()) for x in self.outputs),
+        )
+        object.__setattr__(
+            self,
+            "dependencies",
+            tuple(unicodedata.normalize("NFC", x.strip()) for x in self.dependencies),
+        )
+
+
+@dataclass(frozen=True)
+class CVTaskDecompositionDAG:
+    """Acyclic directed graph of decomposed CV domain tasks."""
+
+    tasks: tuple[TaskNode, ...]
+    root_task_ids: tuple[str, ...] = ()
+    terminal_task_ids: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not self.tasks:
+            raise ValueError(
+                "CVTaskDecompositionDAG must contain at least one TaskNode."
+            )
+
+        task_ids = {t.task_id for t in self.tasks}
+        if len(task_ids) != len(self.tasks):
+            raise ValueError("Duplicate task_id detected in CVTaskDecompositionDAG.")
+
+        for t in self.tasks:
+            for dep in t.dependencies:
+                if dep not in task_ids:
+                    raise ValueError(
+                        f"Task {t.task_id} has unknown dependency {dep!r}."
+                    )
+                if dep == t.task_id:
+                    raise ValueError(f"Task {t.task_id} cannot depend on itself.")
+
+        adj: dict[str, list[str]] = {t.task_id: [] for t in self.tasks}
+        in_degree: dict[str, int] = {t.task_id: 0 for t in self.tasks}
+        for t in self.tasks:
+            for dep in t.dependencies:
+                adj[dep].append(t.task_id)
+                in_degree[t.task_id] += 1
+
+        queue = [tid for tid, deg in in_degree.items() if deg == 0]
+        visited_count = 0
+        while queue:
+            curr = queue.pop(0)
+            visited_count += 1
+            for nxt in adj[curr]:
+                in_degree[nxt] -= 1
+                if in_degree[nxt] == 0:
+                    queue.append(nxt)
+
+        if visited_count != len(self.tasks):
+            raise ValueError("Cycle detected in CVTaskDecompositionDAG.")
+
+        if not self.root_task_ids:
+            roots = tuple(t.task_id for t in self.tasks if not t.dependencies)
+            object.__setattr__(self, "root_task_ids", roots)
+        if not self.terminal_task_ids:
+            has_outgoing = {dep for t in self.tasks for dep in t.dependencies}
+            terminals = tuple(
+                t.task_id for t in self.tasks if t.task_id not in has_outgoing
+            )
+            object.__setattr__(self, "terminal_task_ids", terminals)
 
 
 @dataclass(frozen=True)
@@ -380,7 +654,12 @@ class StrategyRecommendation:
 # --- Closed Reasoning Output Payload Union (Gate B1) ---
 
 ReasoningOutputPayload = (
-    ProblemCharacterization | BaselineSpec | DiagnosticReport | StrategyRecommendation
+    ProblemCharacterization
+    | BaselineSpec
+    | DiagnosticReport
+    | StrategyRecommendation
+    | OperationalInquiry
+    | CVTaskDecompositionDAG
 )
 
 
@@ -475,6 +754,8 @@ class ReasoningOutput:
                 BaselineSpec,
                 DiagnosticReport,
                 StrategyRecommendation,
+                OperationalInquiry,
+                CVTaskDecompositionDAG,
             ),
         ):
             raise TypeError(

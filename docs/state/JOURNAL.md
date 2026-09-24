@@ -2219,3 +2219,24 @@ Remediated all three architectural blockers identified in the Official PM's seco
 **Learned:** Clear boundaries between architectural state machines (the 7 ADR-0007 states) and presentation projections (`is_executable`, `is_merely_known`) ensure operational tools and CLIs can present user-friendly summaries without eroding the precise underlying state transitions or conflating target availability with tool installation.
 
 **Left open:** Phase 3 complete and accepted on `main`. Awaiting Official PM scoping instruction for Phase 4 (Reasoning Subsystem, ADR-0008).
+
+---
+
+## 2026-09-24 — Phase 4: DISCOVER / DEFINE Workflow Implementation (D-066, Issue #70)
+
+**Did:** Implemented Phase 4 DISCOVER / DEFINE Workflow pursuant to Issue #70, ADR-0008, and all six Official PM corrections:
+1. Anti-YOLO Schema & Runtime Invariant: Implemented `_PROHIBITED_MODEL_TERMS` and `assert_zero_prohibited_models(text, context_label)` in `cv_agent/reasoning/contracts.py`, raising typed `PrematureModelSelectionError` if concrete models (YOLO, RT-DETR, etc.) appear in queries, prompts, or elicited questions before full characterization.
+2. Operational Elicitation & Characterization Contracts: Implemented `OperationalInquiry` and `ProblemCharacterization` validating all 8 canonical dimensions (`is_well_formed`). Added `ElicitationNode`, `ProblemFramingNode`, and structured JSON schemas in `cv_agent/reasoning/prompts.py`.
+3. Task DAG Decomposition: Implemented `TaskNode` and `CVTaskDecompositionDAG` with cycle detection in `cv_agent/reasoning/contracts.py`, and `TaskDecompositionNode` in `cv_agent/reasoning/nodes.py`. Domain primitives (`object_detection`, `tracking`, etc.) remain pure decomposition abstractions; capability intents bind strictly to authoritative ADR-0001 `CapabilityId`s.
+4. Multi-Turn Resumption Graph: Implemented `create_discover_define_graph()` in `cv_agent/orchestration/discover_define.py` using `SQLiteLangGraphCheckpointer` and `SQLiteOrchestrationStore`. Follows ADR-0003 lifecycle: `READY` -> `PLANNING` -> `PAUSED` (interrupt at `await_human_input`) -> resume on `human_answers` -> `READY` -> `PLANNING` -> `EXECUTING` -> `EVALUATING` -> `COMPLETED`.
+5. Atomic Project Memory Persistence: Added `ProjectSpecification` and `commit_project_specification()` to `cv_agent/memory/service.py`. Enforces 5 pre-commit validation checks and transactional multi-file replacement/rollback across `project_spec.md`, `hardware_constraints.yaml`, and `architectural_choices.md`.
+6. Runtime Execution Barrier: Implemented `Phase4ExecutionBarrier` in `cv_agent/tools/barrier.py`, trapping any tool call with `WorkflowBoundaryViolationError`. AST audits prove zero provider SDKs and zero CUDA launches in reasoning and discover/define orchestration.
+7. Acceptance & Adversarial Test Suite: Created `tests/test_discover_define_phase4_exit.py` (11 tests passing). Total repository test suite: 685/685 passing across 26 suites with zero regressions. All static analysis gates green (Ruff check, Ruff format across 194 files, Mypy clean across 120 files, git diff check clean).
+
+**Why:** Addresses Issue #70 and operationalizes the interactive elicitation dialogue from `[P§5]` and `[P§30]`. Enforces "Problem first — characterize before selecting" (`[P§29.1]`) and prevents premature model proclamation.
+
+**Broke:** Nothing broken. 685/685 repository tests pass.
+
+**Learned:** Enforcing prohibited model terminology at both the schema/parsing level and the pre-commit memory level provides defense-in-depth, preventing premature architecture selection from entering persisted project specifications.
+
+**Left open:** PR pending creation and Official PM review.
