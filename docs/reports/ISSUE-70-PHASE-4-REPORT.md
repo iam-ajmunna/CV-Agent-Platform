@@ -85,28 +85,45 @@ The test suite in `tests/test_discover_define_phase4_exit.py` exercises 11 focus
     - Asserts `CVTaskDecompositionDAG` construction fails immediately on cyclic task dependencies (`t1 -> t2 -> t1`).
 11. **`test_adversarial_premature_model_terms_detection`**:
     - Validates regex catching various forms of premature model architecture references (`yolo`, `rt-detr`, `faster-rcnn`).
+12. **`test_adversarial_b26_partial_human_answers_keeps_discover_active`**:
+    - Verifies partial human answers (2 of 8 dimensions) keep DISCOVER active in `PAUSED` state without prematurely routing to DEFINE.
+    - Demonstrates multi-turn loop: 8 unresolved -> answer 2 -> 6 unresolved -> answer remainder -> DEFINE completed.
+13. **`test_adversarial_b27_unregistered_capability_fails_closed`**:
+    - Verifies syntactically valid but unregistered/synthetic `CapabilityId` (`cv.synthetic.unregistered_vision_capability`) causes DEFINE to fail closed with `DomainValidationError` before project memory publication.
+14. **`test_adversarial_b28_define_does_not_fabricate_hardware_defaults`**:
+    - Verifies unspecified hardware properties remain `None` / `()` without hallucinating defaults from product strings like `"jetson"`.
 
 ---
 
-## 5. Repository Quality Gates
+## 5. Official PM Review Remediation (B26, B27, B28)
+
+| Finding | Architectural Blocker | Root Cause & Resolution |
+|---|---|---|
+| **B26** | **Partial human input bypassed DISCOVER** | Truthy check on `human_answers` in `node_discover` bypassed elicitation. Resolved by maintaining `accumulated_answers` in state and re-invoking `ElicitationNode`. If unresolved dimensions remain, graph triggers new `OperationalInquiry` and pauses again until all dimensions are characterized. |
+| **B27** | **CapabilityIntent dropped & unvalidated** | `TaskDecompositionNode` generated intents were dropped before memory commit and unvalidated against registry. Resolved by validating every `capability_id` against authoritative `CapabilityRegistry` (fail closed on synthetic IDs before memory write) and preserving intents on `ProjectSpecification` / `project_spec.md`. |
+| **B28** | **Fabricated hardware facts from "jetson"** | `node_define()` manufactured VRAM (16GB), RAM (32GB), power (60W), and precisions from `"jetson"` substring. Resolved by removing all fabricated defaults: unestablished hardware properties strictly remain `None` / `()`. |
+
+---
+
+## 6. Repository Quality Gates
 
 ```text
 ============================= test session starts ==============================
 platform darwin -- Python 3.13.7, pytest-9.1.1, pluggy-1.6.0
-collected 685 items
-685 passed in 6.05s
-============================= 685 passed in 6.05s ==============================
+collected 688 items
+688 passed in 6.20s
+============================= 688 passed in 6.20s ==============================
 ```
 
-- **Pytest:** 685/685 tests passing across 26 test suites (0 regressions).
+- **Pytest:** 688/688 tests passing across 26 test suites (0 regressions).
 - **Ruff Check:** Clean (0 errors).
-- **Ruff Format:** Clean across 194 source files.
+- **Ruff Format:** Clean across 195 source files.
 - **Mypy:** Clean (0 issues across 120 source files).
 - **Git diff check:** Clean (no whitespace or conflict markers).
 
 ---
 
-## 6. Scope Boundary Affirmation
+## 7. Scope Boundary Affirmation
 
 During Phase 4, the following boundaries were strictly observed:
 - Zero model selection or architecture recommendation performed.

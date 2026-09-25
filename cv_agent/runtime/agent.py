@@ -169,6 +169,7 @@ class CVAgent:
         llm_gateway: LLMGateway | None = None,
         tool_barrier: Phase4ExecutionBarrier | None = None,
         checkpointer: Any = None,
+        capability_registry: Any = None,
     ) -> DiscoverDefineGraphState:
         """Execute the DISCOVER / DEFINE workflow graph.
 
@@ -195,12 +196,14 @@ class CVAgent:
         active_gateway = llm_gateway or create_gateway(
             self._config.llm.provider, self._config.llm.model
         )
+        active_cap_registry = capability_registry or self._registry
 
         graph = create_discover_define_graph(
             store=active_store,
             lease=active_lease,
             memory=active_memory,
             llm_gateway=active_gateway,
+            capability_registry=active_cap_registry,
             checkpointer=checkpointer,
             tool_barrier=active_barrier,
         )

@@ -15,6 +15,7 @@ from typing import Any
 from langgraph.graph import END, START, StateGraph
 from typing_extensions import TypedDict
 
+from cv_agent.domain.errors import DomainValidationError, ValidationCode
 from cv_agent.llm.gateway import LLMGateway
 from cv_agent.memory.interfaces import (
     ArchitecturalDecision,
@@ -26,6 +27,7 @@ from cv_agent.orchestration.contracts import ExecutionLease, LifecycleStatus
 from cv_agent.orchestration.graph import SQLiteLangGraphCheckpointer
 from cv_agent.orchestration.store import SQLiteOrchestrationStore
 from cv_agent.reasoning.contracts import (
+    CapabilityIntent,
     CVTaskDecompositionDAG,
     OperationalInquiry,
     ProblemCharacterization,
@@ -51,9 +53,11 @@ class DiscoverDefineGraphState(TypedDict, total=False):
     lifecycle_status: str
     user_prompt: str
     human_answers: dict[str, str] | None
+    accumulated_answers: dict[str, str]
     operational_inquiry: dict[str, Any] | None
     characterization: dict[str, Any] | None
     decomposition: dict[str, Any] | None
+    capability_intents: list[dict[str, Any]] | None
     needs_elicitation: bool
     project_spec_committed: bool
     error: str | None
@@ -65,6 +69,7 @@ def create_discover_define_graph(
     memory: GitProjectMemory,
     llm_gateway: LLMGateway,
     *,
+    capability_registry: Any = None,
     checkpointer: Any = None,
     tool_barrier: Phase4ExecutionBarrier | None = None,
 ) -> Any:
@@ -75,6 +80,11 @@ def create_discover_define_graph(
     """
     if checkpointer is None:
         checkpointer = SQLiteLangGraphCheckpointer(str(store.db_path))
+
+    if capability_registry is None:
+        from cv_agent.capabilities.registry import load_default_capability_registry
+
+        capability_registry = load_default_capability_registry()
 
     builder: StateGraph = StateGraph(DiscoverDefineGraphState)
 
@@ -93,18 +103,20 @@ def create_discover_define_graph(
 
     def node_discover(state: DiscoverDefineGraphState) -> dict[str, Any]:
         user_prompt = state.get("user_prompt", "")
-        human_answers = state.get("human_answers")
-
-        # If human answers are already present, elicitation was completed
-        if human_answers:
-            return {"needs_elicitation": False}
+        accumulated = dict(state.get("accumulated_answers") or {})
+        new_answers = state.get("human_answers")
+        if new_answers:
+            accumulated.update(new_answers)
 
         elicitation_node = ElicitationNode(llm_gateway)
         context = ReasoningContext.create(
             current_hop=0,
-            max_hops=5,
+            max_hops=10,
             trace_id=f"discover-{lease.session_id}",
-            parameters={"user_prompt": user_prompt},
+            parameters={
+                "user_prompt": user_prompt,
+                "operational_answers": accumulated,
+            },
         )
         reasoning_output = elicitation_node.execute(context)
         inquiry: OperationalInquiry = reasoning_output.payload  # type: ignore[assignment]
@@ -140,12 +152,19 @@ def create_discover_define_graph(
                 "lifecycle_status": new_status.value,
                 "operational_inquiry": inquiry_dict,
                 "needs_elicitation": True,
+                "accumulated_answers": accumulated,
+                "human_answers": None,
             }
 
-        return {"needs_elicitation": False}
+        return {
+            "needs_elicitation": False,
+            "accumulated_answers": accumulated,
+            "human_answers": None,
+            "operational_inquiry": None,
+        }
 
     def route_after_discover(state: DiscoverDefineGraphState) -> str:
-        if state.get("needs_elicitation", False) and not state.get("human_answers"):
+        if state.get("needs_elicitation", False):
             return "await_human_input"
         return "define"
 
@@ -163,11 +182,19 @@ def create_discover_define_graph(
         new_status, _ = store.transition_lifecycle(
             lease.session_id,
             LifecycleStatus.PLANNING,
-            "define_phase_started",
-            {"phase": "DEFINE"},
+            "evaluating_accumulated_operational_input",
+            {"phase": "DISCOVER"},
             lease,
         )
-        return {"lifecycle_status": new_status.value}
+        accumulated = dict(state.get("accumulated_answers") or {})
+        new_answers = state.get("human_answers")
+        if new_answers:
+            accumulated.update(new_answers)
+        return {
+            "lifecycle_status": new_status.value,
+            "accumulated_answers": accumulated,
+            "human_answers": None,
+        }
 
     def node_define(state: DiscoverDefineGraphState) -> dict[str, Any]:
         curr = store.get_lifecycle_status(lease.session_id)
@@ -181,17 +208,20 @@ def create_discover_define_graph(
             )
 
         user_prompt = state.get("user_prompt", "")
-        human_answers = state.get("human_answers") or {}
+        accumulated = dict(state.get("accumulated_answers") or {})
+        new_answers = state.get("human_answers")
+        if new_answers:
+            accumulated.update(new_answers)
 
         # 1. Synthesize complete ProblemCharacterization via ProblemFramingNode
         framing_node = ProblemFramingNode(llm_gateway)
         context = ReasoningContext.create(
             current_hop=1,
-            max_hops=5,
+            max_hops=10,
             trace_id=f"define-framing-{lease.session_id}",
             parameters={
                 "user_prompt": user_prompt,
-                "operational_answers": human_answers,
+                "operational_answers": accumulated,
             },
         )
         framing_output = framing_node.execute(context)
@@ -206,7 +236,7 @@ def create_discover_define_graph(
         decomp_node = TaskDecompositionNode(llm_gateway)
         decomp_context = ReasoningContext.create(
             current_hop=2,
-            max_hops=5,
+            max_hops=10,
             trace_id=f"define-decomp-{lease.session_id}",
             parameters={
                 "task_type": characterization.task_type,
@@ -221,32 +251,49 @@ def create_discover_define_graph(
         )
         decomp_output = decomp_node.execute(decomp_context)
         dag: CVTaskDecompositionDAG = decomp_output.payload  # type: ignore[assignment]
+        intents: tuple[CapabilityIntent, ...] = decomp_output.capability_intents
 
-        # 3. Assemble HardwareConstraints safely
-        max_vram_val = characterization.constraints.get("max_vram_mb")
+        # B27: Validate every capability_id against authoritative CapabilityRegistry
+        for ci in intents:
+            cap_def = capability_registry.get_capability(ci.capability_id)
+            if cap_def is None:
+                raise DomainValidationError(
+                    ValidationCode.INVALID_VALUE,
+                    "capability_intent.capability_id",
+                    f"Task decomposition references unregistered/synthetic capability: {ci.capability_id!r}",
+                    ci.capability_id,
+                )
+
+        # 3. Assemble HardwareConstraints without fabricated defaults (B28)
+        # Only take values explicitly established by characterization / user constraints.
+        # Do NOT infer specifications from product name strings (e.g. "jetson").
+        raw_vram = characterization.constraints.get("max_vram_mb")
         max_vram = (
-            int(max_vram_val)
-            if isinstance(max_vram_val, (int, float, str))
-            else (
-                16384 if "jetson" in characterization.target_hardware.lower() else 8192
-            )
+            int(str(raw_vram))
+            if raw_vram is not None and str(raw_vram).isdigit()
+            else None
         )
-        max_ram_val = characterization.constraints.get("max_ram_mb")
+
+        raw_ram = characterization.constraints.get("max_ram_mb")
         max_ram = (
-            int(max_ram_val)
-            if isinstance(max_ram_val, (int, float, str))
-            else (
-                32768 if "jetson" in characterization.target_hardware.lower() else 16384
-            )
+            int(str(raw_ram))
+            if raw_ram is not None and str(raw_ram).isdigit()
+            else None
         )
-        power_val = characterization.constraints.get("power_budget_watts")
-        power_w = (
-            float(power_val)
-            if isinstance(power_val, (int, float, str))
-            else (
-                60.0 if "jetson" in characterization.target_hardware.lower() else None
+
+        raw_power = characterization.constraints.get("power_budget_watts")
+        try:
+            power_w = float(str(raw_power)) if raw_power is not None else None
+        except (ValueError, TypeError):
+            power_w = None
+
+        raw_precisions = characterization.constraints.get("supported_precisions")
+        if isinstance(raw_precisions, (list, tuple)):
+            supported_precisions = tuple(
+                str(p).strip() for p in raw_precisions if str(p).strip()
             )
-        )
+        else:
+            supported_precisions = ()
 
         hw_constraints = HardwareConstraints(
             target_device=characterization.target_hardware,
@@ -254,7 +301,7 @@ def create_discover_define_graph(
             max_ram_mb=max_ram,
             power_budget_watts=power_w,
             latency_ceiling_ms=characterization.latency_budget_ms,
-            supported_precisions=("fp32", "fp16", "int8"),
+            supported_precisions=supported_precisions,
         )
 
         # 4. Formulate architectural choices
@@ -277,6 +324,7 @@ def create_discover_define_graph(
             characterization=characterization,
             decomposition=dag,
             hardware_constraints=hw_constraints,
+            capability_intents=intents,
             architectural_choices=arch_decisions,
             dataset_lineage_notes=f"Data availability noted: {characterization.data_availability}",
         )
@@ -333,6 +381,15 @@ def create_discover_define_graph(
                     for t in dag.tasks
                 ]
             },
+            "capability_intents": [
+                {
+                    "capability_id": str(ci.capability_id),
+                    "intent_description": ci.intent_description,
+                    "parameter_intent": dict(ci.parameter_intent),
+                    "target_preference": ci.target_preference,
+                }
+                for ci in intents
+            ],
             "project_spec_committed": True,
         }
 
@@ -348,7 +405,7 @@ def create_discover_define_graph(
         route_after_discover,
         {"await_human_input": "await_human_input", "define": "define"},
     )
-    builder.add_edge("await_human_input", "define")
+    builder.add_edge("await_human_input", "discover")
     builder.add_edge("define", END)
 
     return builder.compile(

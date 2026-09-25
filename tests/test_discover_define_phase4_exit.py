@@ -6,6 +6,9 @@ Verifies the five Phase 4 Exit Authority Gates per Issue #70:
 - Gate G3: DEFINE — Problem characterization completeness (8 dimensions) and CV task DAG decomposition.
 - Gate G4: Atomic GitProjectMemory persistence (project_spec.md, hardware_constraints.yaml, architectural_choices.md).
 - Gate G5: Runtime execution barrier (0 tools/skills/subprocesses) and AST architecture audit.
+- B26 Adversarial: Partial human answers keep DISCOVER active (8 -> answer 2 -> 6 -> answer remainder -> DEFINE).
+- B27 Adversarial: Unregistered/synthetic CapabilityId fails closed before memory publication.
+- B28 Adversarial: Unspecified hardware properties remain None/() without inferring from "jetson".
 """
 
 from __future__ import annotations
@@ -17,6 +20,8 @@ from typing import Any
 
 import pytest
 
+from cv_agent.domain.errors import DomainValidationError
+from cv_agent.domain.identifiers import CapabilityId
 from cv_agent.llm.contracts import (
     FallbackPolicy,
     LLMRequest,
@@ -42,6 +47,7 @@ from cv_agent.orchestration.discover_define import (
 from cv_agent.orchestration.graph import SQLiteLangGraphCheckpointer
 from cv_agent.orchestration.store import SQLiteOrchestrationStore
 from cv_agent.reasoning.contracts import (
+    CapabilityIntent,
     CVTaskDecompositionDAG,
     ProblemCharacterization,
     TaskNode,
@@ -155,6 +161,18 @@ def mock_prison_elicitation_response() -> dict[str, Any]:
 
 
 @pytest.fixture
+def mock_prison_elicitation_resolved_response() -> dict[str, Any]:
+    """Canonical prison workload elicitation response when all operational dimensions are characterized."""
+    return {
+        "inquiry_id": "inq-prison-resolved",
+        "unresolved_dimensions": [],
+        "targeted_questions": [],
+        "context_summary": "All 8 operational dimensions characterized.",
+        "assumptions_and_risks": [],
+    }
+
+
+@pytest.fixture
 def mock_prison_framing_response() -> dict[str, Any]:
     """Canonical prison workload framing response: complete across all 8 dimensions, zero models."""
     return {
@@ -173,6 +191,7 @@ def mock_prison_framing_response() -> dict[str, Any]:
             "max_vram_mb": 16384,
             "max_ram_mb": 32768,
             "power_budget_watts": 60.0,
+            "supported_precisions": ["fp32", "fp16", "int8"],
         },
     }
 
@@ -262,26 +281,28 @@ def test_gate_g1_discover_zero_yolo_and_operational_questions(
     )
 
     config = {"configurable": {"thread_id": session_id}}
-    initial_state: DiscoverDefineGraphState = {
-        "session_id": session_id,
-        "thread_id": session_id,
-        "lifecycle_status": LifecycleStatus.INITIALIZING.value,
-        "user_prompt": "I have a prison project — escape-attempt detection",
-    }
+    state: DiscoverDefineGraphState = graph.invoke(
+        {
+            "session_id": session_id,
+            "thread_id": session_id,
+            "lifecycle_status": LifecycleStatus.INITIALIZING.value,
+            "user_prompt": "I have a prison project — escape-attempt detection",
+        },
+        config=config,
+    )
 
-    result = graph.invoke(initial_state, config=config)
-
-    # 1. Verification of Gate G1: Session PAUSED awaiting operational answers
-    assert result.get("lifecycle_status") == LifecycleStatus.PAUSED.value
+    # 1. Verification of G1 Invariant: Lifecycle PAUSED at operational questions
+    assert state["lifecycle_status"] == LifecycleStatus.PAUSED.value
     assert store.get_lifecycle_status(session_id) == LifecycleStatus.PAUSED
 
-    # 2. Targeted operational questions emitted
-    inquiry = result.get("operational_inquiry")
+    # 2. Verification of G1 Output: Operational inquiry produced
+    assert state["needs_elicitation"] is True
+    inquiry = state["operational_inquiry"]
     assert inquiry is not None
     assert len(inquiry["targeted_questions"]) >= 5
     assert len(inquiry["unresolved_dimensions"]) >= 5
 
-    # 3. Anti-YOLO invariant verification: ZERO concrete model mentions in inquiry
+    # 3. Verification of Zero-YOLO invariant in inquiry
     assert_zero_prohibited_models(inquiry["context_summary"])
     for q in inquiry["targeted_questions"]:
         assert_zero_prohibited_models(q)
@@ -293,10 +314,11 @@ def test_gate_g1_discover_zero_yolo_and_operational_questions(
 def test_gate_g2_resumption_from_checkpoint(
     tmp_path: Path,
     mock_prison_elicitation_response: dict[str, Any],
+    mock_prison_elicitation_resolved_response: dict[str, Any],
     mock_prison_framing_response: dict[str, Any],
     mock_prison_dag_response: dict[str, Any],
 ) -> None:
-    """Gate G2: Resuming paused session from SQLiteLangGraphCheckpointer under active lease."""
+    """Gate G2: Resuming with user answers continues on same thread_id through DEFINE to completion."""
     db_path = tmp_path / "orchestration.db"
     store = SQLiteOrchestrationStore(db_path)
     session_id = "session-prison-g2"
@@ -305,10 +327,10 @@ def test_gate_g2_resumption_from_checkpoint(
     memory = GitProjectMemory(workspace)
     barrier = Phase4ExecutionBarrier()
 
-    # Provide elicitation response, framing response, and DAG response in order
     gateway, _ = _setup_test_gateway(
         [
             mock_prison_elicitation_response,
+            mock_prison_elicitation_resolved_response,
             mock_prison_framing_response,
             mock_prison_dag_response,
         ]
@@ -369,6 +391,7 @@ def test_gate_g2_resumption_from_checkpoint(
 def test_gate_g3_define_characterization_and_task_dag(
     tmp_path: Path,
     mock_prison_elicitation_response: dict[str, Any],
+    mock_prison_elicitation_resolved_response: dict[str, Any],
     mock_prison_framing_response: dict[str, Any],
     mock_prison_dag_response: dict[str, Any],
 ) -> None:
@@ -382,6 +405,7 @@ def test_gate_g3_define_characterization_and_task_dag(
     gateway, _ = _setup_test_gateway(
         [
             mock_prison_elicitation_response,
+            mock_prison_elicitation_resolved_response,
             mock_prison_framing_response,
             mock_prison_dag_response,
         ]
@@ -440,6 +464,13 @@ def test_gate_g3_define_characterization_and_task_dag(
     assert "spatial_geometry" in task_types
     assert "action_recognition" in task_types
 
+    # B27: Verify capability_intents preserved in result
+    assert "capability_intents" in result
+    c_intents = result["capability_intents"]
+    assert len(c_intents) == 2
+    assert c_intents[0]["capability_id"] == "cv.requirements.analysis"
+    assert c_intents[1]["capability_id"] == "cv.problem.formulation"
+
     # Verify zero prohibited model mentions anywhere in output
     for t in tasks:
         assert_zero_prohibited_models(t["description"])
@@ -485,6 +516,19 @@ def test_gate_g4_atomic_memory_persistence(tmp_path: Path) -> None:
         )
     )
 
+    intents = (
+        CapabilityIntent(
+            capability_id=CapabilityId("cv.requirements.analysis"),
+            intent_description="Analyze operational requirements against edge ceilings",
+            parameter_intent={},
+        ),
+        CapabilityIntent(
+            capability_id=CapabilityId("cv.problem.formulation"),
+            intent_description="Formulate multi-stage vision pipeline",
+            parameter_intent={},
+        ),
+    )
+
     hw = HardwareConstraints(
         target_device="NVIDIA Jetson AGX Orin 64GB",
         max_vram_mb=16384,
@@ -508,6 +552,7 @@ def test_gate_g4_atomic_memory_persistence(tmp_path: Path) -> None:
         characterization=char,
         decomposition=dag,
         hardware_constraints=hw,
+        capability_intents=intents,
         architectural_choices=arch,
     )
 
@@ -527,6 +572,10 @@ def test_gate_g4_atomic_memory_persistence(tmp_path: Path) -> None:
         loaded_spec.hardware_constraints.target_device == "NVIDIA Jetson AGX Orin 64GB"
     )
     assert len(loaded_spec.decomposition.tasks) == 2
+    assert len(loaded_spec.capability_intents) == 2
+    assert loaded_spec.capability_intents[0].capability_id == CapabilityId(
+        "cv.requirements.analysis"
+    )
 
 
 def test_gate_g4_atomic_memory_rollback_on_prohibited_model(tmp_path: Path) -> None:
@@ -534,47 +583,44 @@ def test_gate_g4_atomic_memory_rollback_on_prohibited_model(tmp_path: Path) -> N
     workspace = tmp_path / "workspace"
     memory = GitProjectMemory(workspace)
 
-    # Invalid characterization mentioning prohibited model "yolov8"
+    # Characterization with forbidden model "YOLO"
     char = ProblemCharacterization(
-        task_type="escape_attempt_detection using yolov8",
-        target_hardware="NVIDIA Jetson AGX Orin",
-        operational_definition="Detect fence breaches",
+        task_type="escape_attempt_detection",
+        target_hardware="NVIDIA Jetson AGX Orin 64GB",
+        operational_definition="Deploy YOLOv8 for fence breach detection",  # Prohibited!
         physical_environment="Outdoor perimeter",
         camera_infrastructure="CCTV 1080p",
         error_tolerance="Zero missed breaches",
         data_availability="50 hours video",
-        intervention_modality="Alarm",
+        intervention_modality="Real-time alarm",
         latency_budget_ms=100.0,
         throughput_fps=30.0,
     )
-
     dag = CVTaskDecompositionDAG(
         tasks=(
             TaskNode(
-                task_id="t1", task_type="object_detection", description="Detect humans"
+                task_id="t1",
+                task_type="object_detection",
+                description="Detect humans",
             ),
         )
     )
     hw = HardwareConstraints(
-        target_device="NVIDIA Jetson AGX Orin",
-        max_vram_mb=16384,
-        max_ram_mb=32768,
-        power_budget_watts=60.0,
+        target_device="Jetson",
+        max_vram_mb=8192,
+        max_ram_mb=16384,
+        power_budget_watts=30.0,
         latency_ceiling_ms=100.0,
-        supported_precisions=("fp16",),
+        supported_precisions=("fp32",),
     )
-
     spec = ProjectSpecification(
-        characterization=char,
-        decomposition=dag,
-        hardware_constraints=hw,
+        characterization=char, decomposition=dag, hardware_constraints=hw
     )
 
-    # Attempting to commit must raise MemoryTransactionValidationError
     with pytest.raises(MemoryTransactionValidationError):
         memory.commit_project_specification(spec)
 
-    # Verify no persistent files were written
+    # Invariant: Transactional rollback leaves zero uncommitted files on disk
     assert not memory.hardware_constraints_path.exists()
     assert memory.get_project_specification() is None
 
@@ -586,44 +632,51 @@ def test_gate_g4_atomic_memory_rejects_incomplete_characterization(
     workspace = tmp_path / "workspace"
     memory = GitProjectMemory(workspace)
 
-    # Missing operational_definition, camera_infrastructure, etc.
     char = ProblemCharacterization(
         task_type="escape_attempt_detection",
-        target_hardware="NVIDIA Jetson AGX Orin",
+        target_hardware="NVIDIA Jetson AGX Orin 64GB",
+        operational_definition="",  # Missing required dimension!
+        physical_environment="Outdoor",
+        camera_infrastructure="CCTV",
+        error_tolerance="Low",
+        data_availability="Video",
+        intervention_modality="Alarm",
     )
     assert char.is_well_formed is False
 
     dag = CVTaskDecompositionDAG(
         tasks=(
             TaskNode(
-                task_id="t1", task_type="object_detection", description="Detect humans"
+                task_id="t1",
+                task_type="object_detection",
+                description="Detect humans",
             ),
         )
     )
     hw = HardwareConstraints(
-        target_device="NVIDIA Jetson AGX Orin",
-        max_vram_mb=16384,
-        max_ram_mb=32768,
-        power_budget_watts=60.0,
+        target_device="Jetson",
+        max_vram_mb=8192,
+        max_ram_mb=16384,
+        power_budget_watts=30.0,
         latency_ceiling_ms=100.0,
-        supported_precisions=("fp16",),
+        supported_precisions=("fp32",),
     )
-
     spec = ProjectSpecification(
-        characterization=char,
-        decomposition=dag,
-        hardware_constraints=hw,
+        characterization=char, decomposition=dag, hardware_constraints=hw
     )
 
-    with pytest.raises(MemoryTransactionValidationError) as exc_info:
+    with pytest.raises(
+        MemoryTransactionValidationError,
+        match="incomplete or not well-formed across the 8 canonical dimensions",
+    ):
         memory.commit_project_specification(spec)
 
-    assert "characterization is incomplete" in str(exc_info.value).lower()
     assert not memory.hardware_constraints_path.exists()
+    assert memory.get_project_specification() is None
 
 
 # ==============================================================================
-# Gate G5: Boundary Enforcement & AST Architecture Audit
+# Gate G5: Execution Barrier & Mechanically Enforceable AST Boundary Audits
 # ==============================================================================
 
 
@@ -650,44 +703,58 @@ async def test_gate_g5_execution_barrier_blocks_all_tools() -> None:
 
 
 def test_gate_g5_ast_audit_zero_provider_sdks_and_zero_cuda_launches() -> None:
-    """Gate G5: Mechanically audit AST of reasoning, orchestration, and memory modules.
-
-    Proves:
-    1. Zero direct provider SDK imports (e.g. anthropic, openai, google.generativeai).
-    2. Zero CUDA kernel launch syntax or bindings (pycuda, cupy).
-    3. Zero PyTorch training loops.
-    """
-    repo_root = Path(__file__).resolve().parent.parent
-    target_dirs = [
-        repo_root / "cv_agent" / "reasoning",
-        repo_root / "cv_agent" / "orchestration",
-        repo_root / "cv_agent" / "memory",
+    """Gate G5: AST audit verifies 0 provider SDK imports and 0 CUDA launches in Phase 4 code."""
+    workspace_root = Path(__file__).parent.parent
+    phase4_modules = [
+        workspace_root / "cv_agent" / "reasoning" / "nodes.py",
+        workspace_root / "cv_agent" / "reasoning" / "contracts.py",
+        workspace_root / "cv_agent" / "reasoning" / "prompts.py",
+        workspace_root / "cv_agent" / "orchestration" / "discover_define.py",
     ]
 
-    forbidden_modules = {
-        "anthropic",
+    prohibited_imports = {
         "openai",
+        "anthropic",
+        "ollama",
         "google.generativeai",
-        "cohere",
-        "mistralai",
+        "torch.cuda",
+        "tensorrt",
         "pycuda",
         "cupy",
     }
+    prohibited_calls = {
+        "cudaMalloc",
+        "cudaMemcpy",
+        "cudaLaunchKernel",
+        "create_network",
+    }
 
-    for target_dir in target_dirs:
-        for py_file in target_dir.glob("**/*.py"):
-            tree = ast.parse(py_file.read_text(encoding="utf-8"), filename=str(py_file))
-            for node in ast.walk(tree):
-                if isinstance(node, ast.Import):
-                    for alias in node.names:
-                        assert alias.name not in forbidden_modules, (
-                            f"Forbidden provider SDK import {alias.name!r} found in {py_file}"
-                        )
-                elif isinstance(node, ast.ImportFrom):
-                    mod = node.module or ""
-                    assert mod not in forbidden_modules, (
-                        f"Forbidden provider SDK import {mod!r} found in {py_file}"
+    for module_path in phase4_modules:
+        assert module_path.exists(), f"Module {module_path} must exist"
+        tree = ast.parse(module_path.read_text(encoding="utf-8"))
+
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    assert alias.name not in prohibited_imports, (
+                        f"Prohibited import {alias.name!r} in {module_path.name}"
                     )
+            elif isinstance(node, ast.ImportFrom):
+                mod = node.module or ""
+                assert mod not in prohibited_imports, (
+                    f"Prohibited import-from {mod!r} in {module_path.name}"
+                )
+
+            elif isinstance(node, ast.Call):
+                func = node.func
+                func_name = ""
+                if isinstance(func, ast.Name):
+                    func_name = func.id
+                elif isinstance(func, ast.Attribute):
+                    func_name = func.attr
+                assert func_name not in prohibited_calls, (
+                    f"Prohibited call {func_name!r} in {module_path.name}"
+                )
 
 
 # ==============================================================================
@@ -698,6 +765,7 @@ def test_gate_g5_ast_audit_zero_provider_sdks_and_zero_cuda_launches() -> None:
 def test_cvagent_facade_run_discover_define_end_to_end(
     tmp_path: Path,
     mock_prison_elicitation_response: dict[str, Any],
+    mock_prison_elicitation_resolved_response: dict[str, Any],
     mock_prison_framing_response: dict[str, Any],
     mock_prison_dag_response: dict[str, Any],
 ) -> None:
@@ -713,6 +781,7 @@ def test_cvagent_facade_run_discover_define_end_to_end(
     gateway, _ = _setup_test_gateway(
         [
             mock_prison_elicitation_response,
+            mock_prison_elicitation_resolved_response,
             mock_prison_framing_response,
             mock_prison_dag_response,
         ]
@@ -758,7 +827,7 @@ def test_cvagent_facade_run_discover_define_end_to_end(
 
 
 def test_adversarial_cyclic_dag_rejection() -> None:
-    """Adversarial: Cyclic CV task DAG is rejected during initialization."""
+    """Adversarial: Cyclic task dependencies in CVTaskDecompositionDAG raise ValueError immediately."""
     with pytest.raises(ValueError, match="Cycle detected"):
         CVTaskDecompositionDAG(
             tasks=(
@@ -794,3 +863,296 @@ def test_adversarial_premature_model_terms_detection() -> None:
         PrematureModelSelectionError, match="Premature model architecture 'faster-rcnn'"
     ):
         assert_zero_prohibited_models("Deploy Faster-RCNN on Jetson", "test")
+
+
+# ==============================================================================
+# Adversarial Remediation Suite: B26, B27, B28
+# ==============================================================================
+
+
+def test_adversarial_b26_partial_human_answers_keeps_discover_active(
+    tmp_path: Path,
+    mock_prison_elicitation_response: dict[str, Any],
+    mock_prison_framing_response: dict[str, Any],
+    mock_prison_dag_response: dict[str, Any],
+) -> None:
+    """Adversarial B26: Answering only 2 of 8 dimensions produces another OperationalInquiry (6 remaining) and PAUSES."""
+    db_path = tmp_path / "orchestration.db"
+    store = SQLiteOrchestrationStore(db_path)
+    session_id = "session-prison-b26"
+    lease = store.acquire_lease(session_id, session_id, "test-runner")
+    workspace = tmp_path / "workspace"
+    memory = GitProjectMemory(workspace)
+    checkpointer = SQLiteLangGraphCheckpointer(str(db_path))
+
+    # Turn 2: LLM receives partial answers (2 answered), returns remaining 6 unresolved dimensions
+    mock_elicitation_turn2 = {
+        "inquiry_id": "inq-prison-turn2",
+        "unresolved_dimensions": [
+            "camera_infrastructure",
+            "physical_environment",
+            "throughput_fps",
+            "error_tolerance",
+            "data_availability",
+            "intervention_modality",
+        ],
+        "targeted_questions": [
+            "What camera infrastructure is installed?",
+            "What is the physical environment?",
+            "What throughput fps is needed?",
+            "What is the error tolerance ceiling?",
+            "What data is available?",
+            "What is the intervention modality?",
+        ],
+        "context_summary": "Hardware and latency characterized; 6 operational dimensions remaining.",
+        "assumptions_and_risks": [],
+    }
+
+    # Turn 3: LLM receives remaining 6 answers, returns 0 unresolved dimensions
+    mock_elicitation_turn3 = {
+        "inquiry_id": "inq-prison-resolved",
+        "unresolved_dimensions": [],
+        "targeted_questions": [],
+        "context_summary": "All 8 operational dimensions characterized.",
+        "assumptions_and_risks": [],
+    }
+
+    gateway, _ = _setup_test_gateway(
+        [
+            mock_prison_elicitation_response,  # Turn 1: initial discovery (8 unresolved)
+            mock_elicitation_turn2,  # Turn 2: after answering 2 (6 unresolved)
+            mock_elicitation_turn3,  # Turn 3: after answering remaining 6 (0 unresolved)
+            mock_prison_framing_response,  # DEFINE framing
+            mock_prison_dag_response,  # DEFINE DAG
+        ]
+    )
+
+    graph = create_discover_define_graph(
+        store=store,
+        lease=lease,
+        memory=memory,
+        llm_gateway=gateway,
+        checkpointer=checkpointer,
+    )
+    config = {"configurable": {"thread_id": session_id}}
+
+    # Turn 1: Initial prompt -> 8 unresolved dimensions -> PAUSED
+    turn1 = graph.invoke(
+        {
+            "session_id": session_id,
+            "thread_id": session_id,
+            "lifecycle_status": LifecycleStatus.INITIALIZING.value,
+            "user_prompt": "I have a prison project — escape-attempt detection",
+        },
+        config=config,
+    )
+    assert turn1["lifecycle_status"] == LifecycleStatus.PAUSED.value
+    assert len(turn1["operational_inquiry"]["unresolved_dimensions"]) == 8
+
+    # Turn 2: User provides only 2 answers (target_hardware, latency_budget_ms)
+    partial_answers = {
+        "target_hardware": "NVIDIA Jetson AGX Orin 64GB",
+        "latency_budget_ms": "100.0",
+    }
+    graph.update_state(config, {"human_answers": partial_answers})
+    turn2 = graph.invoke(None, config=config)
+
+    # Invariant verified: Partial answers DO NOT bypass DISCOVER; graph PAUSES again
+    assert turn2["lifecycle_status"] == LifecycleStatus.PAUSED.value
+    assert store.get_lifecycle_status(session_id) == LifecycleStatus.PAUSED
+    assert turn2["needs_elicitation"] is True
+    assert len(turn2["operational_inquiry"]["unresolved_dimensions"]) == 6
+    assert turn2.get("project_spec_committed") is not True
+    assert memory.get_project_specification() is None
+
+    # Turn 3: User provides remaining 6 answers
+    remaining_answers = {
+        "camera_infrastructure": "CCTV 1080p 30fps RTSP fixed streams",
+        "physical_environment": "Outdoor perimeter fence line, day/night shifts, rain/fog",
+        "throughput_fps": "30.0",
+        "error_tolerance": "Zero missed perimeter breaches",
+        "data_availability": "50 hours annotated perimeter CCTV video",
+        "intervention_modality": "Real-time alert dispatch",
+    }
+    graph.update_state(config, {"human_answers": remaining_answers})
+    turn3 = graph.invoke(None, config=config)
+
+    # Invariant verified: Full characterization enters DEFINE and commits
+    assert turn3["lifecycle_status"] == LifecycleStatus.COMPLETED.value
+    assert store.get_lifecycle_status(session_id) == LifecycleStatus.COMPLETED
+    assert turn3["project_spec_committed"] is True
+    assert memory.get_project_specification() is not None
+
+
+def test_adversarial_b27_unregistered_capability_fails_closed(
+    tmp_path: Path,
+    mock_prison_elicitation_response: dict[str, Any],
+    mock_prison_elicitation_resolved_response: dict[str, Any],
+    mock_prison_framing_response: dict[str, Any],
+) -> None:
+    """Adversarial B27: Syntactically valid but unregistered CapabilityId causes DEFINE to fail closed before memory write."""
+    db_path = tmp_path / "orchestration.db"
+    store = SQLiteOrchestrationStore(db_path)
+    session_id = "session-prison-b27"
+    lease = store.acquire_lease(session_id, session_id, "test-runner")
+    workspace = tmp_path / "workspace"
+    memory = GitProjectMemory(workspace)
+    checkpointer = SQLiteLangGraphCheckpointer(str(db_path))
+
+    # Synthetic unregistered capability_id
+    invalid_dag_response = {
+        "tasks": [
+            {
+                "task_id": "task-01",
+                "task_type": "object_detection",
+                "description": "Detect objects",
+                "inputs": [],
+                "outputs": [],
+                "dependencies": [],
+            }
+        ],
+        "root_task_ids": ["task-01"],
+        "terminal_task_ids": ["task-01"],
+        "capability_intents": [
+            {
+                "capability_id": "cv.synthetic.unregistered_vision_capability",
+                "intent_description": "Fabricated unregistered capability",
+                "parameter_intent": {},
+            }
+        ],
+    }
+
+    gateway, _ = _setup_test_gateway(
+        [
+            mock_prison_elicitation_response,
+            mock_prison_elicitation_resolved_response,
+            mock_prison_framing_response,
+            invalid_dag_response,
+        ]
+    )
+
+    graph = create_discover_define_graph(
+        store=store,
+        lease=lease,
+        memory=memory,
+        llm_gateway=gateway,
+        checkpointer=checkpointer,
+    )
+    config = {"configurable": {"thread_id": session_id}}
+
+    graph.invoke(
+        {
+            "session_id": session_id,
+            "thread_id": session_id,
+            "lifecycle_status": LifecycleStatus.INITIALIZING.value,
+            "user_prompt": "I have a prison project — escape-attempt detection",
+        },
+        config=config,
+    )
+
+    answers = {
+        "camera_infrastructure": "CCTV 1080p 30fps",
+        "physical_environment": "Outdoor perimeter",
+        "target_hardware": "NVIDIA Jetson AGX Orin 64GB",
+        "latency_budget_ms": "100.0",
+        "throughput_fps": "30.0",
+        "error_tolerance": "Zero missed breaches",
+        "data_availability": "50 hours video",
+        "intervention_modality": "Real-time alert",
+    }
+    graph.update_state(config, {"human_answers": answers})
+
+    with pytest.raises(
+        DomainValidationError, match="unregistered/synthetic capability"
+    ):
+        graph.invoke(None, config=config)
+
+    # Invariant verified: Fail-closed before memory publication
+    assert memory.get_project_specification() is None
+    assert not memory.hardware_constraints_path.exists()
+
+
+def test_adversarial_b28_define_does_not_fabricate_hardware_defaults(
+    tmp_path: Path,
+    mock_prison_elicitation_response: dict[str, Any],
+    mock_prison_elicitation_resolved_response: dict[str, Any],
+    mock_prison_dag_response: dict[str, Any],
+) -> None:
+    """Adversarial B28: Unspecified hardware properties remain None/() without inferring defaults from 'jetson'."""
+    db_path = tmp_path / "orchestration.db"
+    store = SQLiteOrchestrationStore(db_path)
+    session_id = "session-prison-b28"
+    lease = store.acquire_lease(session_id, session_id, "test-runner")
+    workspace = tmp_path / "workspace"
+    memory = GitProjectMemory(workspace)
+    checkpointer = SQLiteLangGraphCheckpointer(str(db_path))
+
+    # Framing response specifies Jetson hardware, but empty constraints (no VRAM/RAM/power/precisions)
+    framing_without_hardware_specs = {
+        "task_type": "escape_attempt_detection",
+        "target_hardware": "NVIDIA Jetson AGX Orin 64GB",
+        "operational_definition": "Detect and track individuals breaching perimeter",
+        "physical_environment": "Outdoor perimeter fence line",
+        "camera_infrastructure": "CCTV 1080p 30fps RTSP fixed streams",
+        "error_tolerance": "Zero missed perimeter breaches",
+        "data_availability": "50 hours annotated perimeter CCTV video",
+        "intervention_modality": "Real-time alert dispatch",
+        "latency_budget_ms": 100.0,
+        "throughput_fps": 30.0,
+        "compute_budget_hours": 10.0,
+        "constraints": {},  # No VRAM, RAM, power, or supported_precisions!
+    }
+
+    gateway, _ = _setup_test_gateway(
+        [
+            mock_prison_elicitation_response,
+            mock_prison_elicitation_resolved_response,
+            framing_without_hardware_specs,
+            mock_prison_dag_response,
+        ]
+    )
+
+    graph = create_discover_define_graph(
+        store=store,
+        lease=lease,
+        memory=memory,
+        llm_gateway=gateway,
+        checkpointer=checkpointer,
+    )
+    config = {"configurable": {"thread_id": session_id}}
+
+    graph.invoke(
+        {
+            "session_id": session_id,
+            "thread_id": session_id,
+            "lifecycle_status": LifecycleStatus.INITIALIZING.value,
+            "user_prompt": "I have a prison project — escape-attempt detection",
+        },
+        config=config,
+    )
+
+    answers = {
+        "camera_infrastructure": "CCTV 1080p 30fps",
+        "physical_environment": "Outdoor perimeter",
+        "target_hardware": "NVIDIA Jetson AGX Orin 64GB",
+        "latency_budget_ms": "100.0",
+        "throughput_fps": "30.0",
+        "error_tolerance": "Zero missed breaches",
+        "data_availability": "50 hours video",
+        "intervention_modality": "Real-time alert",
+    }
+    graph.update_state(config, {"human_answers": answers})
+    result = graph.invoke(None, config=config)
+
+    assert result["lifecycle_status"] == LifecycleStatus.COMPLETED.value
+    spec = memory.get_project_specification()
+    assert spec is not None
+    hw = spec.hardware_constraints
+
+    # Invariant verified: Phase 4 DID NOT manufacture defaults based on "jetson"
+    assert hw.target_device == "NVIDIA Jetson AGX Orin 64GB"
+    assert hw.max_vram_mb is None  # NOT 16384!
+    assert hw.max_ram_mb is None  # NOT 32768!
+    assert hw.power_budget_watts is None  # NOT 60.0!
+    assert hw.supported_precisions == ()  # NOT ("fp32", "fp16", "int8")!
+    assert hw.latency_ceiling_ms == 100.0

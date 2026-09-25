@@ -17,6 +17,7 @@ from typing import Any
 
 import yaml  # type: ignore[import-untyped]
 
+from cv_agent.domain.identifiers import CapabilityId
 from cv_agent.memory.interfaces import (
     ArchitecturalDecision,
     HardwareConstraints,
@@ -27,6 +28,7 @@ from cv_agent.memory.interfaces import (
     ProjectSpecification,
 )
 from cv_agent.reasoning.contracts import (
+    CapabilityIntent,
     CVTaskDecompositionDAG,
     ProblemCharacterization,
     TaskNode,
@@ -137,16 +139,18 @@ class GitProjectMemory(ProjectMemoryReader, ProjectMemoryWriter):
                 f"target_device must be a non-empty string, got {target_device!r}"
             )
 
-        max_vram_mb = data["max_vram_mb"]
-        if type(max_vram_mb) is not int or max_vram_mb <= 0:
+        max_vram_mb = data.get("max_vram_mb")
+        if max_vram_mb is not None and (
+            type(max_vram_mb) is not int or max_vram_mb <= 0
+        ):
             raise ProjectMemoryFormatError(
-                f"max_vram_mb must be a positive integer, got {max_vram_mb!r}"
+                f"max_vram_mb must be a positive integer or None, got {max_vram_mb!r}"
             )
 
-        max_ram_mb = data["max_ram_mb"]
-        if type(max_ram_mb) is not int or max_ram_mb <= 0:
+        max_ram_mb = data.get("max_ram_mb")
+        if max_ram_mb is not None and (type(max_ram_mb) is not int or max_ram_mb <= 0):
             raise ProjectMemoryFormatError(
-                f"max_ram_mb must be a positive integer, got {max_ram_mb!r}"
+                f"max_ram_mb must be a positive integer or None, got {max_ram_mb!r}"
             )
 
         power_budget_watts = data["power_budget_watts"]
@@ -173,16 +177,26 @@ class GitProjectMemory(ProjectMemoryReader, ProjectMemoryWriter):
                 )
             latency_ceiling_ms = float(latency_ceiling_ms)
 
-        precisions_raw = data["supported_precisions"]
-        if not isinstance(precisions_raw, (list, tuple)) or len(precisions_raw) == 0:
-            raise ProjectMemoryFormatError(
-                f"supported_precisions must be a non-empty sequence, got {precisions_raw!r}"
-            )
-        for prec in precisions_raw:
-            if not isinstance(prec, str) or isinstance(prec, bool) or not prec.strip():
+        precisions_raw = data.get("supported_precisions")
+        supported_precisions: tuple[str, ...] = ()
+        if precisions_raw is not None:
+            if (
+                not isinstance(precisions_raw, (list, tuple))
+                or len(precisions_raw) == 0
+            ):
                 raise ProjectMemoryFormatError(
-                    f"supported_precisions elements must be non-empty strings, got {prec!r}"
+                    f"supported_precisions must be a non-empty sequence, got {precisions_raw!r}"
                 )
+            for prec in precisions_raw:
+                if (
+                    not isinstance(prec, str)
+                    or isinstance(prec, bool)
+                    or not prec.strip()
+                ):
+                    raise ProjectMemoryFormatError(
+                        f"supported_precisions elements must be non-empty strings, got {prec!r}"
+                    )
+            supported_precisions = tuple(p.strip() for p in precisions_raw)
 
         return HardwareConstraints(
             target_device=target_device.strip(),
@@ -190,7 +204,7 @@ class GitProjectMemory(ProjectMemoryReader, ProjectMemoryWriter):
             max_ram_mb=max_ram_mb,
             power_budget_watts=power_budget_watts,
             latency_ceiling_ms=latency_ceiling_ms,
-            supported_precisions=tuple(p.strip() for p in precisions_raw),
+            supported_precisions=supported_precisions,
         )
 
     def update_hardware_constraints(self, constraints: HardwareConstraints) -> None:
@@ -199,9 +213,9 @@ class GitProjectMemory(ProjectMemoryReader, ProjectMemoryWriter):
             or not constraints.target_device.strip()
         ):
             raise ProjectMemoryFormatError("target_device cannot be empty.")
-        if constraints.max_vram_mb <= 0:
+        if constraints.max_vram_mb is not None and constraints.max_vram_mb <= 0:
             raise ProjectMemoryFormatError("max_vram_mb must be positive.")
-        if constraints.max_ram_mb <= 0:
+        if constraints.max_ram_mb is not None and constraints.max_ram_mb <= 0:
             raise ProjectMemoryFormatError("max_ram_mb must be positive.")
         if (
             constraints.power_budget_watts is not None
@@ -213,11 +227,11 @@ class GitProjectMemory(ProjectMemoryReader, ProjectMemoryWriter):
             and constraints.latency_ceiling_ms <= 0
         ):
             raise ProjectMemoryFormatError("latency_ceiling_ms must be positive.")
-        if (
-            not constraints.supported_precisions
-            or len(constraints.supported_precisions) == 0
-        ):
-            raise ProjectMemoryFormatError("supported_precisions cannot be empty.")
+        for prec in constraints.supported_precisions:
+            if not isinstance(prec, str) or not prec.strip():
+                raise ProjectMemoryFormatError(
+                    f"supported_precisions elements must be non-empty strings, got {prec!r}"
+                )
 
         p = self.hardware_constraints_path
         payload: dict[str, Any] = {
@@ -226,8 +240,13 @@ class GitProjectMemory(ProjectMemoryReader, ProjectMemoryWriter):
             "max_ram_mb": constraints.max_ram_mb,
             "power_budget_watts": constraints.power_budget_watts,
             "latency_ceiling_ms": constraints.latency_ceiling_ms,
-            "supported_precisions": list(constraints.supported_precisions),
+            "supported_precisions": (
+                list(constraints.supported_precisions)
+                if constraints.supported_precisions
+                else None
+            ),
         }
+
         content = yaml.dump(payload, sort_keys=False)
         p.write_text(content, encoding="utf-8")
 
@@ -480,6 +499,15 @@ class GitProjectMemory(ProjectMemoryReader, ProjectMemoryWriter):
                     "",
                 ]
             )
+        if hasattr(spec, "capability_intents") and spec.capability_intents:
+            lines.extend(
+                [
+                    "## Required Capabilities",
+                ]
+            )
+            for ci in spec.capability_intents:
+                lines.append(f"- **{ci.capability_id}:** {ci.intent_description}")
+            lines.append("")
         if spec.dataset_lineage_notes:
             lines.extend(
                 [
@@ -518,16 +546,42 @@ class GitProjectMemory(ProjectMemoryReader, ProjectMemoryWriter):
             raise MemoryTransactionValidationError(
                 "Cannot commit project specification: target_device cannot be empty."
             )
-        if hw.max_vram_mb <= 0 or hw.max_ram_mb <= 0:
+        if hw.max_vram_mb is not None and hw.max_vram_mb <= 0:
             raise MemoryTransactionValidationError(
                 "Cannot commit project specification: memory budgets must be positive integers."
             )
-        if not hw.supported_precisions:
+        if hw.max_ram_mb is not None and hw.max_ram_mb <= 0:
             raise MemoryTransactionValidationError(
-                "Cannot commit project specification: supported_precisions cannot be empty."
+                "Cannot commit project specification: memory budgets must be positive integers."
             )
+        if hw.power_budget_watts is not None and hw.power_budget_watts <= 0:
+            raise MemoryTransactionValidationError(
+                "Cannot commit project specification: power_budget_watts must be positive."
+            )
+        if hw.latency_ceiling_ms is not None and hw.latency_ceiling_ms <= 0:
+            raise MemoryTransactionValidationError(
+                "Cannot commit project specification: latency_ceiling_ms must be positive."
+            )
+        for prec in hw.supported_precisions:
+            if not isinstance(prec, str) or not prec.strip():
+                raise MemoryTransactionValidationError(
+                    f"supported_precisions elements must be non-empty strings, got {prec!r}"
+                )
+
+        # Validation for capability intents (B27)
+        if hasattr(spec, "capability_intents") and spec.capability_intents:
+            from cv_agent.capabilities.registry import load_default_capability_registry
+
+            cap_reg = load_default_capability_registry()
+            for ci in spec.capability_intents:
+                cap_def = cap_reg.get_capability(ci.capability_id)
+                if cap_def is None:
+                    raise MemoryTransactionValidationError(
+                        f"Cannot commit project specification: capability {ci.capability_id!r} is not registered in authoritative ADR-0001 registry."
+                    )
 
         # Validation 4: Prohibited models check
+
         for dim_val in (
             spec.characterization.task_type,
             spec.characterization.operational_definition,
@@ -575,7 +629,9 @@ class GitProjectMemory(ProjectMemoryReader, ProjectMemoryWriter):
             "max_ram_mb": hw.max_ram_mb,
             "power_budget_watts": hw.power_budget_watts,
             "latency_ceiling_ms": hw.latency_ceiling_ms,
-            "supported_precisions": list(hw.supported_precisions),
+            "supported_precisions": (
+                list(hw.supported_precisions) if hw.supported_precisions else None
+            ),
         }
         hw_content = yaml.dump(hw_payload, sort_keys=False)
         assert_zero_prohibited_models(hw_content, "formatted hardware_constraints.yaml")
@@ -737,9 +793,26 @@ class GitProjectMemory(ProjectMemoryReader, ProjectMemoryWriter):
             return None
         arch = self.get_architectural_decisions()
 
+        # Parse Required Capabilities
+        intents: list[CapabilityIntent] = []
+        if "\n## Required Capabilities\n" in raw:
+            cap_section = raw.split("\n## Required Capabilities\n", 1)[1]
+            cap_block = cap_section.split("\n## ")[0]
+            for line in cap_block.splitlines():
+                if line.startswith("- **") and ":** " in line:
+                    cid_str, idesc = line[4:].split(":** ", 1)
+                    intents.append(
+                        CapabilityIntent(
+                            capability_id=CapabilityId(cid_str.strip()),
+                            intent_description=idesc.strip(),
+                            parameter_intent={},
+                        )
+                    )
+
         return ProjectSpecification(
             characterization=char,
             decomposition=dag,
             hardware_constraints=hw,
+            capability_intents=tuple(intents),
             architectural_choices=arch,
         )

@@ -2239,4 +2239,22 @@ Remediated all three architectural blockers identified in the Official PM's seco
 
 **Learned:** Enforcing prohibited model terminology at both the schema/parsing level and the pre-commit memory level provides defense-in-depth, preventing premature architecture selection from entering persisted project specifications.
 
-**Left open:** PR pending creation and Official PM review.
+**Left open:** PR #71 opened, awaiting Official PM review.
+
+---
+
+## 2026-09-25 — Phase 4: Remediated PM Review Blockers B26, B27, B28 on PR #71 (D-067, Issue #70)
+
+**Did:** Remediated all three architectural blockers identified in the Official PM review of PR #71 (`feature/ajmunna/phase-4-discover-define-workflow`):
+1. **B26 (Partial Human Answers Keep DISCOVER Active):** Removed the premature bypass in `node_discover` where any truthy `human_answers` was treated as completing elicitation. Implemented persistent `accumulated_answers: dict[str, str]` in `DiscoverDefineGraphState`. Upon receiving answers in `await_human_input`, the workflow routes back to `node_discover`, which re-invokes `ElicitationNode(parameters={"user_prompt": user_prompt, "operational_answers": accumulated_answers})`. If any of the 8 canonical dimensions remain unresolved, it generates a fresh `OperationalInquiry`, updates state with `needs_elicitation = True`, and interrupts back at `await_human_input` with `PAUSED` lifecycle status until all dimensions are fully resolved. Added adversarial test `test_adversarial_b26_partial_human_answers_keeps_discover_active` verifying the full multi-turn cycle: 8 unresolved -> user answers 2 -> 6 unresolved (paused) -> user answers remainder -> DEFINE completed.
+2. **B27 (CapabilityIntent Preservation & Registry Validation):** Updated `node_define()` to extract `CapabilityIntent` tuples from `TaskDecompositionNode` and strictly validate each intent's `capability_id` against the authoritative `CapabilityRegistry` (`capability_registry.get_capability()`). If a capability is syntactically valid but unregistered/synthetic, it raises `DomainValidationError(ValidationCode.INVALID_VALUE, ...)` fail-closed before any memory write. Updated `ProjectSpecification` and `commit_project_specification()` to store and format `## Required Capabilities` in `project_spec.md`, and updated `get_project_specification()` to parse and reconstitute `capability_intents`. Added adversarial test `test_adversarial_b27_unregistered_capability_fails_closed` proving synthetic capability IDs fail closed and leave project memory untouched.
+3. **B28 (Zero Fabricated Hardware Defaults):** Eliminated model hallucination in `node_define()` that populated VRAM (16GB), RAM (32GB), power (60W), and precisions (`fp32`, `fp16`, `int8`) from the substring `"jetson"`. Hardware properties are now strictly sourced from characterization constraints explicitly established by the user or an authoritative database. Any unspecified hardware properties remain `None` (for VRAM, RAM, power, latency) or empty tuple `()` (for supported precisions). Added adversarial test `test_adversarial_b28_define_does_not_fabricate_hardware_defaults` verifying unestablished fields remain `None` / `()`.
+4. **Acceptance & Regression Gates:** All 14 exit and adversarial tests in `tests/test_discover_define_phase4_exit.py` pass. Full test suite expanded to 688/688 tests passing across 26 suites with zero regressions. Static analysis clean: Ruff check clean, Ruff format clean across 195 files, Mypy clean across 120 files, `git diff --check` clean.
+
+**Why:** Enforces `[P§5]`, `[P§6]`, `[P§19]`, `[P§20]`, `[P§21]`, `[P§24]`, `[P§29.1]`, `[P§29.4]`, `[P§30]`, `[P§34]`, and resolves Official PM Review findings B26, B27, B28 on PR #71.
+
+**Broke:** Nothing broken. 688/688 repository tests pass.
+
+**Learned:** In multi-turn human-in-the-loop workflows, routing human answers back through the elicitation/reasoning node with an accumulated evidence state guarantees convergence without manual state-checking heuristics, allowing the model reasoning loop to naturally determine whether characterization is complete across all required operational dimensions.
+
+**Left open:** PR #71 updated with remediation commits, awaiting Official PM re-review.

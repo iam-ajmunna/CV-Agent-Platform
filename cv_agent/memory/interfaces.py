@@ -22,11 +22,11 @@ class HardwareConstraints:
     """Hardware resource budgets and deployment target specifications [P§29.4]."""
 
     target_device: str
-    max_vram_mb: int
-    max_ram_mb: int
-    power_budget_watts: float | None
-    latency_ceiling_ms: float | None
-    supported_precisions: tuple[str, ...]
+    max_vram_mb: int | None = None
+    max_ram_mb: int | None = None
+    power_budget_watts: float | None = None
+    latency_ceiling_ms: float | None = None
+    supported_precisions: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -58,6 +58,7 @@ class ProjectSpecification:
     characterization: Any  # ProblemCharacterization
     decomposition: Any  # CVTaskDecompositionDAG
     hardware_constraints: HardwareConstraints
+    capability_intents: tuple[Any, ...] = ()  # tuple[CapabilityIntent, ...]
     architectural_choices: tuple[ArchitecturalDecision, ...] = ()
     dataset_lineage_notes: str = ""
 
