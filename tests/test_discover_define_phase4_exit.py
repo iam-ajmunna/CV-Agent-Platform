@@ -41,8 +41,13 @@ from cv_agent.memory.interfaces import (
 from cv_agent.memory.service import GitProjectMemory
 from cv_agent.orchestration.contracts import LifecycleStatus
 from cv_agent.orchestration.discover_define import (
+    CANONICAL_OPERATIONAL_DIMENSIONS,
     DiscoverDefineGraphState,
+    IncompleteCharacterizationError,
     create_discover_define_graph,
+    find_missing_operational_dimensions,
+    route_after_discover,
+    validate_define_preconditions,
 )
 from cv_agent.orchestration.graph import SQLiteLangGraphCheckpointer
 from cv_agent.orchestration.store import SQLiteOrchestrationStore
@@ -134,16 +139,17 @@ def mock_prison_elicitation_response() -> dict[str, Any]:
     return {
         "inquiry_id": "inq-prison-001",
         "unresolved_dimensions": [
+            "operational_definition",
             "camera_infrastructure",
             "physical_environment",
             "target_hardware",
             "latency_budget_ms",
-            "throughput_fps",
             "error_tolerance",
             "data_availability",
             "intervention_modality",
         ],
         "targeted_questions": [
+            "What is the operational definition of an escape attempt or breach?",
             "What camera infrastructure is installed (fixed/PTZ, resolution, RTSP framerate)?",
             "What is the physical environment along the perimeter (outdoor lighting shifts, weather)?",
             "What target edge hardware is specified (e.g. Jetson Orin, server GPU)?",
@@ -363,6 +369,7 @@ def test_gate_g2_resumption_from_checkpoint(
 
     # Turn 2: Resume session with user operational answers on same thread_id
     answers = {
+        "operational_definition": "Detect and track individuals breaching or climbing physical perimeter fence lines within 300ms",
         "camera_infrastructure": "CCTV 1080p 30fps RTSP fixed streams",
         "physical_environment": "Outdoor perimeter fence line, day/night lighting shifts, rain/fog",
         "target_hardware": "NVIDIA Jetson AGX Orin 64GB",
@@ -430,6 +437,7 @@ def test_gate_g3_define_characterization_and_task_dag(
     )
 
     answers = {
+        "operational_definition": "Detect and track individuals breaching or climbing physical perimeter fence lines within 300ms",
         "camera_infrastructure": "CCTV 1080p 30fps RTSP fixed streams",
         "physical_environment": "Outdoor perimeter fence line, day/night lighting shifts, rain/fog",
         "target_hardware": "NVIDIA Jetson AGX Orin 64GB",
@@ -801,6 +809,7 @@ def test_cvagent_facade_run_discover_define_end_to_end(
 
     # Turn 2: Resumption with operational answers
     answers = {
+        "operational_definition": "Detect and track individuals breaching or climbing physical perimeter fence lines within 300ms",
         "camera_infrastructure": "CCTV 1080p 30fps RTSP fixed streams",
         "physical_environment": "Outdoor perimeter fence line, day/night lighting shifts, rain/fog",
         "target_hardware": "NVIDIA Jetson AGX Orin 64GB",
@@ -889,17 +898,17 @@ def test_adversarial_b26_partial_human_answers_keeps_discover_active(
     mock_elicitation_turn2 = {
         "inquiry_id": "inq-prison-turn2",
         "unresolved_dimensions": [
+            "operational_definition",
             "camera_infrastructure",
             "physical_environment",
-            "throughput_fps",
             "error_tolerance",
             "data_availability",
             "intervention_modality",
         ],
         "targeted_questions": [
+            "What is the operational definition of an escape attempt or breach?",
             "What camera infrastructure is installed?",
             "What is the physical environment?",
-            "What throughput fps is needed?",
             "What is the error tolerance ceiling?",
             "What data is available?",
             "What is the intervention modality?",
@@ -967,9 +976,9 @@ def test_adversarial_b26_partial_human_answers_keeps_discover_active(
 
     # Turn 3: User provides remaining 6 answers
     remaining_answers = {
+        "operational_definition": "Detect and track individuals breaching or climbing physical perimeter fence lines within 300ms",
         "camera_infrastructure": "CCTV 1080p 30fps RTSP fixed streams",
         "physical_environment": "Outdoor perimeter fence line, day/night shifts, rain/fog",
-        "throughput_fps": "30.0",
         "error_tolerance": "Zero missed perimeter breaches",
         "data_availability": "50 hours annotated perimeter CCTV video",
         "intervention_modality": "Real-time alert dispatch",
@@ -1051,6 +1060,7 @@ def test_adversarial_b27_unregistered_capability_fails_closed(
     )
 
     answers = {
+        "operational_definition": "Detect and track individuals breaching perimeter",
         "camera_infrastructure": "CCTV 1080p 30fps",
         "physical_environment": "Outdoor perimeter",
         "target_hardware": "NVIDIA Jetson AGX Orin 64GB",
@@ -1132,6 +1142,7 @@ def test_adversarial_b28_define_does_not_fabricate_hardware_defaults(
     )
 
     answers = {
+        "operational_definition": "Detect and track individuals breaching perimeter",
         "camera_infrastructure": "CCTV 1080p 30fps",
         "physical_environment": "Outdoor perimeter",
         "target_hardware": "NVIDIA Jetson AGX Orin 64GB",
@@ -1227,9 +1238,127 @@ def test_adversarial_b26_mock_llm_false_complete_fails_closed(
     assert turn2["lifecycle_status"] == LifecycleStatus.PAUSED.value
     assert store.get_lifecycle_status(session_id) == LifecycleStatus.PAUSED
     assert turn2["needs_elicitation"] is True
-    # At least 5 canonical dimensions are missing (camera_infrastructure, physical_environment, error_tolerance, data_availability, intervention_modality)
-    assert len(turn2["operational_inquiry"]["unresolved_dimensions"]) >= 5
-    assert len(turn2["operational_inquiry"]["targeted_questions"]) >= 5
+    # 6 canonical dimensions are missing (operational_definition, camera_infrastructure, physical_environment, error_tolerance, data_availability, intervention_modality)
+    assert len(turn2["operational_inquiry"]["unresolved_dimensions"]) >= 6
+    assert len(turn2["operational_inquiry"]["targeted_questions"]) >= 6
+    assert (
+        "operational_definition"
+        in turn2["operational_inquiry"]["unresolved_dimensions"]
+    )
+    assert turn2.get("project_spec_committed") is not True
+    assert memory.get_project_specification() is None
+
+
+def test_adversarial_b26_missing_operational_definition_cannot_enter_define(
+    tmp_path: Path,
+    mock_prison_elicitation_response: dict[str, Any],
+) -> None:
+    """Adversarial B26: Supplying every dimension EXCEPT operational_definition cannot enter DEFINE.
+
+    Even when the LLM falsely reports completeness (unresolved_dimensions=[], targeted_questions=[]),
+    the workflow must deterministically fail closed from accumulated evidence, keep DISCOVER active,
+    remain PAUSED, and prevent entering DEFINE. Furthermore, route_after_discover and
+    validate_define_preconditions must reject entry with IncompleteCharacterizationError.
+    """
+    db_path = tmp_path / "orchestration.db"
+    store = SQLiteOrchestrationStore(db_path)
+    session_id = "session-prison-b26-missing-opdef"
+    lease = store.acquire_lease(session_id, session_id, "test-runner")
+    workspace = tmp_path / "workspace"
+    memory = GitProjectMemory(workspace)
+    checkpointer = SQLiteLangGraphCheckpointer(str(db_path))
+
+    # Turn 2: Mock LLM falsely asserts that elicitation is complete despite missing operational_definition
+    mock_llm_falsely_complete_response = {
+        "inquiry_id": "inq-fake-complete-opdef",
+        "unresolved_dimensions": [],  # False negative: LLM claims complete!
+        "targeted_questions": [],  # False negative!
+        "context_summary": "LLM falsely claims operational characterization is fully resolved despite missing operational_definition.",
+        "assumptions_and_risks": [],
+    }
+
+    gateway, _ = _setup_test_gateway(
+        [
+            mock_prison_elicitation_response,
+            mock_llm_falsely_complete_response,
+        ]
+    )
+
+    graph = create_discover_define_graph(
+        store=store,
+        lease=lease,
+        memory=memory,
+        llm_gateway=gateway,
+        checkpointer=checkpointer,
+    )
+    config = {"configurable": {"thread_id": session_id}}
+
+    # Turn 1: Initial prompt -> DISCOVER -> PAUSED
+    turn1 = graph.invoke(
+        {
+            "session_id": session_id,
+            "thread_id": session_id,
+            "lifecycle_status": LifecycleStatus.INITIALIZING.value,
+            "user_prompt": "I have a prison project — escape-attempt detection",
+        },
+        config=config,
+    )
+    assert turn1["lifecycle_status"] == LifecycleStatus.PAUSED.value
+    assert (
+        "operational_definition"
+        in turn1["operational_inquiry"]["unresolved_dimensions"]
+    )
+
+    # Turn 2: User provides EVERY operational dimension EXCEPT operational_definition
+    answers_missing_opdef = {
+        "camera_infrastructure": "CCTV 1080p 30fps RTSP fixed streams",
+        "physical_environment": "Outdoor perimeter fence line, day/night lighting shifts, rain/fog",
+        "target_hardware": "NVIDIA Jetson AGX Orin 64GB",
+        "latency_budget_ms": "100.0",
+        "throughput_fps": "30.0",
+        "error_tolerance": "Zero missed perimeter breaches",
+        "data_availability": "50 hours annotated perimeter CCTV video",
+        "intervention_modality": "Real-time alert dispatch",
+        # NOTE: operational_definition is deliberately omitted!
+    }
+
+    # Deterministic check verifies operational_definition is uniquely missing
+    assert "operational_definition" in CANONICAL_OPERATIONAL_DIMENSIONS
+    missing = find_missing_operational_dimensions(answers_missing_opdef)
+    assert missing == ["operational_definition"]
+
+    # route_after_discover must reject entering DEFINE even if needs_elicitation is False
+    adversary_state: DiscoverDefineGraphState = {
+        "needs_elicitation": False,
+        "accumulated_answers": answers_missing_opdef,
+        "user_prompt": "I have a prison project",
+    }
+    assert route_after_discover(adversary_state) == "await_human_input"
+
+    # validate_define_preconditions must fail closed with IncompleteCharacterizationError
+    with pytest.raises(
+        IncompleteCharacterizationError,
+        match="Cannot enter DEFINE: missing mandatory operational dimensions.*operational_definition",
+    ):
+        validate_define_preconditions(answers_missing_opdef)
+
+    # Graph invocation turn 2
+    graph.update_state(config, {"human_answers": answers_missing_opdef})
+    turn2 = graph.invoke(None, config=config)
+
+    # Invariant verified: Graph overrides false LLM completeness, keeps DISCOVER active,
+    # stays PAUSED, and specifically flags operational_definition
+    assert turn2["lifecycle_status"] == LifecycleStatus.PAUSED.value
+    assert store.get_lifecycle_status(session_id) == LifecycleStatus.PAUSED
+    assert turn2["needs_elicitation"] is True
+    assert (
+        "operational_definition"
+        in turn2["operational_inquiry"]["unresolved_dimensions"]
+    )
+    assert any(
+        "operational definition" in q.lower()
+        for q in turn2["operational_inquiry"]["targeted_questions"]
+    )
     assert turn2.get("project_spec_committed") is not True
     assert memory.get_project_specification() is None
 

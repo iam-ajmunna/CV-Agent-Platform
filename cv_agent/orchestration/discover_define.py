@@ -65,6 +65,7 @@ class DiscoverDefineGraphState(TypedDict, total=False):
 
 
 CANONICAL_OPERATIONAL_DIMENSIONS: tuple[str, ...] = (
+    "operational_definition",
     "camera_infrastructure",
     "physical_environment",
     "target_hardware",
@@ -104,6 +105,37 @@ def find_missing_operational_dimensions(
         missing.append("latency_budget_ms")
 
     return missing
+
+
+def validate_define_preconditions(
+    accumulated_answers: Mapping[str, Any],
+    user_prompt: str = "",
+) -> None:
+    """Deterministically assert complete operational dimensions before entering DEFINE [P§5], [P§30].
+
+    Raises IncompleteCharacterizationError if any canonical operational dimension
+    (specifically including operational_definition) or timing constraint is missing from accumulated evidence.
+    """
+    missing_dims = find_missing_operational_dimensions(accumulated_answers, user_prompt)
+    if missing_dims:
+        raise IncompleteCharacterizationError(
+            f"Cannot enter DEFINE: missing mandatory operational dimensions from accumulated evidence: {missing_dims}"
+        )
+
+
+def route_after_discover(state: DiscoverDefineGraphState) -> str:
+    """Deterministic routing edge after DISCOVER stage evaluation.
+
+    Guarantees that missing operational dimensions keep DISCOVER active,
+    even if an LLM or caller sets needs_elicitation=False prematurely.
+    """
+    if state.get("needs_elicitation", False):
+        return "await_human_input"
+    accumulated = state.get("accumulated_answers") or {}
+    user_prompt = state.get("user_prompt", "")
+    if find_missing_operational_dimensions(accumulated, user_prompt):
+        return "await_human_input"
+    return "define"
 
 
 def create_discover_define_graph(
@@ -222,15 +254,6 @@ def create_discover_define_graph(
             "operational_inquiry": None,
         }
 
-    def route_after_discover(state: DiscoverDefineGraphState) -> str:
-        if state.get("needs_elicitation", False):
-            return "await_human_input"
-        accumulated = state.get("accumulated_answers") or {}
-        user_prompt = state.get("user_prompt", "")
-        if find_missing_operational_dimensions(accumulated, user_prompt):
-            return "await_human_input"
-        return "define"
-
     def node_await_human_input(state: DiscoverDefineGraphState) -> dict[str, Any]:
         """Resumption point after user responds to operational questions."""
         curr = store.get_lifecycle_status(lease.session_id)
@@ -277,11 +300,7 @@ def create_discover_define_graph(
             accumulated.update(new_answers)
 
         # Defense-in-depth: fail closed if mandatory dimensions are missing from accumulated evidence
-        missing_dims = find_missing_operational_dimensions(accumulated, user_prompt)
-        if missing_dims:
-            raise IncompleteCharacterizationError(
-                f"Cannot enter DEFINE: missing mandatory operational dimensions from accumulated evidence: {missing_dims}"
-            )
+        validate_define_preconditions(accumulated, user_prompt)
 
         # 1. Synthesize complete ProblemCharacterization via ProblemFramingNode
 
@@ -482,3 +501,14 @@ def create_discover_define_graph(
     return builder.compile(
         checkpointer=checkpointer, interrupt_before=["await_human_input"]
     )
+
+
+__all__ = [
+    "CANONICAL_OPERATIONAL_DIMENSIONS",
+    "DiscoverDefineGraphState",
+    "IncompleteCharacterizationError",
+    "create_discover_define_graph",
+    "find_missing_operational_dimensions",
+    "route_after_discover",
+    "validate_define_preconditions",
+]

@@ -96,6 +96,8 @@ The test suite in `tests/test_discover_define_phase4_exit.py` exercises 11 focus
     - Verifies that when a mock LLM falsely claims zero unresolved dimensions with only 2 dimensions answered, the workflow deterministically evaluates accumulated evidence, rejects the false completeness claim, remains in `PAUSED` state (`needs_elicitation=True`), and does not enter DEFINE.
 16. **`test_b27_capability_intent_lossless_round_trip`**:
     - Verifies lossless, deterministic round-trip serialization and deserialization of typed `CapabilityIntent` across `capability_id`, `intent_description`, nested `parameter_intent` (primitives, lists/tuples, nested dicts), and `target_preference` in `GitProjectMemory`.
+17. **`test_adversarial_b26_missing_operational_definition_cannot_enter_define`**:
+    - Verifies that supplying every dimension except `operational_definition` (camera, physical environment, hardware, latency, throughput, error tolerance, data availability, intervention modality) while the mock LLM falsely claims completeness (`unresolved_dimensions=[]`, `targeted_questions=[]`) deterministically keeps DISCOVER active, remains in `PAUSED` state with `needs_elicitation=True`, specifically flags `operational_definition` in operational inquiries, and fails closed with `IncompleteCharacterizationError` via `route_after_discover` and `validate_define_preconditions`.
 
 ---
 
@@ -103,7 +105,7 @@ The test suite in `tests/test_discover_define_phase4_exit.py` exercises 11 focus
 
 | Finding | Architectural Blocker | Root Cause & Resolution | Status |
 |---|---|---|---|
-| **B26** | **LLM as completeness authority / premature bypass** | Initially, `node_discover` relied on LLM-reported `unresolved_dimensions` and truthy answers. Remediation implemented deterministic check `find_missing_operational_dimensions()` from accumulated evidence across all canonical dimensions (`camera_infrastructure`, `physical_environment`, `target_hardware`, `error_tolerance`, `data_availability`, `intervention_modality`, `latency_budget_ms`/`throughput_fps`). Workflow fails closed (`needs_elicitation=True`, `PAUSED`, `IncompleteCharacterizationError` barrier) if evidence is incomplete, regardless of LLM assertions. | **DISCHARGED** |
+| **B26** | **Deterministic Operational Completeness / operational_definition Enforcement** | Initially, `node_discover` relied on LLM-reported `unresolved_dimensions` and truthy answers. Remediation implemented deterministic checks `find_missing_operational_dimensions()` and `validate_define_preconditions()` from accumulated evidence across all 8 canonical dimensions (`operational_definition`, `camera_infrastructure`, `physical_environment`, `target_hardware`, `error_tolerance`, `data_availability`, `intervention_modality`, plus timing constraints `latency_budget_ms`/`throughput_fps`). Workflow fails closed (`needs_elicitation=True`, `PAUSED`, `IncompleteCharacterizationError` barrier) if evidence is incomplete, even if the model claims completeness. Verified via adversarial tests: partial answers, mock LLM false complete, and omission of `operational_definition` specifically. | **DISCHARGED** |
 | **B27** | **Lossy CapabilityIntent persistence** | `CapabilityIntent` was previously serialized with only ID and description, dropping `target_preference` and clearing `parameter_intent` on reload. Remediation implemented structured Markdown block serialization (`### {capability_id}`) with inline JSON for `parameter_intent` (handled via recursive `_to_json_serializable`) and explicit `target_preference`. Verified by 100% round-trip equality test. | **DISCHARGED** |
 | **B28** | **Fabricated hardware facts from "jetson"** | `node_define()` previously manufactured VRAM (16GB), RAM (32GB), power (60W), and precisions from substring. Remediation removed all fabricated defaults; unestablished properties strictly remain `None` / `()`. | **DISCHARGED (PM Verified)** |
 
@@ -114,12 +116,12 @@ The test suite in `tests/test_discover_define_phase4_exit.py` exercises 11 focus
 ```text
 ============================= test session starts ==============================
 platform darwin -- Python 3.13.7, pytest-9.1.1, pluggy-1.6.0
-collected 690 items
-690 passed in 6.07s
-============================= 690 passed in 6.07s ==============================
+collected 691 items
+691 passed in 6.15s
+============================= 691 passed in 6.15s ==============================
 ```
 
-- **Pytest:** 690/690 tests passing across 26 test suites (0 regressions).
+- **Pytest:** 691/691 tests passing across 26 test suites (0 regressions).
 - **Ruff Check:** Clean (0 errors).
 - **Ruff Format:** Clean across 195 source files.
 - **Mypy:** Clean (0 issues across 120 source files).

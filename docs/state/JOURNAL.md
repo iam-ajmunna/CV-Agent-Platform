@@ -2277,3 +2277,20 @@ Remediated all three architectural blockers identified in the Official PM's seco
 **Learned:** In multi-turn elicitation workflows, cognitive model reasoning must always be bounded by deterministic schema-level completeness checkers. While the LLM proposes questions and contextual summaries, authoritative state machine progression (such as moving from DISCOVER to DEFINE) must strictly fail closed unless canonical dimensional completeness is deterministically verified from accumulated evidence.
 
 **Left open:** PR #71 updated with re-remediation commits, awaiting Official PM acceptance.
+
+---
+
+## 2026-09-25 — Phase 4: Discharged Final PM Blocker B26 (Operational Definition Completeness) on PR #71 (D-069, Issue #70)
+
+**Did:** Fully discharged the final remaining Official PM blocker B26 on PR #71 (`feature/ajmunna/phase-4-discover-define-workflow`):
+1. **B26 (Operational Definition Deterministic Pre-DEFINE Completeness):** Added `operational_definition` to `CANONICAL_OPERATIONAL_DIMENSIONS` in `cv_agent/orchestration/discover_define.py`. Formulated module-level deterministic pre-DEFINE assertions `validate_define_preconditions()` and router `route_after_discover()`, ensuring complete operational characterization across all 8 canonical dimensions (`operational_definition`, `camera_infrastructure`, `physical_environment`, `target_hardware`, `error_tolerance`, `data_availability`, `intervention_modality`, plus `latency_budget_ms`/`throughput_fps`). If `operational_definition` (or any other canonical dimension) is missing from accumulated evidence, `find_missing_operational_dimensions()` detects the omission, `node_discover` keeps DISCOVER active, synthesizes operational inquiry questions, and interrupts in `PAUSED` state with `needs_elicitation = True`.
+2. **Dedicated Adversarial Test:** Added `test_adversarial_b26_missing_operational_definition_cannot_enter_define` to `tests/test_discover_define_phase4_exit.py`. Proves that supplying every other dimension (camera, physical environment, hardware, latency, throughput, error tolerance, data availability, intervention modality) while omitting `operational_definition` cannot enter DEFINE—even when a mock LLM falsely claims elicitation completeness (`unresolved_dimensions = []`, `targeted_questions = []`). Verifies the graph remains in `PAUSED` state with `needs_elicitation = True`, `operational_definition` is flagged in inquiry questions, `project_spec_committed` is not True, `memory.get_project_specification()` is None, `route_after_discover` returns `"await_human_input"`, and `validate_define_preconditions` fails closed with `IncompleteCharacterizationError`.
+3. **Acceptance & Regression Gates:** All 17 exit and adversarial tests in `tests/test_discover_define_phase4_exit.py` pass. Full repository test suite: 691/691 tests passing across 26 suites with zero regressions. All static analysis gates clean (Ruff check clean, Ruff format clean across 195 source files, Mypy clean across 120 files, `git diff --check` clean).
+
+**Why:** Enforces `[P§5]`, `[P§6]`, `[P§19]`, `[P§20]`, `[P§21]`, `[P§24]`, `[P§29.1]`, `[P§29.4]`, `[P§30]`, `[P§34]`, and resolves the final outstanding B26 requirement on PR #71.
+
+**Broke:** Nothing broken. 691/691 repository tests pass.
+
+**Learned:** Explicitly encoding all 8 canonical operational dimensions (including the primary operational definition itself) into deterministic validation barriers ensures that model omissions cannot sneak past elicitation into execution stages.
+
+**Left open:** PR #71 updated with B26 remediation commit, awaiting Official PM merge approval.
