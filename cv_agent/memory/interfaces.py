@@ -10,7 +10,11 @@ Defines:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Any, Protocol
+
+
+class ProjectMemoryError(Exception):
+    """Base exception for project memory operations."""
 
 
 @dataclass(frozen=True)
@@ -18,11 +22,11 @@ class HardwareConstraints:
     """Hardware resource budgets and deployment target specifications [P§29.4]."""
 
     target_device: str
-    max_vram_mb: int
-    max_ram_mb: int
-    power_budget_watts: float | None
-    latency_ceiling_ms: float | None
-    supported_precisions: tuple[str, ...]
+    max_vram_mb: int | None = None
+    max_ram_mb: int | None = None
+    power_budget_watts: float | None = None
+    latency_ceiling_ms: float | None = None
+    supported_precisions: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -47,6 +51,18 @@ class LearnedHeuristic:
     evidence_experiment_ids: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class ProjectSpecification:
+    """Authoritative structured project specification produced at DEFINE exit [ADR-0004, ADR-0008]."""
+
+    characterization: Any  # ProblemCharacterization
+    decomposition: Any  # CVTaskDecompositionDAG
+    hardware_constraints: HardwareConstraints
+    capability_intents: tuple[Any, ...] = ()  # tuple[CapabilityIntent, ...]
+    architectural_choices: tuple[ArchitecturalDecision, ...] = ()
+    dataset_lineage_notes: str = ""
+
+
 class ProjectMemoryReader(Protocol):
     """Read-only interface to Git-tracked structured project memory [P§33]."""
 
@@ -60,6 +76,10 @@ class ProjectMemoryReader(Protocol):
 
     def get_learned_heuristics(self) -> tuple[LearnedHeuristic, ...]:
         """Retrieve empirical engineering heuristics."""
+        ...
+
+    def get_project_specification(self) -> ProjectSpecification | None:
+        """Retrieve the persistent structured project specification if committed."""
         ...
 
 
@@ -76,4 +96,8 @@ class ProjectMemoryWriter(Protocol):
 
     def append_learned_heuristic(self, heuristic: LearnedHeuristic) -> None:
         """Append a newly validated empirical engineering heuristic."""
+        ...
+
+    def commit_project_specification(self, spec: ProjectSpecification) -> None:
+        """Atomically commit structured project specification, hardware constraints, and architectural choices."""
         ...

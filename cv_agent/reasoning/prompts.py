@@ -42,10 +42,82 @@ PROBLEM_FRAMING_SCHEMA: dict[str, Any] = {
     "properties": {
         "task_type": {"type": "string"},
         "target_hardware": {"type": "string"},
+        "operational_definition": {"type": "string"},
+        "physical_environment": {"type": "string"},
+        "camera_infrastructure": {"type": "string"},
+        "error_tolerance": {"type": "string"},
+        "data_availability": {"type": "string"},
+        "intervention_modality": {"type": "string"},
         "latency_budget_ms": {"type": ["number", "null"]},
         "throughput_fps": {"type": ["number", "null"]},
         "compute_budget_hours": {"type": ["number", "null"]},
         "constraints": {"type": "object"},
+        "citations": {"type": "array", "items": _CITATION_ITEM_SCHEMA},
+        "empirical_claims": {"type": "array", "items": _EMPIRICAL_CLAIM_ITEM_SCHEMA},
+    },
+}
+
+OPERATIONAL_INQUIRY_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "required": [
+        "inquiry_id",
+        "unresolved_dimensions",
+        "targeted_questions",
+        "context_summary",
+    ],
+    "properties": {
+        "inquiry_id": {"type": "string"},
+        "unresolved_dimensions": {
+            "type": "array",
+            "items": {"type": "string"},
+        },
+        "targeted_questions": {
+            "type": "array",
+            "items": {"type": "string"},
+        },
+        "context_summary": {"type": "string"},
+        "assumptions_and_risks": {
+            "type": "array",
+            "items": {"type": "string"},
+        },
+        "citations": {"type": "array", "items": _CITATION_ITEM_SCHEMA},
+        "empirical_claims": {"type": "array", "items": _EMPIRICAL_CLAIM_ITEM_SCHEMA},
+    },
+}
+
+_TASK_NODE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "required": ["task_id", "task_type", "description"],
+    "properties": {
+        "task_id": {"type": "string"},
+        "task_type": {"type": "string"},
+        "description": {"type": "string"},
+        "inputs": {"type": "array", "items": {"type": "string"}},
+        "outputs": {"type": "array", "items": {"type": "string"}},
+        "dependencies": {"type": "array", "items": {"type": "string"}},
+    },
+}
+
+TASK_DECOMPOSITION_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "required": ["tasks"],
+    "properties": {
+        "tasks": {"type": "array", "items": _TASK_NODE_SCHEMA},
+        "root_task_ids": {"type": "array", "items": {"type": "string"}},
+        "terminal_task_ids": {"type": "array", "items": {"type": "string"}},
+        "capability_intents": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": ["capability_id", "intent_description", "parameter_intent"],
+                "properties": {
+                    "capability_id": {"type": "string"},
+                    "intent_description": {"type": "string"},
+                    "parameter_intent": {"type": "object"},
+                    "target_preference": {"type": ["string", "null"]},
+                },
+            },
+        },
         "citations": {"type": "array", "items": _CITATION_ITEM_SCHEMA},
         "empirical_claims": {"type": "array", "items": _EMPIRICAL_CLAIM_ITEM_SCHEMA},
     },
@@ -165,6 +237,8 @@ SCHEMAS_BY_NODE_TYPE: dict[NodeType, dict[str, Any]] = {
     NodeType.BASELINE_SELECTION: BASELINE_SELECTION_SCHEMA,
     NodeType.EXPERIMENT_DIAGNOSIS: DIAGNOSIS_SCHEMA,
     NodeType.STRATEGY_FORMULATION: STRATEGY_SCHEMA,
+    NodeType.ELICITATION: OPERATIONAL_INQUIRY_SCHEMA,
+    NodeType.TASK_DECOMPOSITION: TASK_DECOMPOSITION_SCHEMA,
 }
 
 
@@ -193,13 +267,40 @@ SYSTEM_PROMPTS_BY_NODE_TYPE: dict[NodeType, str] = {
         "Flag approval recommendations for expensive, destructive, or production actions per docs/APPROVALS.md [P§24]. "
         "Return only valid JSON conforming strictly to the requested schema. Do not include conversational markdown outside the JSON."
     ),
+    NodeType.ELICITATION: (
+        "You are an expert Computer Vision Systems Engineer and Technical Lead operating as the Elicitation reasoning node [P§5, P§29.1]. "
+        "Your role is operational problem characterization BEFORE solution design. "
+        "You must NEVER propose or mention concrete model architectures (such as YOLO, RT-DETR, or Faster R-CNN) during elicitation [P§31]. "
+        "Analyze unresolved constraints across the 8 canonical dimensions: operational definition, physical environment, "
+        "camera infrastructure, target hardware, performance ceilings, error tolerance, data availability, and intervention modality. "
+        "Formulate targeted operational questions to characterize the problem. "
+        "Return only valid JSON conforming strictly to the requested schema."
+    ),
+    NodeType.TASK_DECOMPOSITION: (
+        "You are an expert Computer Vision Systems Engineer operating as the Task Decomposition reasoning node [P§4, P§6]. "
+        "Your role is to break down an operationally characterized problem into an acyclic directed graph (DAG) of domain CV tasks "
+        "(e.g., object detection, tracking, spatial geometry, action recognition, temporal reasoning) and express required capability intents. "
+        "Return only valid JSON conforming strictly to the requested schema."
+    ),
 }
+
+
+def _serialize_frozen_json(obj: Any) -> Any:
+    if isinstance(obj, Mapping):
+        return dict(obj)
+    if isinstance(obj, (list, tuple)):
+        return list(obj)
+    raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
 
 
 def create_user_prompt(node_type: NodeType, parameters: Mapping[str, Any]) -> str:
     """Format structured user prompt for the given reasoning node."""
     params_json = json.dumps(
-        dict(parameters), indent=2, sort_keys=True, ensure_ascii=False
+        dict(parameters),
+        indent=2,
+        sort_keys=True,
+        ensure_ascii=False,
+        default=_serialize_frozen_json,
     )
     return (
         f"Execute {node_type.value} reasoning with the following input parameters and constraints:\n\n"

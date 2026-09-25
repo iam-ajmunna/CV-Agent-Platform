@@ -6,6 +6,8 @@ grounding failures, and bounded schema repairs.
 
 from __future__ import annotations
 
+from cv_agent.memory.interfaces import ProjectMemoryError
+
 
 class ReasoningError(Exception):
     """Base exception for all Reasoning Subsystem failures."""
@@ -63,3 +65,31 @@ class ReasoningTransportError(ReasoningError):
 
     def __init__(self, message: str) -> None:
         super().__init__(message, code="REASONING_TRANSPORT_ERROR")
+
+
+class PrematureModelSelectionError(ReasoningError):
+    """Raised when concrete model architectures are proposed before operational characterization [P§29.1], [P§31]."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message, code="PREMATURE_MODEL_SELECTION")
+
+
+class IncompleteCharacterizationError(ReasoningError):
+    """Raised when an operation requires an operationally complete ProblemCharacterization but fields are missing."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message, code="INCOMPLETE_CHARACTERIZATION")
+
+
+class WorkflowBoundaryViolationError(ReasoningError):
+    """Raised when tool execution, subprocesses, or background jobs are attempted during DISCOVER/DEFINE [P§34]."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message, code="WORKFLOW_BOUNDARY_VIOLATION")
+
+
+class MemoryTransactionValidationError(ReasoningError, ProjectMemoryError):
+    """Raised when validation fails before an atomic project memory transaction."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message, code="MEMORY_TRANSACTION_VALIDATION_ERROR")

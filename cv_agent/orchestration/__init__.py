@@ -31,6 +31,15 @@ from cv_agent.orchestration.contracts import (
     SessionId,
     ThreadId,
 )
+from cv_agent.orchestration.discover_define import (
+    CANONICAL_OPERATIONAL_DIMENSIONS,
+    DiscoverDefineGraphState,
+    IncompleteCharacterizationError,
+    create_discover_define_graph,
+    find_missing_operational_dimensions,
+    route_after_discover,
+    validate_define_preconditions,
+)
 from cv_agent.orchestration.fencing import LeaseManager
 from cv_agent.orchestration.graph import (
     OrchestrationGraphState,
@@ -56,6 +65,7 @@ from cv_agent.orchestration.store import (
 
 __all__ = [
     "CANONICALIZATION_VERSION",
+    "CANONICAL_OPERATIONAL_DIMENSIONS",
     "CHECKPOINT_SCHEMA_VERSION",
     "ApprovalDecision",
     "ApprovalManager",
@@ -63,7 +73,9 @@ __all__ = [
     "ApprovalSecurityError",
     "ApprovalStatus",
     "CheckpointCorruptionError",
+    "DiscoverDefineGraphState",
     "ExecutionLease",
+    "IncompleteCharacterizationError",
     "InvalidStateTransitionError",
     "LeaseManager",
     "LifecycleStatus",
@@ -87,7 +99,11 @@ __all__ = [
     "build_operation_envelope",
     "canonicalize_payload",
     "compute_payload_hash",
+    "create_discover_define_graph",
     "create_orchestration_graph",
+    "find_missing_operational_dimensions",
+    "route_after_discover",
+    "validate_define_preconditions",
     "validate_lifecycle_transition",
     "validate_operation_transition",
 ]

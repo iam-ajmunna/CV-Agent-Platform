@@ -2219,3 +2219,78 @@ Remediated all three architectural blockers identified in the Official PM's seco
 **Learned:** Clear boundaries between architectural state machines (the 7 ADR-0007 states) and presentation projections (`is_executable`, `is_merely_known`) ensure operational tools and CLIs can present user-friendly summaries without eroding the precise underlying state transitions or conflating target availability with tool installation.
 
 **Left open:** Phase 3 complete and accepted on `main`. Awaiting Official PM scoping instruction for Phase 4 (Reasoning Subsystem, ADR-0008).
+
+---
+
+## 2026-09-24 — Phase 4: DISCOVER / DEFINE Workflow Implementation (D-066, Issue #70)
+
+**Did:** Implemented Phase 4 DISCOVER / DEFINE Workflow pursuant to Issue #70, ADR-0008, and all six Official PM corrections:
+1. Anti-YOLO Schema & Runtime Invariant: Implemented `_PROHIBITED_MODEL_TERMS` and `assert_zero_prohibited_models(text, context_label)` in `cv_agent/reasoning/contracts.py`, raising typed `PrematureModelSelectionError` if concrete models (YOLO, RT-DETR, etc.) appear in queries, prompts, or elicited questions before full characterization.
+2. Operational Elicitation & Characterization Contracts: Implemented `OperationalInquiry` and `ProblemCharacterization` validating all 8 canonical dimensions (`is_well_formed`). Added `ElicitationNode`, `ProblemFramingNode`, and structured JSON schemas in `cv_agent/reasoning/prompts.py`.
+3. Task DAG Decomposition: Implemented `TaskNode` and `CVTaskDecompositionDAG` with cycle detection in `cv_agent/reasoning/contracts.py`, and `TaskDecompositionNode` in `cv_agent/reasoning/nodes.py`. Domain primitives (`object_detection`, `tracking`, etc.) remain pure decomposition abstractions; capability intents bind strictly to authoritative ADR-0001 `CapabilityId`s.
+4. Multi-Turn Resumption Graph: Implemented `create_discover_define_graph()` in `cv_agent/orchestration/discover_define.py` using `SQLiteLangGraphCheckpointer` and `SQLiteOrchestrationStore`. Follows ADR-0003 lifecycle: `READY` -> `PLANNING` -> `PAUSED` (interrupt at `await_human_input`) -> resume on `human_answers` -> `READY` -> `PLANNING` -> `EXECUTING` -> `EVALUATING` -> `COMPLETED`.
+5. Atomic Project Memory Persistence: Added `ProjectSpecification` and `commit_project_specification()` to `cv_agent/memory/service.py`. Enforces 5 pre-commit validation checks and transactional multi-file replacement/rollback across `project_spec.md`, `hardware_constraints.yaml`, and `architectural_choices.md`.
+6. Runtime Execution Barrier: Implemented `Phase4ExecutionBarrier` in `cv_agent/tools/barrier.py`, trapping any tool call with `WorkflowBoundaryViolationError`. AST audits prove zero provider SDKs and zero CUDA launches in reasoning and discover/define orchestration.
+7. Acceptance & Adversarial Test Suite: Created `tests/test_discover_define_phase4_exit.py` (11 tests passing). Total repository test suite: 685/685 passing across 26 suites with zero regressions. All static analysis gates green (Ruff check, Ruff format across 194 files, Mypy clean across 120 files, git diff check clean).
+
+**Why:** Addresses Issue #70 and operationalizes the interactive elicitation dialogue from `[P§5]` and `[P§30]`. Enforces "Problem first — characterize before selecting" (`[P§29.1]`) and prevents premature model proclamation.
+
+**Broke:** Nothing broken. 685/685 repository tests pass.
+
+**Learned:** Enforcing prohibited model terminology at both the schema/parsing level and the pre-commit memory level provides defense-in-depth, preventing premature architecture selection from entering persisted project specifications.
+
+**Left open:** PR #71 opened, awaiting Official PM review.
+
+---
+
+## 2026-09-25 — Phase 4: Remediated PM Review Blockers B26, B27, B28 on PR #71 (D-067, Issue #70)
+
+**Did:** Remediated all three architectural blockers identified in the Official PM review of PR #71 (`feature/ajmunna/phase-4-discover-define-workflow`):
+1. **B26 (Partial Human Answers Keep DISCOVER Active):** Removed the premature bypass in `node_discover` where any truthy `human_answers` was treated as completing elicitation. Implemented persistent `accumulated_answers: dict[str, str]` in `DiscoverDefineGraphState`. Upon receiving answers in `await_human_input`, the workflow routes back to `node_discover`, which re-invokes `ElicitationNode(parameters={"user_prompt": user_prompt, "operational_answers": accumulated_answers})`. If any of the 8 canonical dimensions remain unresolved, it generates a fresh `OperationalInquiry`, updates state with `needs_elicitation = True`, and interrupts back at `await_human_input` with `PAUSED` lifecycle status until all dimensions are fully resolved. Added adversarial test `test_adversarial_b26_partial_human_answers_keeps_discover_active` verifying the full multi-turn cycle: 8 unresolved -> user answers 2 -> 6 unresolved (paused) -> user answers remainder -> DEFINE completed.
+2. **B27 (CapabilityIntent Preservation & Registry Validation):** Updated `node_define()` to extract `CapabilityIntent` tuples from `TaskDecompositionNode` and strictly validate each intent's `capability_id` against the authoritative `CapabilityRegistry` (`capability_registry.get_capability()`). If a capability is syntactically valid but unregistered/synthetic, it raises `DomainValidationError(ValidationCode.INVALID_VALUE, ...)` fail-closed before any memory write. Updated `ProjectSpecification` and `commit_project_specification()` to store and format `## Required Capabilities` in `project_spec.md`, and updated `get_project_specification()` to parse and reconstitute `capability_intents`. Added adversarial test `test_adversarial_b27_unregistered_capability_fails_closed` proving synthetic capability IDs fail closed and leave project memory untouched.
+3. **B28 (Zero Fabricated Hardware Defaults):** Eliminated model hallucination in `node_define()` that populated VRAM (16GB), RAM (32GB), power (60W), and precisions (`fp32`, `fp16`, `int8`) from the substring `"jetson"`. Hardware properties are now strictly sourced from characterization constraints explicitly established by the user or an authoritative database. Any unspecified hardware properties remain `None` (for VRAM, RAM, power, latency) or empty tuple `()` (for supported precisions). Added adversarial test `test_adversarial_b28_define_does_not_fabricate_hardware_defaults` verifying unestablished fields remain `None` / `()`.
+4. **Acceptance & Regression Gates:** All 14 exit and adversarial tests in `tests/test_discover_define_phase4_exit.py` pass. Full test suite expanded to 688/688 tests passing across 26 suites with zero regressions. Static analysis clean: Ruff check clean, Ruff format clean across 195 files, Mypy clean across 120 files, `git diff --check` clean.
+
+**Why:** Enforces `[P§5]`, `[P§6]`, `[P§19]`, `[P§20]`, `[P§21]`, `[P§24]`, `[P§29.1]`, `[P§29.4]`, `[P§30]`, `[P§34]`, and resolves Official PM Review findings B26, B27, B28 on PR #71.
+
+**Broke:** Nothing broken. 688/688 repository tests pass.
+
+**Learned:** In multi-turn human-in-the-loop workflows, routing human answers back through the elicitation/reasoning node with an accumulated evidence state guarantees convergence without manual state-checking heuristics, allowing the model reasoning loop to naturally determine whether characterization is complete across all required operational dimensions.
+
+**Left open:** PR #71 updated with remediation commits, awaiting Official PM re-review.
+
+---
+
+## 2026-09-25 — Phase 4: Remediated PM Re-Review Findings B26, B27 & Provenance Sync on PR #71 (D-068, Issue #70)
+
+**Did:** Addressed all findings from Official PM Re-Review of PR #71 (`feature/ajmunna/phase-4-discover-define-workflow`):
+1. **B26 (Deterministic Completeness Checking before DEFINE):** Removed the cognitive LLM as the sole completeness authority during operational elicitation. Implemented `find_missing_operational_dimensions()` in `cv_agent/orchestration/discover_define.py`, which deterministically inspects accumulated authoritative evidence against the canonical operational dimensions (`camera_infrastructure`, `physical_environment`, `target_hardware`, `error_tolerance`, `data_availability`, `intervention_modality`, plus `latency_budget_ms`/`throughput_fps`). Updated `node_discover` to merge missing dimensions into `unresolved_dimensions` and synthesize questions if the LLM falsely claims completeness, pausing the workflow in `PAUSED` state with `needs_elicitation = True`. Added route guard in `route_after_discover` and defense-in-depth pre-framing assertion in `node_define` raising `IncompleteCharacterizationError` if mandatory dimensions are missing. Added adversarial test `test_adversarial_b26_mock_llm_false_complete_fails_closed` proving the workflow fails closed and does NOT enter DEFINE when a mock LLM falsely claims complete elicitation with only 2 answers provided.
+2. **B27 (Lossless CapabilityIntent Persistence & Round-Trip Equality):** Fixed lossy persistence in `GitProjectMemory`. Updated `_format_project_spec_markdown()` to serialize complete typed `CapabilityIntent` blocks with `### {capability_id}`, `intent_description`, `target_preference` (`none` if None), and `parameter_intent` JSON string via recursive `_to_json_serializable()` handling nested `mappingproxy` and `tuple` domains. Updated `get_project_specification()` to parse by document sections (`## `) and decode `parameter_intent` JSON and `target_preference` accurately. Added round-trip equality test `test_b27_capability_intent_lossless_round_trip` asserting exact equality (`orig == reloaded`) across `capability_id`, `intent_description`, nested `parameter_intent`, and `target_preference`.
+3. **Circular Import Remediation:** Eliminated circular import hazards between `cv_agent.reasoning` and `cv_agent.memory` by moving `PrematureModelSelectionError` import locally into `assert_zero_prohibited_models` and `MemoryTransactionValidationError` import locally into `commit_project_specification`.
+4. **Provenance Sync:** Corrected commit provenance tracking to strictly reference the true 40-character SHA (`b1095a0862499133ee2f9adc010e654c95caa2fe`) obtained via `git rev-parse HEAD`.
+5. **Acceptance & Regression Gates:** All 16 exit and adversarial tests in `tests/test_discover_define_phase4_exit.py` pass. Full repository test suite: 690/690 tests passing across 26 suites with zero regressions. All static analysis gates clean (Ruff check clean, Ruff format clean across 195 source files, Mypy clean across 120 files, `git diff --check` clean).
+
+**Why:** Enforces `[P§5]`, `[P§6]`, `[P§19]`, `[P§20]`, `[P§21]`, `[P§24]`, `[P§29.1]`, `[P§29.4]`, `[P§30]`, `[P§34]`, and resolves Official PM Re-Review findings B26 and B27 on PR #71.
+
+**Broke:** Nothing broken. 690/690 repository tests pass.
+
+**Learned:** In multi-turn elicitation workflows, cognitive model reasoning must always be bounded by deterministic schema-level completeness checkers. While the LLM proposes questions and contextual summaries, authoritative state machine progression (such as moving from DISCOVER to DEFINE) must strictly fail closed unless canonical dimensional completeness is deterministically verified from accumulated evidence.
+
+**Left open:** PR #71 updated with re-remediation commits, awaiting Official PM acceptance.
+
+---
+
+## 2026-09-25 — Phase 4: Discharged Final PM Blocker B26 (Operational Definition Completeness) on PR #71 (D-069, Issue #70)
+
+**Did:** Fully discharged the final remaining Official PM blocker B26 on PR #71 (`feature/ajmunna/phase-4-discover-define-workflow`):
+1. **B26 (Operational Definition Deterministic Pre-DEFINE Completeness):** Added `operational_definition` to `CANONICAL_OPERATIONAL_DIMENSIONS` in `cv_agent/orchestration/discover_define.py`. Formulated module-level deterministic pre-DEFINE assertions `validate_define_preconditions()` and router `route_after_discover()`, ensuring complete operational characterization across all 8 canonical dimensions (`operational_definition`, `camera_infrastructure`, `physical_environment`, `target_hardware`, `error_tolerance`, `data_availability`, `intervention_modality`, plus `latency_budget_ms`/`throughput_fps`). If `operational_definition` (or any other canonical dimension) is missing from accumulated evidence, `find_missing_operational_dimensions()` detects the omission, `node_discover` keeps DISCOVER active, synthesizes operational inquiry questions, and interrupts in `PAUSED` state with `needs_elicitation = True`.
+2. **Dedicated Adversarial Test:** Added `test_adversarial_b26_missing_operational_definition_cannot_enter_define` to `tests/test_discover_define_phase4_exit.py`. Proves that supplying every other dimension (camera, physical environment, hardware, latency, throughput, error tolerance, data availability, intervention modality) while omitting `operational_definition` cannot enter DEFINE—even when a mock LLM falsely claims elicitation completeness (`unresolved_dimensions = []`, `targeted_questions = []`). Verifies the graph remains in `PAUSED` state with `needs_elicitation = True`, `operational_definition` is flagged in inquiry questions, `project_spec_committed` is not True, `memory.get_project_specification()` is None, `route_after_discover` returns `"await_human_input"`, and `validate_define_preconditions` fails closed with `IncompleteCharacterizationError`.
+3. **Acceptance & Regression Gates:** All 17 exit and adversarial tests in `tests/test_discover_define_phase4_exit.py` pass. Full repository test suite: 691/691 tests passing across 26 suites with zero regressions. All static analysis gates clean (Ruff check clean, Ruff format clean across 195 source files, Mypy clean across 120 files, `git diff --check` clean).
+
+**Why:** Enforces `[P§5]`, `[P§6]`, `[P§19]`, `[P§20]`, `[P§21]`, `[P§24]`, `[P§29.1]`, `[P§29.4]`, `[P§30]`, `[P§34]`, and resolves the final outstanding B26 requirement on PR #71.
+
+**Broke:** Nothing broken. 691/691 repository tests pass.
+
+**Learned:** Explicitly encoding all 8 canonical operational dimensions (including the primary operational definition itself) into deterministic validation barriers ensures that model omissions cannot sneak past elicitation into execution stages.
+
+**Left open:** PR #71 updated with B26 remediation commit, awaiting Official PM merge approval.

@@ -15,6 +15,7 @@ from cv_agent.tools.adapters import (
     MockMCPEndpointAdapter,
     MockRemoteTargetAdapter,
 )
+from cv_agent.tools.barrier import Phase4ExecutionBarrier
 from cv_agent.tools.contracts import (
     ActiveJobHandoff,
     ExecutionId,
@@ -53,6 +54,7 @@ __all__ = [
     "MCPServerId",
     "MockMCPEndpointAdapter",
     "MockRemoteTargetAdapter",
+    "Phase4ExecutionBarrier",
     "TargetId",
     "TargetType",
     "ToolAvailabilityInfo",

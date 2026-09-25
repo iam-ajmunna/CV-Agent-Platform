@@ -3,41 +3,31 @@
 > **Rewritten** every session. Describes **now**, never history — history lives in
 > `JOURNAL.md`. Hard cap: 60 lines. If it exceeds that, you are logging, not stating.
 
-**Updated:** 2026-09-22 · **Phase:** Phase 3 Complete · **Health:** green
+**Updated:** 2026-09-25 · **Phase:** Phase 4 PR #71 B26 Operational Definition Remediation Complete · **Health:** green
 
 ## Where we are
 
-Phase 3 (Skills & NVIDIA Integration, Issue #68) is complete, approved, and merged to `main` at `5996c95` via PR #69.
-
-The authoritative resolution chain `CapabilityId -> SkillDescriptor -> ToolDescriptor -> ExecutionTargetDescriptor` is fully operational in `main` without duplicating external expertise (`[P§15]`, `[P§23]`, `[P§29.9]`).
-
-All 8 Official PM scoping corrections are implemented and verified on `main`:
-- Quantization capability binds strictly to authoritative ADR-0001 `CapabilityId("cv.deployment.optimization")`.
-- 7-state availability model (`KNOWN`, `DISCOVERED`, `CONFIGURED`, `AVAILABLE`, `EXECUTABLE`, `UNAVAILABLE`, `KNOWN_BUT_UNAVAILABLE`) preserves `AVAILABLE` as an architectural state distinct from "installed".
-- Inspection-only enumeration (`enumerate_capabilities()`, `enumerate_skills()`) guarantees 0 tool invocations, 0 subprocesses, 0 MCP calls, 0 mutations, and 0 background jobs.
-- Test fixtures construct generic compatible NVIDIA GPU targets (`min_cuda_compute="8.0"`), avoiding hardcoded "A100" assumptions.
-- Mechanically enforceable AST audit proves zero CUDA kernel launches, direct bindings, TRT builders, PyTorch training loops, or vendor runtime imports in `cv_agent/skills/`.
-- 10-skill local evaluation matrix correctly reports `KNOWN_BUT_UNAVAILABLE` for 9 GPU/Jetson skills on macOS arm64 host, while evaluating non-GPU skill (`nvidia.model_inspection.visualize`) against local tool availability.
-- Canonical host target detection (`detect_host_execution_target()`) established at ADR-0005 boundary.
-- Explicit discovery authority transition (`promote_discovered_skill()`) prohibits candidates from overwriting authoritative registry entries.
-- CLI presentation flag `--list-skills` prints a formatted skill catalog and operational availability table.
+Phase 4 (DISCOVER / DEFINE Workflow, Issue #70 / PR #71) final blocker B26 remediated on `feature/ajmunna/phase-4-discover-define-workflow`:
+- B26 Remediated: `operational_definition` is strictly enforced as part of deterministic pre-DEFINE completeness check (`CANONICAL_OPERATIONAL_DIMENSIONS`, `find_missing_operational_dimensions`, `validate_define_preconditions`); adversarial test proves omitting `operational_definition` while supplying all other 7 dimensions blocks DEFINE entry and fails closed with `IncompleteCharacterizationError` even when mock LLM claims completeness.
+- B27 Discharged: Lossless round-trip serialization/deserialization of typed `CapabilityIntent` in `GitProjectMemory`.
+- B28 Discharged: Zero fabricated hardware defaults; unknown facts remain `None` / `()`.
+- 5 Exit Gates & 6 Adversarial Scenarios verified (17 tests in `tests/test_discover_define_phase4_exit.py`).
 
 Repository quality gates:
-- 674/674 total tests passing across 25 test suites with zero regressions.
-- Static analysis clean: Ruff check clean, Ruff format clean, Mypy clean across 119 source files, Git diff check clean.
-- PR #69 closed and merged; Issue #68 closed; working tree clean on `main`.
+- 691/691 total tests passing across 26 test suites with zero regressions.
+- Static analysis clean: Ruff check clean, Ruff format clean (195 source files), Mypy clean (0 issues across 120 source files), Git diff check clean.
 
 ## In flight
 
 | Item | Issue | PR | State |
 |---|---|---|---|
-| None | — | — | All Phase 3 deliverables accepted and merged on `main` |
+| Phase 4 DISCOVER / DEFINE Workflow | #70 | #71 | B26, B27, B28 remediated; 17 exit/adversarial tests passing; awaiting PM final acceptance |
 
 ## Next 3 actions
 
-1. Await Official PM scoping instruction for Phase 4 (Reasoning Subsystem, ADR-0008).
-2. Review ADR-0008 interfaces and requirements upon Phase 4 kickoff.
-3. Keep `main` clean and synchronized.
+1. Commit and push remediation branch to origin.
+2. Verify GitHub Actions CI matrix checks across Python 3.10–3.13.
+3. Submit remediation summary for Official PM final acceptance.
 
 ## Blockers
 
@@ -45,4 +35,4 @@ Repository quality gates:
 
 ## Scope guard
 
-Phase 3 is complete and merged. Do not begin Phase 4 implementation until explicitly scoped and authorized by the Official PM.
+Issue #70 is the sole authority. Strictly zero model selection/recommendation, dataset acquisition, training, evaluation, optimization, deployment, NVIDIA execution, or autonomous tool execution.

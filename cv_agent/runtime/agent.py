@@ -18,14 +18,24 @@ kept out of this class and belong in their respective modules.
 from __future__ import annotations
 
 import uuid
+from pathlib import Path
 from typing import Any
 
 from cv_agent.capabilities.registry import CapabilityRegistry
 from cv_agent.config.settings import AgentConfig, load_config
 from cv_agent.graph.builder import build_graph
 from cv_agent.graph.state import AgentState
+from cv_agent.llm import LLMGateway, create_gateway
 from cv_agent.llm.base import LLMProvider
 from cv_agent.llm.registry import get_provider
+from cv_agent.memory.service import GitProjectMemory
+from cv_agent.orchestration import (
+    DiscoverDefineGraphState,
+    ExecutionLease,
+    LifecycleStatus,
+    SQLiteOrchestrationStore,
+    create_discover_define_graph,
+)
 from cv_agent.skills import (
     CapabilityAvailabilitySummary,
     DefaultSkillResolver,
@@ -36,6 +46,7 @@ from cv_agent.skills import (
 )
 from cv_agent.tools import (
     ExecutionTargetDescriptor,
+    Phase4ExecutionBarrier,
     ToolRegistry,
     detect_host_execution_target,
 )
@@ -145,6 +156,78 @@ class CVAgent:
         graph_config = {"configurable": {"thread_id": sid}}
         result: AgentState = self._graph.invoke(initial_state, config=graph_config)
         return result
+
+    def run_discover_define(
+        self,
+        prompt: str,
+        *,
+        session_id: str | None = None,
+        human_answers: dict[str, str] | None = None,
+        store: SQLiteOrchestrationStore | None = None,
+        lease: ExecutionLease | None = None,
+        memory: GitProjectMemory | None = None,
+        llm_gateway: LLMGateway | None = None,
+        tool_barrier: Phase4ExecutionBarrier | None = None,
+        checkpointer: Any = None,
+        capability_registry: Any = None,
+    ) -> DiscoverDefineGraphState:
+        """Execute the DISCOVER / DEFINE workflow graph.
+
+        ADR-0003 owns all lifecycle transitions, thread checkpointing, and resumption.
+        CVAgent acts strictly as an orchestrator facade per PM Correction 2.
+        """
+        sid = session_id or str(uuid.uuid4())
+        tid = sid
+
+        # Resolve or instantiate persistence components
+        active_store = store
+        if active_store is None:
+            db_path = Path(".cv_agent") / "orchestration.db"
+            active_store = SQLiteOrchestrationStore(db_path)
+
+        active_lease = lease
+        if active_lease is None:
+            active_lease = active_store.acquire_lease(
+                session_id=sid, thread_id=tid, owner_instance_id="cv_agent_facade"
+            )
+
+        active_memory = memory or GitProjectMemory(Path("."))
+        active_barrier = tool_barrier or Phase4ExecutionBarrier()
+        active_gateway = llm_gateway or create_gateway(
+            self._config.llm.provider, self._config.llm.model
+        )
+        active_cap_registry = capability_registry or self._registry
+
+        graph = create_discover_define_graph(
+            store=active_store,
+            lease=active_lease,
+            memory=active_memory,
+            llm_gateway=active_gateway,
+            capability_registry=active_cap_registry,
+            checkpointer=checkpointer,
+            tool_barrier=active_barrier,
+        )
+
+        graph_config = {"configurable": {"thread_id": tid}}
+
+        if human_answers is not None:
+            graph.update_state(graph_config, {"human_answers": human_answers})
+            resumed_result: DiscoverDefineGraphState = graph.invoke(
+                None, config=graph_config
+            )
+            return resumed_result
+        else:
+            initial_state: DiscoverDefineGraphState = {
+                "session_id": sid,
+                "thread_id": tid,
+                "lifecycle_status": LifecycleStatus.INITIALIZING.value,
+                "user_prompt": prompt,
+                "human_answers": None,
+            }
+            initial_result: DiscoverDefineGraphState = graph.invoke(
+                initial_state, config=graph_config
+            )
+            return initial_result
 
     def health_check(self) -> dict[str, Any]:
         """Return a structured health summary."""
