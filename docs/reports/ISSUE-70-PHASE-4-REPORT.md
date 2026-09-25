@@ -1,6 +1,6 @@
 # Issue #70 — Phase 4: DISCOVER / DEFINE Workflow Report
 
-**Date:** 2026-09-24<br>
+**Date:** 2026-09-25<br>
 **Branch:** `feature/ajmunna/phase-4-discover-define-workflow`<br>
 **Issue:** [Issue #70](https://github.com/iam-ajmunna/CV-Agent-Platform/issues/70)<br>
 **Authoritative Contracts:** Frozen `ADR-0008`, `ADR-0003`, `ADR-0001`, `ADR-0004`, `[P§5]`, `[P§30]`, `[P§29.1]`, `[P§29.4]`, `[P§34]`<br>
@@ -92,16 +92,20 @@ The test suite in `tests/test_discover_define_phase4_exit.py` exercises 11 focus
     - Verifies syntactically valid but unregistered/synthetic `CapabilityId` (`cv.synthetic.unregistered_vision_capability`) causes DEFINE to fail closed with `DomainValidationError` before project memory publication.
 14. **`test_adversarial_b28_define_does_not_fabricate_hardware_defaults`**:
     - Verifies unspecified hardware properties remain `None` / `()` without hallucinating defaults from product strings like `"jetson"`.
+15. **`test_adversarial_b26_mock_llm_false_complete_fails_closed`**:
+    - Verifies that when a mock LLM falsely claims zero unresolved dimensions with only 2 dimensions answered, the workflow deterministically evaluates accumulated evidence, rejects the false completeness claim, remains in `PAUSED` state (`needs_elicitation=True`), and does not enter DEFINE.
+16. **`test_b27_capability_intent_lossless_round_trip`**:
+    - Verifies lossless, deterministic round-trip serialization and deserialization of typed `CapabilityIntent` across `capability_id`, `intent_description`, nested `parameter_intent` (primitives, lists/tuples, nested dicts), and `target_preference` in `GitProjectMemory`.
 
 ---
 
-## 5. Official PM Review Remediation (B26, B27, B28)
+## 5. Official PM Review & Re-Review Remediation (B26, B27, B28)
 
-| Finding | Architectural Blocker | Root Cause & Resolution |
-|---|---|---|
-| **B26** | **Partial human input bypassed DISCOVER** | Truthy check on `human_answers` in `node_discover` bypassed elicitation. Resolved by maintaining `accumulated_answers` in state and re-invoking `ElicitationNode`. If unresolved dimensions remain, graph triggers new `OperationalInquiry` and pauses again until all dimensions are characterized. |
-| **B27** | **CapabilityIntent dropped & unvalidated** | `TaskDecompositionNode` generated intents were dropped before memory commit and unvalidated against registry. Resolved by validating every `capability_id` against authoritative `CapabilityRegistry` (fail closed on synthetic IDs before memory write) and preserving intents on `ProjectSpecification` / `project_spec.md`. |
-| **B28** | **Fabricated hardware facts from "jetson"** | `node_define()` manufactured VRAM (16GB), RAM (32GB), power (60W), and precisions from `"jetson"` substring. Resolved by removing all fabricated defaults: unestablished hardware properties strictly remain `None` / `()`. |
+| Finding | Architectural Blocker | Root Cause & Resolution | Status |
+|---|---|---|---|
+| **B26** | **LLM as completeness authority / premature bypass** | Initially, `node_discover` relied on LLM-reported `unresolved_dimensions` and truthy answers. Remediation implemented deterministic check `find_missing_operational_dimensions()` from accumulated evidence across all canonical dimensions (`camera_infrastructure`, `physical_environment`, `target_hardware`, `error_tolerance`, `data_availability`, `intervention_modality`, `latency_budget_ms`/`throughput_fps`). Workflow fails closed (`needs_elicitation=True`, `PAUSED`, `IncompleteCharacterizationError` barrier) if evidence is incomplete, regardless of LLM assertions. | **DISCHARGED** |
+| **B27** | **Lossy CapabilityIntent persistence** | `CapabilityIntent` was previously serialized with only ID and description, dropping `target_preference` and clearing `parameter_intent` on reload. Remediation implemented structured Markdown block serialization (`### {capability_id}`) with inline JSON for `parameter_intent` (handled via recursive `_to_json_serializable`) and explicit `target_preference`. Verified by 100% round-trip equality test. | **DISCHARGED** |
+| **B28** | **Fabricated hardware facts from "jetson"** | `node_define()` previously manufactured VRAM (16GB), RAM (32GB), power (60W), and precisions from substring. Remediation removed all fabricated defaults; unestablished properties strictly remain `None` / `()`. | **DISCHARGED (PM Verified)** |
 
 ---
 
@@ -110,12 +114,12 @@ The test suite in `tests/test_discover_define_phase4_exit.py` exercises 11 focus
 ```text
 ============================= test session starts ==============================
 platform darwin -- Python 3.13.7, pytest-9.1.1, pluggy-1.6.0
-collected 688 items
-688 passed in 6.20s
-============================= 688 passed in 6.20s ==============================
+collected 690 items
+690 passed in 6.07s
+============================= 690 passed in 6.07s ==============================
 ```
 
-- **Pytest:** 688/688 tests passing across 26 test suites (0 regressions).
+- **Pytest:** 690/690 tests passing across 26 test suites (0 regressions).
 - **Ruff Check:** Clean (0 errors).
 - **Ruff Format:** Clean across 195 source files.
 - **Mypy:** Clean (0 issues across 120 source files).

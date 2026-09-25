@@ -1156,3 +1156,181 @@ def test_adversarial_b28_define_does_not_fabricate_hardware_defaults(
     assert hw.power_budget_watts is None  # NOT 60.0!
     assert hw.supported_precisions == ()  # NOT ("fp32", "fp16", "int8")!
     assert hw.latency_ceiling_ms == 100.0
+
+
+def test_adversarial_b26_mock_llm_false_complete_fails_closed(
+    tmp_path: Path,
+    mock_prison_elicitation_response: dict[str, Any],
+) -> None:
+    """Adversarial B26: Mock LLM falsely reports zero unresolved dimensions with only 2 answers provided.
+
+    The workflow must deterministically fail closed from accumulated authoritative
+    evidence and must NOT enter DEFINE.
+    """
+    db_path = tmp_path / "orchestration.db"
+    store = SQLiteOrchestrationStore(db_path)
+    session_id = "session-prison-b26-adversarial"
+    lease = store.acquire_lease(session_id, session_id, "test-runner")
+    workspace = tmp_path / "workspace"
+    memory = GitProjectMemory(workspace)
+    checkpointer = SQLiteLangGraphCheckpointer(str(db_path))
+
+    # LLM hallucinates/falsely asserts that elicitation is complete
+    mock_llm_falsely_complete_response = {
+        "inquiry_id": "inq-fake-complete",
+        "unresolved_dimensions": [],  # False negative!
+        "targeted_questions": [],  # False negative!
+        "context_summary": "LLM falsely claims operational characterization is fully resolved.",
+        "assumptions_and_risks": [],
+    }
+
+    gateway, _ = _setup_test_gateway(
+        [
+            mock_prison_elicitation_response,
+            mock_llm_falsely_complete_response,
+        ]
+    )
+
+    graph = create_discover_define_graph(
+        store=store,
+        lease=lease,
+        memory=memory,
+        llm_gateway=gateway,
+        checkpointer=checkpointer,
+    )
+    config = {"configurable": {"thread_id": session_id}}
+
+    # Turn 1: Initial prompt -> 8 unresolved dimensions -> PAUSED
+    turn1 = graph.invoke(
+        {
+            "session_id": session_id,
+            "thread_id": session_id,
+            "lifecycle_status": LifecycleStatus.INITIALIZING.value,
+            "user_prompt": "I have a prison project — escape-attempt detection",
+        },
+        config=config,
+    )
+    assert turn1["lifecycle_status"] == LifecycleStatus.PAUSED.value
+    assert len(turn1["operational_inquiry"]["unresolved_dimensions"]) == 8
+
+    # Turn 2: User provides only 2 answers (target_hardware, latency_budget_ms)
+    # The mock LLM returns mock_llm_falsely_complete_response (unresolved_dimensions=[], targeted_questions=[])
+    partial_answers = {
+        "target_hardware": "NVIDIA Jetson AGX Orin 64GB",
+        "latency_budget_ms": "100.0",
+    }
+    graph.update_state(config, {"human_answers": partial_answers})
+    turn2 = graph.invoke(None, config=config)
+
+    # Invariant verified: Workflow deterministically checks accumulated evidence, rejects LLM claim,
+    # does NOT enter DEFINE, and remains PAUSED awaiting human operational input.
+    assert turn2["lifecycle_status"] == LifecycleStatus.PAUSED.value
+    assert store.get_lifecycle_status(session_id) == LifecycleStatus.PAUSED
+    assert turn2["needs_elicitation"] is True
+    # At least 5 canonical dimensions are missing (camera_infrastructure, physical_environment, error_tolerance, data_availability, intervention_modality)
+    assert len(turn2["operational_inquiry"]["unresolved_dimensions"]) >= 5
+    assert len(turn2["operational_inquiry"]["targeted_questions"]) >= 5
+    assert turn2.get("project_spec_committed") is not True
+    assert memory.get_project_specification() is None
+
+
+def test_b27_capability_intent_lossless_round_trip(tmp_path: Path) -> None:
+    """B27: Complete typed CapabilityIntent serialization/deserialization is lossless and deterministic.
+
+    Verifies round-trip equality across capability_id, intent_description,
+    parameter_intent (including nested structures and booleans/integers),
+    and target_preference (both specified and None).
+    """
+    workspace = tmp_path / "workspace"
+    memory = GitProjectMemory(workspace)
+
+    char = ProblemCharacterization(
+        task_type="escape_attempt_detection",
+        target_hardware="NVIDIA Jetson AGX Orin 64GB",
+        operational_definition="Detect fence breaches within 300ms",
+        physical_environment="Outdoor perimeter fence line",
+        camera_infrastructure="CCTV 1080p 30fps",
+        error_tolerance="Zero missed breaches",
+        data_availability="50 hours annotated video",
+        intervention_modality="Real-time alarm",
+        latency_budget_ms=100.0,
+        throughput_fps=30.0,
+    )
+
+    dag = CVTaskDecompositionDAG(
+        tasks=(
+            TaskNode(
+                task_id="t1",
+                task_type="object_detection",
+                description="Detect humans near perimeter",
+            ),
+        )
+    )
+
+    hw = HardwareConstraints(
+        target_device="NVIDIA Jetson AGX Orin 64GB",
+        latency_ceiling_ms=100.0,
+    )
+
+    # CapabilityIntents covering all 4 fields:
+    # 1. Populated parameter_intent with nested dict/list/bool/int and explicit target_preference
+    # 2. Empty parameter_intent and None target_preference
+    cap1 = CapabilityIntent(
+        capability_id=CapabilityId("cv.requirements.analysis"),
+        intent_description="Analyze operational requirements against edge hardware ceilings",
+        parameter_intent={
+            "model_family": "detection",
+            "batch_size": 16,
+            "fp16": True,
+            "nested_config": {"threshold": 0.75, "classes": ["person", "vehicle"]},
+        },
+        target_preference="remote_gpu",
+    )
+    cap2 = CapabilityIntent(
+        capability_id=CapabilityId("cv.problem.formulation"),
+        intent_description="Formulate multi-stage vision pipeline for perimeter monitoring",
+        parameter_intent={},
+        target_preference=None,
+    )
+
+    spec = ProjectSpecification(
+        characterization=char,
+        decomposition=dag,
+        hardware_constraints=hw,
+        capability_intents=(cap1, cap2),
+        architectural_choices=(),
+        dataset_lineage_notes="Authoritative baseline test dataset.",
+    )
+
+    # 1. Commit specification to GitProjectMemory
+    memory.commit_project_specification(spec)
+
+    # 2. Reload specification from disk
+    reloaded = memory.get_project_specification()
+    assert reloaded is not None
+
+    # 3. Assert full tuple equality
+    assert reloaded.capability_intents == spec.capability_intents
+
+    # 4. Assert individual typed field equality
+    assert len(reloaded.capability_intents) == 2
+    for orig, loaded in zip(spec.capability_intents, reloaded.capability_intents):
+        assert loaded.capability_id == orig.capability_id
+        assert loaded.intent_description == orig.intent_description
+        assert loaded.parameter_intent == orig.parameter_intent
+        assert loaded.target_preference == orig.target_preference
+
+    # Specific checks on cap1
+    loaded_cap1 = reloaded.capability_intents[0]
+    assert loaded_cap1.target_preference == "remote_gpu"
+    assert loaded_cap1.parameter_intent["batch_size"] == 16
+    assert loaded_cap1.parameter_intent["fp16"] is True
+    assert loaded_cap1.parameter_intent["nested_config"]["classes"] == (
+        "person",
+        "vehicle",
+    )  # type: ignore[index]
+
+    # Specific checks on cap2
+    loaded_cap2 = reloaded.capability_intents[1]
+    assert loaded_cap2.target_preference is None
+    assert loaded_cap2.parameter_intent == {}

@@ -10,6 +10,7 @@ Implements Phase 4 DISCOVER / DEFINE Workflow per Issue #70:
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 from langgraph.graph import END, START, StateGraph
@@ -61,6 +62,48 @@ class DiscoverDefineGraphState(TypedDict, total=False):
     needs_elicitation: bool
     project_spec_committed: bool
     error: str | None
+
+
+CANONICAL_OPERATIONAL_DIMENSIONS: tuple[str, ...] = (
+    "camera_infrastructure",
+    "physical_environment",
+    "target_hardware",
+    "error_tolerance",
+    "data_availability",
+    "intervention_modality",
+)
+
+
+def find_missing_operational_dimensions(
+    accumulated_answers: Mapping[str, Any],
+    user_prompt: str = "",
+) -> list[str]:
+    """Deterministically evaluate canonical operational dimension completeness [P§5], [P§30].
+
+    Prevents model hallucination or false-negative LLM completeness reports
+    from prematurely bypassing the DISCOVER stage before authoritative operational
+    characterization is established.
+    """
+    missing: list[str] = []
+
+    for dim in CANONICAL_OPERATIONAL_DIMENSIONS:
+        val = accumulated_answers.get(dim)
+        if val is None or not str(val).strip():
+            missing.append(dim)
+
+    # Timing / performance ceiling constraint (at least one of latency or throughput)
+    has_latency = bool(
+        accumulated_answers.get("latency_budget_ms")
+        and str(accumulated_answers["latency_budget_ms"]).strip()
+    )
+    has_throughput = bool(
+        accumulated_answers.get("throughput_fps")
+        and str(accumulated_answers["throughput_fps"]).strip()
+    )
+    if not has_latency and not has_throughput:
+        missing.append("latency_budget_ms")
+
+    return missing
 
 
 def create_discover_define_graph(
@@ -128,23 +171,39 @@ def create_discover_define_graph(
         for q in inquiry.targeted_questions:
             assert_zero_prohibited_models(q, "OperationalInquiry.targeted_questions")
 
+        # Deterministic canonical-dimension completeness check from accumulated evidence (B26)
+        missing_deterministic = find_missing_operational_dimensions(
+            accumulated, user_prompt
+        )
+        combined_unresolved: list[str] = list(inquiry.unresolved_dimensions)
+        for dim in missing_deterministic:
+            if dim not in combined_unresolved:
+                combined_unresolved.append(dim)
+
+        combined_questions: list[str] = list(inquiry.targeted_questions)
+        if missing_deterministic and not combined_questions:
+            combined_questions = [
+                f"What are the operational constraints and specifications for {dim.replace('_', ' ')}?"
+                for dim in missing_deterministic
+            ]
+
         # If characterization is incomplete, ask operational questions & PAUSE
-        if inquiry.targeted_questions or inquiry.unresolved_dimensions:
+        if combined_questions or combined_unresolved:
             new_status, _ = store.transition_lifecycle(
                 lease.session_id,
                 LifecycleStatus.PAUSED,
                 "awaiting_human_operational_input",
                 {
                     "inquiry_id": inquiry.inquiry_id,
-                    "unresolved_dimensions": list(inquiry.unresolved_dimensions),
-                    "question_count": len(inquiry.targeted_questions),
+                    "unresolved_dimensions": combined_unresolved,
+                    "question_count": len(combined_questions),
                 },
                 lease,
             )
             inquiry_dict = {
                 "inquiry_id": inquiry.inquiry_id,
-                "unresolved_dimensions": list(inquiry.unresolved_dimensions),
-                "targeted_questions": list(inquiry.targeted_questions),
+                "unresolved_dimensions": combined_unresolved,
+                "targeted_questions": combined_questions,
                 "context_summary": inquiry.context_summary,
                 "assumptions_and_risks": list(inquiry.assumptions_and_risks),
             }
@@ -165,6 +224,10 @@ def create_discover_define_graph(
 
     def route_after_discover(state: DiscoverDefineGraphState) -> str:
         if state.get("needs_elicitation", False):
+            return "await_human_input"
+        accumulated = state.get("accumulated_answers") or {}
+        user_prompt = state.get("user_prompt", "")
+        if find_missing_operational_dimensions(accumulated, user_prompt):
             return "await_human_input"
         return "define"
 
@@ -213,7 +276,15 @@ def create_discover_define_graph(
         if new_answers:
             accumulated.update(new_answers)
 
+        # Defense-in-depth: fail closed if mandatory dimensions are missing from accumulated evidence
+        missing_dims = find_missing_operational_dimensions(accumulated, user_prompt)
+        if missing_dims:
+            raise IncompleteCharacterizationError(
+                f"Cannot enter DEFINE: missing mandatory operational dimensions from accumulated evidence: {missing_dims}"
+            )
+
         # 1. Synthesize complete ProblemCharacterization via ProblemFramingNode
+
         framing_node = ProblemFramingNode(llm_gateway)
         context = ReasoningContext.create(
             current_hop=1,

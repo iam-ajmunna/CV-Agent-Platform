@@ -20,7 +20,6 @@ from types import MappingProxyType
 from typing import Any, NewType
 
 from cv_agent.domain.identifiers import CapabilityId
-from cv_agent.reasoning.errors import PrematureModelSelectionError
 
 # --- Decision Identification (ADR-0008, Gate M1/I1) ---
 
@@ -322,6 +321,8 @@ def assert_zero_prohibited_models(text: str, context_label: str = "output") -> N
     for term in _PROHIBITED_MODEL_TERMS:
         pattern = r"\b" + re.escape(term) + r"\b"
         if re.search(pattern, lower):
+            from cv_agent.reasoning.errors import PrematureModelSelectionError
+
             raise PrematureModelSelectionError(
                 f"Premature model architecture {term!r} detected in {context_label} "
                 f"prior to complete operational characterization [P§29.1], [P§31]"

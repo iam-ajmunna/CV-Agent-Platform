@@ -12,6 +12,7 @@ Enforces symlink-aware workspace containment and canonical serialization.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -34,7 +35,6 @@ from cv_agent.reasoning.contracts import (
     TaskNode,
     assert_zero_prohibited_models,
 )
-from cv_agent.reasoning.errors import MemoryTransactionValidationError
 
 
 class WorkspaceContainmentError(ProjectMemoryError):
@@ -43,6 +43,15 @@ class WorkspaceContainmentError(ProjectMemoryError):
 
 class ProjectMemoryFormatError(ProjectMemoryError):
     """Raised when structured memory files violate canonical schema."""
+
+
+def _to_json_serializable(val: Any) -> Any:
+    """Recursively convert mappingproxy, mappings, and sequences to JSON-serializable types."""
+    if hasattr(val, "items"):
+        return {str(k): _to_json_serializable(v) for k, v in val.items()}
+    if isinstance(val, (list, tuple, set, frozenset)):
+        return [_to_json_serializable(v) for v in val]
+    return val
 
 
 class GitProjectMemory(ProjectMemoryReader, ProjectMemoryWriter):
@@ -500,14 +509,23 @@ class GitProjectMemory(ProjectMemoryReader, ProjectMemoryWriter):
                 ]
             )
         if hasattr(spec, "capability_intents") and spec.capability_intents:
-            lines.extend(
-                [
-                    "## Required Capabilities",
-                ]
-            )
+            lines.extend(["## Required Capabilities", ""])
             for ci in spec.capability_intents:
-                lines.append(f"- **{ci.capability_id}:** {ci.intent_description}")
-            lines.append("")
+                target_pref_str = (
+                    ci.target_preference if ci.target_preference else "none"
+                )
+                param_str = json.dumps(
+                    _to_json_serializable(ci.parameter_intent), sort_keys=True
+                )
+                lines.extend(
+                    [
+                        f"### {ci.capability_id}",
+                        f"- **intent_description:** {ci.intent_description}",
+                        f"- **target_preference:** {target_pref_str}",
+                        f"- **parameter_intent:** {param_str}",
+                        "",
+                    ]
+                )
         if spec.dataset_lineage_notes:
             lines.extend(
                 [
@@ -528,6 +546,8 @@ class GitProjectMemory(ProjectMemoryReader, ProjectMemoryWriter):
         4. Prohibited models check across all characterization, tasks, and choices.
         5. Atomic multi-file write with transactional rollback on failure.
         """
+        from cv_agent.reasoning.errors import MemoryTransactionValidationError
+
         # Validation 1: Characterization completeness
         if not spec.characterization or not spec.characterization.is_well_formed:
             raise MemoryTransactionValidationError(
@@ -707,9 +727,25 @@ class GitProjectMemory(ProjectMemoryReader, ProjectMemoryWriter):
         if not raw.strip() or raw.strip() == "# Project Spec":
             return None
 
-        # Parse Problem Characterization block
-        props: dict[str, str] = {}
+        # Split into sections by top-level ## headers
+        sections: dict[str, str] = {}
+        current_section = ""
+        current_lines: list[str] = []
         for line in raw.splitlines():
+            if line.startswith("## "):
+                if current_section:
+                    sections[current_section] = "\n".join(current_lines)
+                current_section = line[3:].strip()
+                current_lines = []
+            elif current_section:
+                current_lines.append(line)
+        if current_section:
+            sections[current_section] = "\n".join(current_lines)
+
+        # Parse Problem Characterization section
+        char_raw = sections.get("Problem Characterization", "")
+        props: dict[str, str] = {}
+        for line in char_raw.splitlines():
             if line.startswith("- **") and ":** " in line:
                 k, v = line[4:].split(":** ", 1)
                 props[k.strip().lower()] = v.strip()
@@ -734,55 +770,63 @@ class GitProjectMemory(ProjectMemoryReader, ProjectMemoryWriter):
             throughput_fps=fps_val,
         )
 
+        # Parse CV Task DAG Decomposition section
+        dag_raw = (
+            sections.get("CV Task Decomposition")
+            or sections.get("CV Task DAG Decomposition")
+            or ""
+        )
         tasks: list[TaskNode] = []
-        for block in raw.split("\n### ")[1:]:
-            lines = block.splitlines()
-            if not lines:
-                continue
-            header = lines[0].strip()
-            if " — " in header:
-                tid, ttype = header.split(" — ", 1)
-            else:
-                tid, ttype = header, "object_detection"
-            tid = tid.strip()
-            ttype = ttype.strip()
+        if "### " in dag_raw:
+            for block in dag_raw.split("### "):
+                block = block.strip()
+                if not block:
+                    continue
+                lines = block.splitlines()
+                header = lines[0].strip()
+                if " — " in header:
+                    tid, ttype = header.split(" — ", 1)
+                else:
+                    tid, ttype = header, "object_detection"
+                tid = tid.strip()
+                ttype = ttype.strip()
 
-            t_props: dict[str, str] = {}
-            for line in lines[1:]:
-                if line.startswith("- **") and ":** " in line:
-                    k, v = line[4:].split(":** ", 1)
-                    t_props[k.strip().lower()] = v.strip()
+                t_props: dict[str, str] = {}
+                for line in lines[1:]:
+                    if line.startswith("- **") and ":** " in line:
+                        k, v = line[4:].split(":** ", 1)
+                        t_props[k.strip().lower()] = v.strip()
 
-            tdesc = t_props.get("description", "")
-            deps_raw = t_props.get("dependencies", "")
-            deps = (
-                ()
-                if deps_raw in ("", "none")
-                else tuple(x.strip() for x in deps_raw.split(","))
-            )
-            inputs_raw = t_props.get("inputs", "")
-            inputs = (
-                ()
-                if inputs_raw in ("", "none")
-                else tuple(x.strip() for x in inputs_raw.split(","))
-            )
-            outputs_raw = t_props.get("outputs", "")
-            outputs = (
-                ()
-                if outputs_raw in ("", "none")
-                else tuple(x.strip() for x in outputs_raw.split(","))
-            )
-
-            tasks.append(
-                TaskNode(
-                    task_id=tid,
-                    task_type=ttype,
-                    description=tdesc,
-                    dependencies=deps,
-                    inputs=inputs,
-                    outputs=outputs,
+                tdesc = t_props.get("description", "")
+                deps_raw = t_props.get("dependencies", "")
+                deps = (
+                    ()
+                    if deps_raw in ("", "none")
+                    else tuple(x.strip() for x in deps_raw.split(","))
                 )
-            )
+                inputs_raw = t_props.get("inputs", "")
+                inputs = (
+                    ()
+                    if inputs_raw in ("", "none")
+                    else tuple(x.strip() for x in inputs_raw.split(","))
+                )
+                outputs_raw = t_props.get("outputs", "")
+                outputs = (
+                    ()
+                    if outputs_raw in ("", "none")
+                    else tuple(x.strip() for x in outputs_raw.split(","))
+                )
+
+                tasks.append(
+                    TaskNode(
+                        task_id=tid,
+                        task_type=ttype,
+                        description=tdesc,
+                        dependencies=deps,
+                        inputs=inputs,
+                        outputs=outputs,
+                    )
+                )
 
         if not tasks:
             return None
@@ -793,21 +837,58 @@ class GitProjectMemory(ProjectMemoryReader, ProjectMemoryWriter):
             return None
         arch = self.get_architectural_decisions()
 
-        # Parse Required Capabilities
+        # Parse Required Capabilities section (lossless round-trip per B27)
+        cap_raw = sections.get("Required Capabilities", "")
         intents: list[CapabilityIntent] = []
-        if "\n## Required Capabilities\n" in raw:
-            cap_section = raw.split("\n## Required Capabilities\n", 1)[1]
-            cap_block = cap_section.split("\n## ")[0]
-            for line in cap_block.splitlines():
-                if line.startswith("- **") and ":** " in line:
-                    cid_str, idesc = line[4:].split(":** ", 1)
+        if cap_raw:
+            if "### " in cap_raw:
+                for block in cap_raw.split("### "):
+                    block = block.strip()
+                    if not block:
+                        continue
+                    block_lines = block.splitlines()
+                    cid_str = block_lines[0].strip()
+                    if not cid_str:
+                        continue
+                    props_c: dict[str, str] = {}
+                    for line in block_lines[1:]:
+                        if line.startswith("- **") and ":** " in line:
+                            k, v = line[4:].split(":** ", 1)
+                            props_c[k.strip().lower()] = v.strip()
+                    idesc = props_c.get("intent_description", "")
+                    target_pref_raw = props_c.get("target_preference", "none")
+                    target_pref = (
+                        None
+                        if target_pref_raw in ("none", "", "null")
+                        else target_pref_raw
+                    )
+                    param_raw = props_c.get("parameter_intent", "{}")
+                    try:
+                        param_dict = json.loads(param_raw) if param_raw else {}
+                    except json.JSONDecodeError:
+                        param_dict = {}
                     intents.append(
                         CapabilityIntent(
-                            capability_id=CapabilityId(cid_str.strip()),
-                            intent_description=idesc.strip(),
-                            parameter_intent={},
+                            capability_id=CapabilityId(cid_str),
+                            intent_description=idesc,
+                            parameter_intent=param_dict,
+                            target_preference=target_pref,
                         )
                     )
+            else:
+                for line in cap_raw.splitlines():
+                    if line.startswith("- **") and ":** " in line:
+                        cid_str, idesc = line[4:].split(":** ", 1)
+                        intents.append(
+                            CapabilityIntent(
+                                capability_id=CapabilityId(cid_str.strip()),
+                                intent_description=idesc.strip(),
+                                parameter_intent={},
+                                target_preference=None,
+                            )
+                        )
+
+        dataset_notes = sections.get("Dataset Lineage Notes", "").strip()
 
         return ProjectSpecification(
             characterization=char,
@@ -815,4 +896,5 @@ class GitProjectMemory(ProjectMemoryReader, ProjectMemoryWriter):
             hardware_constraints=hw,
             capability_intents=tuple(intents),
             architectural_choices=arch,
+            dataset_lineage_notes=dataset_notes,
         )

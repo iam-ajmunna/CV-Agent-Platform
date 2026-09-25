@@ -2258,3 +2258,22 @@ Remediated all three architectural blockers identified in the Official PM's seco
 **Learned:** In multi-turn human-in-the-loop workflows, routing human answers back through the elicitation/reasoning node with an accumulated evidence state guarantees convergence without manual state-checking heuristics, allowing the model reasoning loop to naturally determine whether characterization is complete across all required operational dimensions.
 
 **Left open:** PR #71 updated with remediation commits, awaiting Official PM re-review.
+
+---
+
+## 2026-09-25 — Phase 4: Remediated PM Re-Review Findings B26, B27 & Provenance Sync on PR #71 (D-068, Issue #70)
+
+**Did:** Addressed all findings from Official PM Re-Review of PR #71 (`feature/ajmunna/phase-4-discover-define-workflow`):
+1. **B26 (Deterministic Completeness Checking before DEFINE):** Removed the cognitive LLM as the sole completeness authority during operational elicitation. Implemented `find_missing_operational_dimensions()` in `cv_agent/orchestration/discover_define.py`, which deterministically inspects accumulated authoritative evidence against the canonical operational dimensions (`camera_infrastructure`, `physical_environment`, `target_hardware`, `error_tolerance`, `data_availability`, `intervention_modality`, plus `latency_budget_ms`/`throughput_fps`). Updated `node_discover` to merge missing dimensions into `unresolved_dimensions` and synthesize questions if the LLM falsely claims completeness, pausing the workflow in `PAUSED` state with `needs_elicitation = True`. Added route guard in `route_after_discover` and defense-in-depth pre-framing assertion in `node_define` raising `IncompleteCharacterizationError` if mandatory dimensions are missing. Added adversarial test `test_adversarial_b26_mock_llm_false_complete_fails_closed` proving the workflow fails closed and does NOT enter DEFINE when a mock LLM falsely claims complete elicitation with only 2 answers provided.
+2. **B27 (Lossless CapabilityIntent Persistence & Round-Trip Equality):** Fixed lossy persistence in `GitProjectMemory`. Updated `_format_project_spec_markdown()` to serialize complete typed `CapabilityIntent` blocks with `### {capability_id}`, `intent_description`, `target_preference` (`none` if None), and `parameter_intent` JSON string via recursive `_to_json_serializable()` handling nested `mappingproxy` and `tuple` domains. Updated `get_project_specification()` to parse by document sections (`## `) and decode `parameter_intent` JSON and `target_preference` accurately. Added round-trip equality test `test_b27_capability_intent_lossless_round_trip` asserting exact equality (`orig == reloaded`) across `capability_id`, `intent_description`, nested `parameter_intent`, and `target_preference`.
+3. **Circular Import Remediation:** Eliminated circular import hazards between `cv_agent.reasoning` and `cv_agent.memory` by moving `PrematureModelSelectionError` import locally into `assert_zero_prohibited_models` and `MemoryTransactionValidationError` import locally into `commit_project_specification`.
+4. **Provenance Sync:** Corrected commit provenance tracking to strictly reference the true 40-character SHA (`b1095a0862499133ee2f9adc010e654c95caa2fe`) obtained via `git rev-parse HEAD`.
+5. **Acceptance & Regression Gates:** All 16 exit and adversarial tests in `tests/test_discover_define_phase4_exit.py` pass. Full repository test suite: 690/690 tests passing across 26 suites with zero regressions. All static analysis gates clean (Ruff check clean, Ruff format clean across 195 source files, Mypy clean across 120 files, `git diff --check` clean).
+
+**Why:** Enforces `[P§5]`, `[P§6]`, `[P§19]`, `[P§20]`, `[P§21]`, `[P§24]`, `[P§29.1]`, `[P§29.4]`, `[P§30]`, `[P§34]`, and resolves Official PM Re-Review findings B26 and B27 on PR #71.
+
+**Broke:** Nothing broken. 690/690 repository tests pass.
+
+**Learned:** In multi-turn elicitation workflows, cognitive model reasoning must always be bounded by deterministic schema-level completeness checkers. While the LLM proposes questions and contextual summaries, authoritative state machine progression (such as moving from DISCOVER to DEFINE) must strictly fail closed unless canonical dimensional completeness is deterministically verified from accumulated evidence.
+
+**Left open:** PR #71 updated with re-remediation commits, awaiting Official PM acceptance.
