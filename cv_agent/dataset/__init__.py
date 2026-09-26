@@ -18,6 +18,8 @@ from cv_agent.dataset.contracts import (
     SplitMembership,
 )
 from cv_agent.dataset.errors import (
+    BaselineEstablishmentError,
+    BaselineValidationError,
     DatasetApprovalRequiredError,
     DatasetError,
     DatasetNotFoundError,
@@ -69,6 +71,8 @@ from cv_agent.dataset.validation import (
 __all__ = [
     "AnnotationManifest",
     "AnnotationVersion",
+    "BaselineEstablishmentError",
+    "BaselineValidationError",
     "ClassDefinition",
     "CollectionConditions",
     "ContentHash",

@@ -17,7 +17,9 @@ def test_copied_package_loads_default_resources_outside_repository(
     """Removing sibling repo directories must not degrade the default runtime."""
     source_package = _REPO_ROOT / "cv_agent"
     target_package = tmp_path / "cv_agent"
-    shutil.copytree(source_package, target_package, ignore=shutil.ignore_patterns("__pycache__"))
+    shutil.copytree(
+        source_package, target_package, ignore=shutil.ignore_patterns("__pycache__")
+    )
 
     result = subprocess.run(
         [sys.executable, "-m", "cv_agent"],
@@ -45,7 +47,9 @@ def test_packaged_registry_matches_source_of_truth() -> None:
     different capability status (e.g. "available") than the source registry.
     """
     source = _REPO_ROOT / "spec" / "capability_registry.json"
-    packaged = _REPO_ROOT / "cv_agent" / "resources" / "spec" / "capability_registry.json"
+    packaged = (
+        _REPO_ROOT / "cv_agent" / "resources" / "spec" / "capability_registry.json"
+    )
     with open(source, encoding="utf-8") as fh:
         source_data = json.load(fh)
     with open(packaged, encoding="utf-8") as fh:

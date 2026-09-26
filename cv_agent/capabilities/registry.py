@@ -212,7 +212,8 @@ class CapabilityRegistry:
         cls,
         *,
         version: str = "1.0.0",
-        capabilities: tuple[CapabilityDefinition, ...] | Sequence[CapabilityDefinition] = (),
+        capabilities: tuple[CapabilityDefinition, ...]
+        | Sequence[CapabilityDefinition] = (),
         skill_bindings: tuple[SkillBinding, ...] | Sequence[SkillBinding] = (),
         tool_bindings: tuple[ToolBinding, ...] | Sequence[ToolBinding] = (),
         agent_bindings: tuple[AgentBinding, ...] | Sequence[AgentBinding] = (),

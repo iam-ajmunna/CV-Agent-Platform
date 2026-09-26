@@ -188,8 +188,7 @@ def get_provider(name: str, model: str) -> LegacyLLMProvider:
     if name not in _LEGACY_REGISTRY:
         available = ", ".join(sorted(_LEGACY_REGISTRY))
         raise ValueError(
-            f"Unknown LLM provider {name!r}. "
-            f"Registered providers: {available}"
+            f"Unknown LLM provider {name!r}. Registered providers: {available}"
         )
     cls = _LEGACY_REGISTRY[name]
     return cls(model=model)

@@ -131,3 +131,11 @@ class DatasetApprovalRequiredError(DatasetError):
         self.action = action
         self.dataset_id = dataset_id
         self.version = version
+
+
+class BaselineEstablishmentError(DatasetError):
+    """Base exception for dataset baseline establishment failures."""
+
+
+class BaselineValidationError(BaselineEstablishmentError):
+    """Raised when empirical baseline evidence, target, or timing violates invariants."""

@@ -2311,3 +2311,21 @@ Remediated all three architectural blockers identified in the Official PM's seco
 **Learned:** Strict operational characterization prior to model selection eliminates premature architecture commitments. Pairing LLM reasoning with deterministic pre-condition barriers ensures invariant enforcement cannot be degraded by stochastic generation.
 
 **Left open:** Phase 4 closed. `main` at `25e7748f992ff60766034e12e2b261f7b80c579b` is the authoritative baseline for subsequent phase scoping.
+---
+
+## 2026-09-26 — Phase 5 Data & Baseline Workflow Implementation (D-071, Issue #72)
+
+**Did:** Implemented the end-to-end dataset validation, 5-point split leakage auditing, on-target baseline evaluation, and atomic experiment ledger persistence workflow (`cv_agent/orchestration/data_baseline.py`):
+1. **Gate G1 (Dataset Versioning & Immutability):** Enforced payload root checksum verification (`verify_payload_root_checksum`) and write-once immutable registry publication (`DatasetRegistry.register`) raising `DatasetVersionConflictError` upon mutation attempts.
+2. **Gate G2 (Mandatory Leakage Gate):** Audited dataset splits across temporal and camera/site dimensions via `StandardLeakageAuditor`. Leaky splits fail closed immediately with `SplitLeakageError`, guaranteeing zero evaluation dispatch to ADR-0005 tools.
+3. **Gate G3 (Empirical Baseline Evaluation):** Coordinated ADR-0011 evaluation execution on named targets via ADR-0005 `ToolExecutor`. Mandated hardware-synchronized accelerator timing (`timing_synchronized=True`), empirical memory (`peak_vram_gb`), and empirical power (`power_watts_avg`), rejecting zero defaults and unsynchronized wall-clock measurements fail-closed.
+4. **Gate G4 (Ledger Integrity & Active Root Baseline):** Enforced atomic SQLite experiment ledger persistence (`SQLiteExperimentLedger.set_baseline`), requiring non-empty reproducibility hyperparameters per `[P§25]`. Guaranteed that failed evaluations leave zero active baselines and clean runs designate exactly one active root baseline (`baseline_id=None`).
+5. **Gate G5 (Acceptance & Boundary Tests):** Verified all 14 required adversarial test scenarios and 3 boundary invariant tests (zero direct subprocess/SSH execution, zero target synthesis, clean service delegation) in `tests/test_data_baseline_phase5_exit.py` (17/17 passing). Full repository test suite: 708/708 passing across 27 suites with zero regressions. All static analysis gates clean (Ruff check, Ruff format across 204 files, Mypy across 122 files, `git diff --check`).
+
+**Why:** Enforces `[P§7]`, `[P§12]`, `[P§13]`, `[P§21]`, `[P§22]`, `[P§24]`, `[P§25]`, `[P§26]`, `[P§29.2]`, `[P§29.4]`, `[P§34]`, and implements ROADMAP Phase 5 under Issue #72.
+
+**Broke:** Initial test doubles omitted `target_id` positional parameter in `ToolResult` and failed to populate mandatory non-empty hyperparameters in `ExperimentSpec`; corrected both to adhere strictly to ADR-0005 and ADR-0004 contracts.
+
+**Learned:** Hardware-synchronized timing and empirical power/memory measurements cannot be treated as optional telemetry; embedding them into the root baseline contract guarantees that accuracy without deployability cannot be published.
+
+**Left open:** Branch `feature/ajmunna/phase-5-data-baseline` ready for push and PR creation against `main` for Official PM review.
