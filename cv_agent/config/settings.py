@@ -43,6 +43,7 @@ _DEFAULT_REGISTRY_RESOURCE = resource_files("cv_agent").joinpath(
 )
 
 
+
 def _default_config_path() -> Path | Traversable:
     return (
         _DEFAULT_CONFIG_RESOURCE

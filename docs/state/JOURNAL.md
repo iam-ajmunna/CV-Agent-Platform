@@ -2329,3 +2329,37 @@ Remediated all three architectural blockers identified in the Official PM's seco
 **Learned:** Hardware-synchronized timing and empirical power/memory measurements cannot be treated as optional telemetry; embedding them into the root baseline contract guarantees that accuracy without deployability cannot be published.
 
 **Left open:** Branch `feature/ajmunna/phase-5-data-baseline` ready for push and PR creation against `main` for Official PM review.
+
+---
+
+## 2026-09-27 — Phase 5 PR #73 Official PM Review Hardening (B29, B30, B31 Remediation)
+
+**Did:** Remediated all three blockers (B29, B30, B31) identified in Official PM review on PR #73 and completed non-blocking cleanups:
+1. **Blocker B29 (Authoritative Ledger Provenance):**
+   - Eliminated target-name substring parsing for `ExecutionTarget`; enforced explicit, typed `ExecutionTarget` in `BaselineEstablishmentRequest`, failing closed with `BaselineValidationError` if missing.
+   - Eliminated git commit SHA repair/hashing; enforced authentic 40-character hex commit SHA from evaluation environment, failing closed on placeholder `"0"*40` or malformed hashes.
+   - Eliminated random seed defaulting to 42; enforced explicit integer seed from evaluation environment evidence.
+   - Eliminated manufactured `config_uri`, `config_hash`, and hyperparameters; enforced authoritative explicit declaration in `BaselineEstablishmentRequest` with strict format validation.
+2. **Blocker B30 (Atomic Baseline Publication Transaction):**
+   - Added `complete_and_set_baseline` method to `ExperimentLedger` protocol (`cv_agent/experiments/interfaces.py`).
+   - Implemented `complete_and_set_baseline` in `SQLiteExperimentLedger` (`cv_agent/experiments/ledger.py`) executing metric persistence, experiment completion, and `active_baselines` insertion within a single atomic SQLite transaction (`BEGIN IMMEDIATE ... COMMIT;`).
+   - Guaranteed full rollback upon relational conflict or incomplete metrics, preventing completed orphan baselines from existing without active designation.
+   - Integrated atomic call into `cv_agent/orchestration/data_baseline.py`.
+3. **Blocker B31 (Rejection of Upstream Placeholder Environment Telemetry):**
+   - Updated `DefaultEvaluationRunner._build_evaluation_result` to ingest authentic `environment` records emitted by execution tools.
+   - Enforced fail-closed validation in `establish_dataset_baseline` rejecting placeholder commit hashes (`"0"*40`), uncommitted git states (`git_is_dirty=True`), placeholder hardware (`"Target Hardware"`), and missing seeds (`seed=None`).
+4. **Non-blocking Cleanups & Adversarial Suite Expansion:**
+   - Reverted format-only modifications across 6 frozen files (`cv_agent/capabilities/registry.py`, `cv_agent/config/settings.py`, `cv_agent/llm/registry.py`, `docs/architecture/adr/ADR-0001-capability-model.md`, `tests/test_capabilities.py`, `tests/test_package_resources.py`).
+   - Expanded Phase 5 test suite with 9 new adversarial cases (Cases 15–23) in `tests/test_data_baseline_phase5_exit.py`: placeholder commit SHA rejection, invalid commit SHA rejection without repair, placeholder hardware rejection, missing seed rejection, dirty git rejection, missing execution target rejection, invalid config provenance rejection, empty hyperparameters rejection, and atomic publication transaction/rollback verification.
+5. **Quality Gates Verification:**
+   - 26/26 Phase 5 exit tests passing.
+   - 717/717 total repository tests passing across 27 suites with zero regressions.
+   - Static analysis clean: Ruff check clean, Ruff format clean, Mypy clean (121 source files), Git diff check clean.
+
+**Why:** Enforces ADR-0004 §2.4, ADR-0005, ADR-0011, `[P§25]`, `[P§29.4]`, and resolves Official PM review blockers B29, B30, and B31 on PR #73.
+
+**Broke:** Nothing. All 717 tests pass.
+
+**Learned:** Upstream evaluation runners must provide a mechanism for real execution tools to pass through authentic environment evidence rather than relying on synthetic defaults. Multi-step lifecycle operations that logically represent a single state transition (such as experiment completion and root baseline designation) must be bound into a single atomic database transaction to prevent split-brain state.
+
+**Left open:** Push remediated commit to `origin feature/ajmunna/phase-5-data-baseline`, verify green GitHub CI checks on PR #73, and report PR #73 + exact head SHA to Official PM for formal re-review.

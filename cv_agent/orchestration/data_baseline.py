@@ -16,7 +16,6 @@ Pipeline:
 
 from __future__ import annotations
 
-import hashlib
 import math
 import re
 from collections.abc import Mapping, Sequence
@@ -107,6 +106,10 @@ class BaselineEstablishmentRequest:
     target_id: TargetId | None
     tool_id: ToolId
     tool_executor: ToolExecutor
+    execution_target: ExecutionTarget
+    config_uri: str
+    config_hash: str
+    hyperparameters: Mapping[str, Any]
     dataset_registry: DatasetRegistry | None = None
     experiment_ledger: ExperimentLedger | None = None
     leakage_auditor: LeakageAuditor | None = None
@@ -415,27 +418,86 @@ def establish_dataset_baseline(
             "Empirical throughput measurement must be strictly positive."
         )
 
-    # 8. ADR-0004 Atomic Persistence & Root Baseline Designation (Gate G4)
+    # 8. ADR-0004 Authoritative Provenance Validation & Atomic Root Baseline Designation (Gate G4)
+    # Authoritative execution target validation per ADR-0004 §2.4.D (Zero substring guessing)
+    if request.execution_target is None or not isinstance(
+        request.execution_target, ExecutionTarget
+    ):
+        raise BaselineValidationError(
+            f"Invalid or missing execution_target: {request.execution_target!r}. "
+            "Authoritative ExecutionTarget must be explicitly declared; inferring from target names is strictly prohibited per ADR-0004."
+        )
+    exec_target = request.execution_target
+
+    # Authoritative config URI & hash validation per [P§25] (Zero manufactured configs)
+    if (
+        not request.config_uri
+        or not isinstance(request.config_uri, str)
+        or not request.config_uri.strip()
+    ):
+        raise BaselineValidationError(
+            "Missing or empty config_uri in BaselineEstablishmentRequest. "
+            "Manufactured placeholder configs are strictly prohibited per [P§25]."
+        )
+    if not request.config_hash or not re.match(
+        r"^[0-9a-fA-F]{64}$", request.config_hash
+    ):
+        raise BaselineValidationError(
+            f"Invalid or missing config_hash: {request.config_hash!r}. "
+            "Authoritative 64-character SHA-256 config hash is required per [P§25]."
+        )
+
+    # Authoritative hyperparameters validation per [P§25] (Zero manufactured hyperparameters)
+    if not request.hyperparameters or not isinstance(
+        request.hyperparameters, (dict, Mapping)
+    ):
+        raise BaselineValidationError(
+            "hyperparameters mapping in BaselineEstablishmentRequest must be a non-empty mapping. "
+            "Manufactured placeholder hyperparameters are strictly prohibited per [P§25]."
+        )
+
+    # Authoritative evaluation environment evidence validation per [P§25] (Zero placeholder/repaired evidence)
+    env = eval_result.environment
+    raw_sha = env.git_commit_sha
+    if (
+        not isinstance(raw_sha, str)
+        or not re.match(r"^[0-9a-fA-F]{40}$", raw_sha)
+        or raw_sha == "0" * 40
+    ):
+        raise BaselineValidationError(
+            f"Invalid or placeholder git_commit_sha in evaluation environment: {raw_sha!r}. "
+            "Authoritative 40-character commit SHA is required; placeholder or repaired hashes are strictly prohibited per [P§25]."
+        )
+    commit_sha = raw_sha
+
+    if env.git_is_dirty:
+        raise BaselineValidationError(
+            "Evaluation environment indicates uncommitted changes (git_is_dirty=True). "
+            "Clean git state is required to establish an authoritative baseline per [P§25]."
+        )
+
+    if not env.target_hardware or env.target_hardware in (
+        "Target Hardware",
+        "placeholder",
+    ):
+        raise BaselineValidationError(
+            f"Invalid or placeholder target_hardware in evaluation environment: {env.target_hardware!r}. "
+            "Authoritative hardware target description is required per [P§29.4]."
+        )
+
+    if env.seed is None or not isinstance(env.seed, int):
+        raise BaselineValidationError(
+            f"Missing or non-integer random seed in evaluation environment: {env.seed!r}. "
+            "Defaulting seed is strictly prohibited per [P§25]."
+        )
+    seed = env.seed
+
     ledger = request.experiment_ledger
     if ledger is None:
         ws_root = Path(request.workspace_root) if request.workspace_root else Path(".")
         ledger = SQLiteExperimentLedger(workspace_root=ws_root)
 
-    t_str = str(request.target_id).lower()
-    if "jetson" in t_str or "remote" in t_str or "edge" in t_str:
-        exec_target = ExecutionTarget.REMOTE_GPU
-    elif "cloud" in t_str:
-        exec_target = ExecutionTarget.CLOUD
-    else:
-        exec_target = ExecutionTarget.LOCAL_GPU
-
     req_names = tuple(str(m.metric.metric_id) for m in eval_result.quality_metrics)
-
-    raw_sha = eval_result.environment.git_commit_sha
-    if re.match(r"^[0-9a-fA-F]{40}$", raw_sha):
-        commit_sha = raw_sha
-    else:
-        commit_sha = hashlib.sha1(raw_sha.encode("utf-8")).hexdigest()
 
     spec = ExperimentSpec(
         name=f"baseline-{manifest.dataset_id}-{manifest.version}",
@@ -446,17 +508,13 @@ def establish_dataset_baseline(
         model_variant="baseline",
         commit_sha=commit_sha,
         dataset_version=str(manifest.version),
-        seed=eval_result.environment.seed or 42,
+        seed=seed,
         batch_size=bench.batch_size,
         input_resolution=model_art.input_resolution,
         precision=str(model_art.precision.value),
-        config_uri="configs/baseline.yaml",
-        config_hash=hashlib.sha256(b"baseline_config").hexdigest(),
-        hyperparameters={
-            "architecture": model_art.architecture_name,
-            "weights_hash": str(model_art.weights_hash),
-            "reproducibility": "deterministic",
-        },
+        config_uri=request.config_uri,
+        config_hash=request.config_hash,
+        hyperparameters=dict(request.hyperparameters),
         parent_exp_id=None,
         baseline_id=None,  # Root baseline invariant: no baseline_id
         approval_ref=f"{request.operation_identity.operation_id}:{request.approval_request.request_id}",
@@ -533,16 +591,25 @@ def establish_dataset_baseline(
         checksums={"weights": str(model_art.weights_hash)},
     )
 
-    exp_rec = ledger.complete_experiment(
-        exp_rec.exp_id,
-        accuracy=acc_metrics,
-        system=sys_metrics,
-        artifacts=art_manifest,
-        notes=f"Empirical root baseline on {request.target_id} for {manifest.dataset_id} v{manifest.version}",
-    )
-
-    # Atomically designate as active root baseline
-    ledger.set_active_baseline(exp_rec.exp_id, request.workload_type)
+    # Atomically complete experiment and designate as active root baseline in a single transaction (Gate G4)
+    if hasattr(ledger, "complete_and_set_baseline"):
+        exp_rec = ledger.complete_and_set_baseline(
+            exp_id=exp_rec.exp_id,
+            workload_type=request.workload_type,
+            accuracy=acc_metrics,
+            system=sys_metrics,
+            artifacts=art_manifest,
+            notes=f"Empirical root baseline on {request.target_id} for {manifest.dataset_id} v{manifest.version}",
+        )
+    else:
+        exp_rec = ledger.complete_experiment(
+            exp_rec.exp_id,
+            accuracy=acc_metrics,
+            system=sys_metrics,
+            artifacts=art_manifest,
+            notes=f"Empirical root baseline on {request.target_id} for {manifest.dataset_id} v{manifest.version}",
+        )
+        ledger.set_active_baseline(exp_rec.exp_id, request.workload_type)
 
     return BaselineEstablishmentResult(
         experiment_record=exp_rec,

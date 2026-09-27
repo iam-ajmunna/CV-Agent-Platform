@@ -92,7 +92,9 @@ class TestCapabilityDescribe:
         assert isinstance(cap, Capability)
         assert cap.id == "cv.evaluation"
 
-    def test_describe_returns_full_metadata(self, registry: CapabilityRegistry) -> None:
+    def test_describe_returns_full_metadata(
+        self, registry: CapabilityRegistry
+    ) -> None:
         cap = registry.describe("cv.deployment.optimization")
         assert cap.name
         assert cap.category == "deployment"
@@ -106,7 +108,9 @@ class TestCapabilityDescribe:
         with pytest.raises(KeyError, match="Unknown capability"):
             registry.describe("cv.does.not.exist")
 
-    def test_inputs_and_outputs_are_typed(self, registry: CapabilityRegistry) -> None:
+    def test_inputs_and_outputs_are_typed(
+        self, registry: CapabilityRegistry
+    ) -> None:
         cap = registry.describe("cv.requirements.analysis")
         assert len(cap.required_inputs) > 0
         for inp in cap.required_inputs:
@@ -239,9 +243,7 @@ class TestRegistryItems:
         assert triton_skill.item_type == "skill"
         assert triton_tool.item_type == "tool"
 
-    def test_item_type_lists_are_not_overwritten(
-        self, registry: CapabilityRegistry
-    ) -> None:
+    def test_item_type_lists_are_not_overwritten(self, registry: CapabilityRegistry) -> None:
         skills = registry.list_items("skill")
         tools = registry.list_items("tool")
         agents = registry.list_items("agent")
@@ -319,5 +321,7 @@ class TestCrossTypeRegistryItems:
         assert [cap.id for cap in selected] == []
         assert all(isinstance(cap, Capability) for cap in selected)
         assert "cv.benchmarking" in {
-            c.id for c in registry.list() if "benchmarking" in c.applicable_task_types
+            c.id
+            for c in registry.list()
+            if "benchmarking" in c.applicable_task_types
         }

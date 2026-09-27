@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import ast
 import hashlib
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -63,8 +64,15 @@ from cv_agent.evaluation.types import (
     TaskType,
 )
 from cv_agent.experiments import (
+    AccuracyMetrics,
+    ArtifactManifest,
+    ExecutionTarget,
+    ExperimentSpec,
     ExperimentStatus,
+    IncompleteMetricsError,
+    RelationalIntegrityError,
     SQLiteExperimentLedger,
+    SystemMetrics,
     WorkloadType,
 )
 from cv_agent.orchestration import (
@@ -84,6 +92,7 @@ from cv_agent.tools import (
     ExecutionId,
     TargetId,
     ToolExecutionStatus,
+    ToolExecutor,
     ToolId,
     ToolInvocation,
     ToolResult,
@@ -106,7 +115,7 @@ def _dummy_hash(seed: str) -> ContentHash:
     return ContentHash(hashlib.sha256(seed.encode("utf-8")).hexdigest())
 
 
-class MockToolExecutor:
+class MockToolExecutor(ToolExecutor):
     """ADR-0005 ToolExecutor test spy recording invocations and returning controlled results."""
 
     def __init__(
@@ -118,7 +127,7 @@ class MockToolExecutor:
         self.canned_result = canned_result
         self.should_raise = should_raise
 
-    async def execute(self, invocation: ToolInvocation) -> ToolResult:
+    def execute(self, invocation: ToolInvocation) -> ToolResult:
         self.invocations.append(invocation)
         if self.should_raise is not None:
             raise self.should_raise
@@ -131,9 +140,6 @@ class MockToolExecutor:
             status=ToolExecutionStatus.SUCCESS,
             structured_output={},
         )
-
-    async def probe(self, tool: Any, target: Any) -> Any:
-        raise NotImplementedError
 
 
 def _make_class_def(name: str = "person") -> ClassDefinition:
@@ -369,6 +375,10 @@ def _make_canned_evaluation_output(
     latency_p50_ms: float = 4.8,
     throughput_fps: float = 200.0,
     map_50: float = 0.89,
+    git_commit_sha: str = "a" * 40,
+    git_is_dirty: bool = False,
+    target_hardware: str = "NVIDIA Jetson Orin Nano",
+    seed: int | None = 42,
 ) -> dict[str, Any]:
     """Construct structured output dictionary simulating an empirical on-target evaluation run."""
     bench_data = {
@@ -385,11 +395,23 @@ def _make_canned_evaluation_output(
         "throughput_fps": throughput_fps,
         "peak_vram_gb": peak_vram_gb,
         "power_watts_avg": power_watts_avg,
-        "device_name": "NVIDIA Jetson Orin Nano",
+        "device_name": target_hardware,
         "target_id": target_id,
         "timing_synchronized": timing_synchronized,
         "timing_source": timing_source,
     }
+
+    env_dict: dict[str, Any] = {
+        "git_commit_sha": git_commit_sha,
+        "git_is_dirty": git_is_dirty,
+        "target_hardware": target_hardware,
+        "python_version": "3.11.8",
+        "torch_version": "2.2.0",
+        "cuda_version": "12.2",
+        "driver_version": "535.104.05",
+    }
+    if seed is not None:
+        env_dict["seed"] = seed
 
     return {
         "predictions": {
@@ -410,10 +432,61 @@ def _make_canned_evaluation_output(
                     "bbox": [10.0, 10.0, 50.0, 50.0],
                     "class_name": "person",
                 }
-            ],
+            ]
         },
         "system_benchmarks": [bench_data],
+        "environment": env_dict,
     }
+
+
+def _make_clean_baseline_request(
+    manifest: DatasetManifest,
+    meta: Mapping[str, ItemMetadata],
+    ckpt: CheckpointManifest,
+    art: ModelArtifactReference,
+    plan: EvaluationPlan,
+    op_id: OperationIdentity,
+    req: ApprovalRequest,
+    dec: ApprovalDecision,
+    target_id: TargetId | None,
+    tool_executor: ToolExecutor,
+    *,
+    dataset_registry: Any = None,
+    experiment_ledger: Any = None,
+    execution_target: Any = ExecutionTarget.REMOTE_GPU,
+    config_uri: str = "file:///configs/baseline_eval.yaml",
+    config_hash: str = "c" * 64,
+    hyperparameters: Mapping[str, Any] | None = None,
+    workload_type: WorkloadType = WorkloadType.BENCHMARK,
+) -> BaselineEstablishmentRequest:
+    """Helper constructing BaselineEstablishmentRequest with authoritative explicit fields."""
+    kwargs: dict[str, Any] = {
+        "dataset_manifest": manifest,
+        "item_metadata": meta,
+        "checkpoint_manifest": ckpt,
+        "model_artifact": art,
+        "evaluation_plan": plan,
+        "operation_identity": op_id,
+        "approval_request": req,
+        "approval_decision": dec,
+        "target_id": target_id,
+        "tool_id": ToolId("eval-tool"),
+        "tool_executor": tool_executor,
+        "execution_target": execution_target,
+        "config_uri": config_uri,
+        "config_hash": config_hash,
+        "hyperparameters": (
+            hyperparameters
+            if hyperparameters is not None
+            else {"batch_size": 1, "precision": "fp16_amp", "img_size": 640}
+        ),
+        "workload_type": workload_type,
+    }
+    if dataset_registry is not None:
+        kwargs["dataset_registry"] = dataset_registry
+    if experiment_ledger is not None:
+        kwargs["experiment_ledger"] = experiment_ledger
+    return BaselineEstablishmentRequest(**kwargs)
 
 
 # ===========================================================================
@@ -449,18 +522,17 @@ class TestPhase5DataBaselineAcceptance:
         op_id, req, dec = _make_approval_credentials(plan, target_id)
         mock_executor = MockToolExecutor()
 
-        request = BaselineEstablishmentRequest(
-            dataset_manifest=manifest,
-            item_metadata=meta,
-            checkpoint_manifest=ckpt,
-            model_artifact=art,
-            evaluation_plan=plan,
-            operation_identity=op_id,
-            approval_request=req,
-            approval_decision=dec,
-            target_id=target_id,
-            tool_id=ToolId("eval-tool"),
-            tool_executor=mock_executor,
+        request = _make_clean_baseline_request(
+            manifest,
+            meta,
+            ckpt,
+            art,
+            plan,
+            op_id,
+            req,
+            dec,
+            target_id,
+            mock_executor,
             dataset_registry=FileSystemDatasetRegistry(tmp_path / "registry"),
             experiment_ledger=SQLiteExperimentLedger(tmp_path),
         )
@@ -497,18 +569,17 @@ class TestPhase5DataBaselineAcceptance:
         op_id, req, dec = _make_approval_credentials(plan, target_id)
         mock_executor = MockToolExecutor()
 
-        request = BaselineEstablishmentRequest(
-            dataset_manifest=manifest,
-            item_metadata=meta,
-            checkpoint_manifest=ckpt,
-            model_artifact=art,
-            evaluation_plan=plan,
-            operation_identity=op_id,
-            approval_request=req,
-            approval_decision=dec,
-            target_id=target_id,
-            tool_id=ToolId("eval-tool"),
-            tool_executor=mock_executor,
+        request = _make_clean_baseline_request(
+            manifest,
+            meta,
+            ckpt,
+            art,
+            plan,
+            op_id,
+            req,
+            dec,
+            target_id,
+            mock_executor,
             dataset_registry=FileSystemDatasetRegistry(tmp_path / "registry"),
             experiment_ledger=SQLiteExperimentLedger(tmp_path),
         )
@@ -547,18 +618,17 @@ class TestPhase5DataBaselineAcceptance:
         op_id, req, dec = _make_approval_credentials(plan, target_id)
         mock_executor = MockToolExecutor()
 
-        request = BaselineEstablishmentRequest(
-            dataset_manifest=manifest,
-            item_metadata=meta,
-            checkpoint_manifest=ckpt,
-            model_artifact=art,
-            evaluation_plan=plan,
-            operation_identity=op_id,
-            approval_request=req,
-            approval_decision=dec,
-            target_id=target_id,
-            tool_id=ToolId("eval-tool"),
-            tool_executor=mock_executor,
+        request = _make_clean_baseline_request(
+            manifest,
+            meta,
+            ckpt,
+            art,
+            plan,
+            op_id,
+            req,
+            dec,
+            target_id,
+            mock_executor,
             dataset_registry=FileSystemDatasetRegistry(tmp_path / "registry"),
             experiment_ledger=SQLiteExperimentLedger(tmp_path),
         )
@@ -600,18 +670,17 @@ class TestPhase5DataBaselineAcceptance:
         op_id, req, dec = _make_approval_credentials(plan, target_id)
         mock_executor = MockToolExecutor()
 
-        request = BaselineEstablishmentRequest(
-            dataset_manifest=tampered_manifest,
-            item_metadata=meta,
-            checkpoint_manifest=ckpt,
-            model_artifact=art,
-            evaluation_plan=plan,
-            operation_identity=op_id,
-            approval_request=req,
-            approval_decision=dec,
-            target_id=target_id,
-            tool_id=ToolId("eval-tool"),
-            tool_executor=mock_executor,
+        request = _make_clean_baseline_request(
+            tampered_manifest,
+            meta,
+            ckpt,
+            art,
+            plan,
+            op_id,
+            req,
+            dec,
+            target_id,
+            mock_executor,
         )
 
         with pytest.raises(PayloadIntegrityError):
@@ -655,18 +724,17 @@ class TestPhase5DataBaselineAcceptance:
         op_id, req, dec = _make_approval_credentials(plan, target_id)
         mock_executor = MockToolExecutor()
 
-        request = BaselineEstablishmentRequest(
-            dataset_manifest=manifest,
-            item_metadata=meta,
-            checkpoint_manifest=ckpt,
-            model_artifact=art,
-            evaluation_plan=plan,
-            operation_identity=op_id,
-            approval_request=req,
-            approval_decision=dec,
-            target_id=target_id,
-            tool_id=ToolId("eval-tool"),
-            tool_executor=mock_executor,
+        request = _make_clean_baseline_request(
+            manifest,
+            meta,
+            ckpt,
+            art,
+            plan,
+            op_id,
+            req,
+            dec,
+            target_id,
+            mock_executor,
         )
 
         with pytest.raises(EvaluationValidationError) as exc_info:
@@ -733,18 +801,17 @@ class TestPhase5DataBaselineAcceptance:
         mock_executor = MockToolExecutor()
 
         # Supply unauthorized target id
-        request = BaselineEstablishmentRequest(
-            dataset_manifest=manifest,
-            item_metadata=meta,
-            checkpoint_manifest=ckpt,
-            model_artifact=art,
-            evaluation_plan=plan,
-            operation_identity=op_id,
-            approval_request=req,
-            approval_decision=dec,
-            target_id=TargetId("unauthorized-developer-host"),
-            tool_id=ToolId("eval-tool"),
-            tool_executor=mock_executor,
+        request = _make_clean_baseline_request(
+            manifest,
+            meta,
+            ckpt,
+            art,
+            plan,
+            op_id,
+            req,
+            dec,
+            TargetId("unauthorized-developer-host"),
+            mock_executor,
         )
 
         with pytest.raises(EvaluationApprovalRequiredError) as exc_info:
@@ -803,18 +870,17 @@ class TestPhase5DataBaselineAcceptance:
         )
 
         ledger = SQLiteExperimentLedger(tmp_path)
-        request = BaselineEstablishmentRequest(
-            dataset_manifest=manifest,
-            item_metadata=meta,
-            checkpoint_manifest=ckpt,
-            model_artifact=art,
-            evaluation_plan=plan,
-            operation_identity=op_id,
-            approval_request=req,
-            approval_decision=dec,
-            target_id=target_id,
-            tool_id=ToolId("eval-tool"),
-            tool_executor=mock_executor,
+        request = _make_clean_baseline_request(
+            manifest,
+            meta,
+            ckpt,
+            art,
+            plan,
+            op_id,
+            req,
+            dec,
+            target_id,
+            mock_executor,
             experiment_ledger=ledger,
         )
 
@@ -872,18 +938,17 @@ class TestPhase5DataBaselineAcceptance:
         )
 
         ledger = SQLiteExperimentLedger(tmp_path)
-        request = BaselineEstablishmentRequest(
-            dataset_manifest=manifest,
-            item_metadata=meta,
-            checkpoint_manifest=ckpt,
-            model_artifact=art,
-            evaluation_plan=plan,
-            operation_identity=op_id,
-            approval_request=req,
-            approval_decision=dec,
-            target_id=target_id,
-            tool_id=ToolId("eval-tool"),
-            tool_executor=mock_executor,
+        request = _make_clean_baseline_request(
+            manifest,
+            meta,
+            ckpt,
+            art,
+            plan,
+            op_id,
+            req,
+            dec,
+            target_id,
+            mock_executor,
             experiment_ledger=ledger,
         )
 
@@ -940,18 +1005,17 @@ class TestPhase5DataBaselineAcceptance:
         )
 
         ledger = SQLiteExperimentLedger(tmp_path)
-        request = BaselineEstablishmentRequest(
-            dataset_manifest=manifest,
-            item_metadata=meta,
-            checkpoint_manifest=ckpt,
-            model_artifact=art,
-            evaluation_plan=plan,
-            operation_identity=op_id,
-            approval_request=req,
-            approval_decision=dec,
-            target_id=target_id,
-            tool_id=ToolId("eval-tool"),
-            tool_executor=mock_executor,
+        request = _make_clean_baseline_request(
+            manifest,
+            meta,
+            ckpt,
+            art,
+            plan,
+            op_id,
+            req,
+            dec,
+            target_id,
+            mock_executor,
             experiment_ledger=ledger,
         )
 
@@ -991,18 +1055,17 @@ class TestPhase5DataBaselineAcceptance:
         op_id, req, dec = _make_approval_credentials(plan, target_id)
         mock_executor = MockToolExecutor()
 
-        request = BaselineEstablishmentRequest(
-            dataset_manifest=manifest,
-            item_metadata=meta,
-            checkpoint_manifest=ckpt,
-            model_artifact=tampered_art,
-            evaluation_plan=plan,
-            operation_identity=op_id,
-            approval_request=req,
-            approval_decision=dec,
-            target_id=target_id,
-            tool_id=ToolId("eval-tool"),
-            tool_executor=mock_executor,
+        request = _make_clean_baseline_request(
+            manifest,
+            meta,
+            ckpt,
+            tampered_art,
+            plan,
+            op_id,
+            req,
+            dec,
+            target_id,
+            mock_executor,
         )
 
         with pytest.raises(EvaluationValidationError) as exc_info:
@@ -1047,18 +1110,17 @@ class TestPhase5DataBaselineAcceptance:
         )
 
         ledger = SQLiteExperimentLedger(tmp_path)
-        request = BaselineEstablishmentRequest(
-            dataset_manifest=manifest,
-            item_metadata=meta,
-            checkpoint_manifest=ckpt,
-            model_artifact=art,
-            evaluation_plan=plan,
-            operation_identity=op_id,
-            approval_request=req,
-            approval_decision=dec,
-            target_id=target_id,
-            tool_id=ToolId("eval-tool"),
-            tool_executor=mock_executor,
+        request = _make_clean_baseline_request(
+            manifest,
+            meta,
+            ckpt,
+            art,
+            plan,
+            op_id,
+            req,
+            dec,
+            target_id,
+            mock_executor,
             experiment_ledger=ledger,
         )
 
@@ -1169,18 +1231,17 @@ class TestPhase5DataBaselineAcceptance:
         registry = FileSystemDatasetRegistry(tmp_path / "registry")
         ledger = SQLiteExperimentLedger(tmp_path)
 
-        request = BaselineEstablishmentRequest(
-            dataset_manifest=manifest,
-            item_metadata=meta,
-            checkpoint_manifest=ckpt,
-            model_artifact=art,
-            evaluation_plan=plan,
-            operation_identity=op_id,
-            approval_request=req,
-            approval_decision=dec,
-            target_id=target_id,
-            tool_id=ToolId("eval-tool"),
-            tool_executor=mock_executor,
+        request = _make_clean_baseline_request(
+            manifest,
+            meta,
+            ckpt,
+            art,
+            plan,
+            op_id,
+            req,
+            dec,
+            target_id,
+            mock_executor,
             dataset_registry=registry,
             experiment_ledger=ledger,
             workload_type=WorkloadType.BENCHMARK,
@@ -1219,6 +1280,571 @@ class TestPhase5DataBaselineAcceptance:
         # Exactly 1 tool invocation occurred
         assert len(mock_executor.invocations) == 1
         assert mock_executor.invocations[0].target_id == target_id
+
+    # -----------------------------------------------------------------------
+    # Case 15: placeholder git commit sha ("0"*40) -> reject
+    # -----------------------------------------------------------------------
+    def test_case_15_placeholder_git_commit_sha_rejects(self, tmp_path: Path) -> None:
+        """Adversarial Case 15: Evaluation environment with placeholder git commit sha ('000...000') must reject."""
+        manifest, meta = _make_clean_manifest_and_metadata()
+        ckpt, art = _make_checkpoint_and_model_artifact()
+        target_id = TargetId("jetson-orin-01")
+
+        metric = MetricDefinition(
+            metric_id=MetricId("map_50"),
+            name="mAP@0.50",
+            task_type=TaskType.DETECTION,
+        )
+        plan = build_baseline_evaluation_plan(
+            evaluation_id="eval-015",
+            experiment_id="exp-baseline-015",
+            dataset_manifest=manifest,
+            model_artifact=art,
+            task_type=TaskType.DETECTION,
+            metrics=(metric,),
+        )
+        op_id, req, dec = _make_approval_credentials(plan, target_id)
+        canned_output = _make_canned_evaluation_output(
+            target_id=target_id,
+            git_commit_sha="0" * 40,
+        )
+        mock_executor = MockToolExecutor(
+            canned_result=ToolResult(
+                execution_id=ExecutionId("exec-015"),
+                tool_id=ToolId("eval-tool"),
+                target_id=target_id,
+                status=ToolExecutionStatus.SUCCESS,
+                structured_output=canned_output,
+            )
+        )
+        ledger = SQLiteExperimentLedger(tmp_path)
+        request = _make_clean_baseline_request(
+            manifest,
+            meta,
+            ckpt,
+            art,
+            plan,
+            op_id,
+            req,
+            dec,
+            target_id,
+            mock_executor,
+            experiment_ledger=ledger,
+        )
+
+        with pytest.raises(BaselineValidationError) as exc_info:
+            establish_dataset_baseline(request)
+
+        assert "git_commit_sha" in str(exc_info.value).lower()
+        assert ledger.get_baseline(WorkloadType.BENCHMARK) is None
+
+    # -----------------------------------------------------------------------
+    # Case 16: invalid git commit sha (not 40 hex) -> reject without repair
+    # -----------------------------------------------------------------------
+    def test_case_16_invalid_git_sha_rejects_without_repair(
+        self, tmp_path: Path
+    ) -> None:
+        """Adversarial Case 16: Evaluation environment with invalid git SHA must reject rather than repairing with SHA1."""
+        manifest, meta = _make_clean_manifest_and_metadata()
+        ckpt, art = _make_checkpoint_and_model_artifact()
+        target_id = TargetId("jetson-orin-01")
+
+        metric = MetricDefinition(
+            metric_id=MetricId("map_50"),
+            name="mAP@0.50",
+            task_type=TaskType.DETECTION,
+        )
+        plan = build_baseline_evaluation_plan(
+            evaluation_id="eval-016",
+            experiment_id="exp-baseline-016",
+            dataset_manifest=manifest,
+            model_artifact=art,
+            task_type=TaskType.DETECTION,
+            metrics=(metric,),
+        )
+        op_id, req, dec = _make_approval_credentials(plan, target_id)
+        canned_output = _make_canned_evaluation_output(
+            target_id=target_id,
+            git_commit_sha="not-a-valid-40-hex-sha",
+        )
+        mock_executor = MockToolExecutor(
+            canned_result=ToolResult(
+                execution_id=ExecutionId("exec-016"),
+                tool_id=ToolId("eval-tool"),
+                target_id=target_id,
+                status=ToolExecutionStatus.SUCCESS,
+                structured_output=canned_output,
+            )
+        )
+        ledger = SQLiteExperimentLedger(tmp_path)
+        request = _make_clean_baseline_request(
+            manifest,
+            meta,
+            ckpt,
+            art,
+            plan,
+            op_id,
+            req,
+            dec,
+            target_id,
+            mock_executor,
+            experiment_ledger=ledger,
+        )
+
+        with pytest.raises(BaselineValidationError) as exc_info:
+            establish_dataset_baseline(request)
+
+        assert "git_commit_sha" in str(exc_info.value).lower()
+        assert ledger.get_baseline(WorkloadType.BENCHMARK) is None
+
+    # -----------------------------------------------------------------------
+    # Case 17: placeholder target hardware -> reject
+    # -----------------------------------------------------------------------
+    def test_case_17_placeholder_target_hardware_rejects(self, tmp_path: Path) -> None:
+        """Adversarial Case 17: Evaluation environment with placeholder target hardware must reject."""
+        manifest, meta = _make_clean_manifest_and_metadata()
+        ckpt, art = _make_checkpoint_and_model_artifact()
+        target_id = TargetId("jetson-orin-01")
+
+        metric = MetricDefinition(
+            metric_id=MetricId("map_50"),
+            name="mAP@0.50",
+            task_type=TaskType.DETECTION,
+        )
+        plan = build_baseline_evaluation_plan(
+            evaluation_id="eval-017",
+            experiment_id="exp-baseline-017",
+            dataset_manifest=manifest,
+            model_artifact=art,
+            task_type=TaskType.DETECTION,
+            metrics=(metric,),
+        )
+        op_id, req, dec = _make_approval_credentials(plan, target_id)
+        canned_output = _make_canned_evaluation_output(
+            target_id=target_id,
+            target_hardware="Target Hardware",
+        )
+        mock_executor = MockToolExecutor(
+            canned_result=ToolResult(
+                execution_id=ExecutionId("exec-017"),
+                tool_id=ToolId("eval-tool"),
+                target_id=target_id,
+                status=ToolExecutionStatus.SUCCESS,
+                structured_output=canned_output,
+            )
+        )
+        ledger = SQLiteExperimentLedger(tmp_path)
+        request = _make_clean_baseline_request(
+            manifest,
+            meta,
+            ckpt,
+            art,
+            plan,
+            op_id,
+            req,
+            dec,
+            target_id,
+            mock_executor,
+            experiment_ledger=ledger,
+        )
+
+        with pytest.raises(BaselineValidationError) as exc_info:
+            establish_dataset_baseline(request)
+
+        assert "target_hardware" in str(exc_info.value).lower()
+        assert ledger.get_baseline(WorkloadType.BENCHMARK) is None
+
+    # -----------------------------------------------------------------------
+    # Case 18: missing random seed -> reject without defaulting
+    # -----------------------------------------------------------------------
+    def test_case_18_missing_seed_rejects_without_defaulting(
+        self, tmp_path: Path
+    ) -> None:
+        """Adversarial Case 18: Missing evaluation environment seed must reject without defaulting to 42."""
+        manifest, meta = _make_clean_manifest_and_metadata()
+        ckpt, art = _make_checkpoint_and_model_artifact()
+        target_id = TargetId("jetson-orin-01")
+
+        metric = MetricDefinition(
+            metric_id=MetricId("map_50"),
+            name="mAP@0.50",
+            task_type=TaskType.DETECTION,
+        )
+        plan = build_baseline_evaluation_plan(
+            evaluation_id="eval-018",
+            experiment_id="exp-baseline-018",
+            dataset_manifest=manifest,
+            model_artifact=art,
+            task_type=TaskType.DETECTION,
+            metrics=(metric,),
+        )
+        op_id, req, dec = _make_approval_credentials(plan, target_id)
+        canned_output = _make_canned_evaluation_output(
+            target_id=target_id,
+            seed=None,
+        )
+        mock_executor = MockToolExecutor(
+            canned_result=ToolResult(
+                execution_id=ExecutionId("exec-018"),
+                tool_id=ToolId("eval-tool"),
+                target_id=target_id,
+                status=ToolExecutionStatus.SUCCESS,
+                structured_output=canned_output,
+            )
+        )
+        ledger = SQLiteExperimentLedger(tmp_path)
+        request = _make_clean_baseline_request(
+            manifest,
+            meta,
+            ckpt,
+            art,
+            plan,
+            op_id,
+            req,
+            dec,
+            target_id,
+            mock_executor,
+            experiment_ledger=ledger,
+        )
+
+        with pytest.raises(BaselineValidationError) as exc_info:
+            establish_dataset_baseline(request)
+
+        assert "seed" in str(exc_info.value).lower()
+        assert ledger.get_baseline(WorkloadType.BENCHMARK) is None
+
+    # -----------------------------------------------------------------------
+    # Case 19: dirty git state -> reject
+    # -----------------------------------------------------------------------
+    def test_case_19_dirty_git_state_rejects(self, tmp_path: Path) -> None:
+        """Adversarial Case 19: Uncommitted git changes in evaluation environment must reject."""
+        manifest, meta = _make_clean_manifest_and_metadata()
+        ckpt, art = _make_checkpoint_and_model_artifact()
+        target_id = TargetId("jetson-orin-01")
+
+        metric = MetricDefinition(
+            metric_id=MetricId("map_50"),
+            name="mAP@0.50",
+            task_type=TaskType.DETECTION,
+        )
+        plan = build_baseline_evaluation_plan(
+            evaluation_id="eval-019",
+            experiment_id="exp-baseline-019",
+            dataset_manifest=manifest,
+            model_artifact=art,
+            task_type=TaskType.DETECTION,
+            metrics=(metric,),
+        )
+        op_id, req, dec = _make_approval_credentials(plan, target_id)
+        canned_output = _make_canned_evaluation_output(
+            target_id=target_id,
+            git_is_dirty=True,
+        )
+        mock_executor = MockToolExecutor(
+            canned_result=ToolResult(
+                execution_id=ExecutionId("exec-019"),
+                tool_id=ToolId("eval-tool"),
+                target_id=target_id,
+                status=ToolExecutionStatus.SUCCESS,
+                structured_output=canned_output,
+            )
+        )
+        ledger = SQLiteExperimentLedger(tmp_path)
+        request = _make_clean_baseline_request(
+            manifest,
+            meta,
+            ckpt,
+            art,
+            plan,
+            op_id,
+            req,
+            dec,
+            target_id,
+            mock_executor,
+            experiment_ledger=ledger,
+        )
+
+        with pytest.raises(BaselineValidationError) as exc_info:
+            establish_dataset_baseline(request)
+
+        assert (
+            "git_is_dirty" in str(exc_info.value).lower()
+            or "uncommitted" in str(exc_info.value).lower()
+        )
+        assert ledger.get_baseline(WorkloadType.BENCHMARK) is None
+
+    # -----------------------------------------------------------------------
+    # Case 20: missing/invalid ExecutionTarget -> reject without substring guessing
+    # -----------------------------------------------------------------------
+    def test_case_20_missing_execution_target_rejects_without_guessing(
+        self, tmp_path: Path
+    ) -> None:
+        """Adversarial Case 20: Missing or non-ExecutionTarget must reject without guessing from target names."""
+        manifest, meta = _make_clean_manifest_and_metadata()
+        ckpt, art = _make_checkpoint_and_model_artifact()
+        target_id = TargetId("jetson-orin-01")
+
+        metric = MetricDefinition(
+            metric_id=MetricId("map_50"),
+            name="mAP@0.50",
+            task_type=TaskType.DETECTION,
+        )
+        plan = build_baseline_evaluation_plan(
+            evaluation_id="eval-020",
+            experiment_id="exp-baseline-020",
+            dataset_manifest=manifest,
+            model_artifact=art,
+            task_type=TaskType.DETECTION,
+            metrics=(metric,),
+        )
+        op_id, req, dec = _make_approval_credentials(plan, target_id)
+        canned_output = _make_canned_evaluation_output(target_id=target_id)
+        mock_executor = MockToolExecutor(
+            canned_result=ToolResult(
+                execution_id=ExecutionId("exec-020"),
+                tool_id=ToolId("eval-tool"),
+                target_id=target_id,
+                status=ToolExecutionStatus.SUCCESS,
+                structured_output=canned_output,
+            )
+        )
+        ledger = SQLiteExperimentLedger(tmp_path)
+        request = _make_clean_baseline_request(
+            manifest,
+            meta,
+            ckpt,
+            art,
+            plan,
+            op_id,
+            req,
+            dec,
+            target_id,
+            mock_executor,
+            execution_target=None,  # Prohibited: no guessing
+            experiment_ledger=ledger,
+        )
+
+        with pytest.raises(BaselineValidationError) as exc_info:
+            establish_dataset_baseline(request)
+
+        assert "execution_target" in str(exc_info.value).lower()
+        assert ledger.get_baseline(WorkloadType.BENCHMARK) is None
+
+    # -----------------------------------------------------------------------
+    # Case 21: invalid or missing config provenance -> reject
+    # -----------------------------------------------------------------------
+    def test_case_21_invalid_config_provenance_rejects(self, tmp_path: Path) -> None:
+        """Adversarial Case 21: Empty config_uri or invalid config_hash must reject."""
+        manifest, meta = _make_clean_manifest_and_metadata()
+        ckpt, art = _make_checkpoint_and_model_artifact()
+        target_id = TargetId("jetson-orin-01")
+
+        metric = MetricDefinition(
+            metric_id=MetricId("map_50"),
+            name="mAP@0.50",
+            task_type=TaskType.DETECTION,
+        )
+        plan = build_baseline_evaluation_plan(
+            evaluation_id="eval-021",
+            experiment_id="exp-baseline-021",
+            dataset_manifest=manifest,
+            model_artifact=art,
+            task_type=TaskType.DETECTION,
+            metrics=(metric,),
+        )
+        op_id, req, dec = _make_approval_credentials(plan, target_id)
+        canned_output = _make_canned_evaluation_output(target_id=target_id)
+        mock_executor = MockToolExecutor(
+            canned_result=ToolResult(
+                execution_id=ExecutionId("exec-021"),
+                tool_id=ToolId("eval-tool"),
+                target_id=target_id,
+                status=ToolExecutionStatus.SUCCESS,
+                structured_output=canned_output,
+            )
+        )
+        ledger = SQLiteExperimentLedger(tmp_path)
+
+        # 1. Empty config_uri
+        req1 = _make_clean_baseline_request(
+            manifest,
+            meta,
+            ckpt,
+            art,
+            plan,
+            op_id,
+            req,
+            dec,
+            target_id,
+            mock_executor,
+            config_uri="",
+            experiment_ledger=ledger,
+        )
+        with pytest.raises(BaselineValidationError) as exc1:
+            establish_dataset_baseline(req1)
+        assert "config_uri" in str(exc1.value).lower()
+
+        # 2. Invalid config_hash (not 64-hex)
+        req2 = _make_clean_baseline_request(
+            manifest,
+            meta,
+            ckpt,
+            art,
+            plan,
+            op_id,
+            req,
+            dec,
+            target_id,
+            mock_executor,
+            config_hash="invalid-hash",
+            experiment_ledger=ledger,
+        )
+        with pytest.raises(BaselineValidationError) as exc2:
+            establish_dataset_baseline(req2)
+        assert "config_hash" in str(exc2.value).lower()
+        assert ledger.get_baseline(WorkloadType.BENCHMARK) is None
+
+    # -----------------------------------------------------------------------
+    # Case 22: empty hyperparameters -> reject
+    # -----------------------------------------------------------------------
+    def test_case_22_empty_hyperparameters_rejects(self, tmp_path: Path) -> None:
+        """Adversarial Case 22: Empty hyperparameters mapping must reject without manufacturing placeholders."""
+        manifest, meta = _make_clean_manifest_and_metadata()
+        ckpt, art = _make_checkpoint_and_model_artifact()
+        target_id = TargetId("jetson-orin-01")
+
+        metric = MetricDefinition(
+            metric_id=MetricId("map_50"),
+            name="mAP@0.50",
+            task_type=TaskType.DETECTION,
+        )
+        plan = build_baseline_evaluation_plan(
+            evaluation_id="eval-022",
+            experiment_id="exp-baseline-022",
+            dataset_manifest=manifest,
+            model_artifact=art,
+            task_type=TaskType.DETECTION,
+            metrics=(metric,),
+        )
+        op_id, req, dec = _make_approval_credentials(plan, target_id)
+        canned_output = _make_canned_evaluation_output(target_id=target_id)
+        mock_executor = MockToolExecutor(
+            canned_result=ToolResult(
+                execution_id=ExecutionId("exec-022"),
+                tool_id=ToolId("eval-tool"),
+                target_id=target_id,
+                status=ToolExecutionStatus.SUCCESS,
+                structured_output=canned_output,
+            )
+        )
+        ledger = SQLiteExperimentLedger(tmp_path)
+        request = _make_clean_baseline_request(
+            manifest,
+            meta,
+            ckpt,
+            art,
+            plan,
+            op_id,
+            req,
+            dec,
+            target_id,
+            mock_executor,
+            hyperparameters={},
+            experiment_ledger=ledger,
+        )
+
+        with pytest.raises(BaselineValidationError) as exc_info:
+            establish_dataset_baseline(request)
+
+        assert "hyperparameters" in str(exc_info.value).lower()
+        assert ledger.get_baseline(WorkloadType.BENCHMARK) is None
+
+    # -----------------------------------------------------------------------
+    # Case 23: atomic completion + baseline designation transaction and rollback
+    # -----------------------------------------------------------------------
+    def test_case_23_atomic_baseline_publication_and_rollback(
+        self, tmp_path: Path
+    ) -> None:
+        """Adversarial Case 23: SQLiteExperimentLedger.complete_and_set_baseline must be atomic."""
+        ledger = SQLiteExperimentLedger(tmp_path)
+        spec = ExperimentSpec(
+            name="atomic-test",
+            hypothesis="atomic completion test",
+            workload_type=WorkloadType.BENCHMARK,
+            target=ExecutionTarget.REMOTE_GPU,
+            model_name="yolov8n",
+            model_variant="baseline",
+            commit_sha="a" * 40,
+            dataset_version="v1.0.0",
+            seed=42,
+            batch_size=1,
+            input_resolution=(640, 640),
+            precision="fp16_amp",
+            config_uri="file:///configs/eval.yaml",
+            config_hash="c" * 64,
+            hyperparameters={"bs": 1},
+            accuracy_metric_requirements=("map_50",),
+        )
+        rec = ledger.create_experiment(spec)
+        ledger.transition_status(rec.exp_id, ExperimentStatus.RUNNING)
+
+        acc = AccuracyMetrics(map_50=0.88)
+        sys_m = SystemMetrics(
+            peak_vram_mb=2048.0,
+            power_draw_watts=15.0,
+            latency_inference_ms=5.0,
+            latency_e2e_ms=6.0,
+            throughput_fps=180.0,
+        )
+        art = ArtifactManifest(weights_uri="file:///weights.pt")
+
+        # 1. Rollback on workload type conflict (relational integrity violation)
+        with pytest.raises(RelationalIntegrityError):
+            ledger.complete_and_set_baseline(
+                rec.exp_id,
+                WorkloadType.EVALUATION,  # Spec was BENCHMARK -> mismatch
+                accuracy=acc,
+                system=sys_m,
+                artifacts=art,
+            )
+
+        # Assert status remains RUNNING (no completion persisted)
+        after_failed = ledger.get_experiment(rec.exp_id)
+        assert after_failed is not None
+        assert after_failed.status == ExperimentStatus.RUNNING
+        assert ledger.get_baseline(WorkloadType.BENCHMARK) is None
+        assert ledger.get_baseline(WorkloadType.EVALUATION) is None
+
+        # 2. Rollback on incomplete metrics (metric completeness validation failure)
+        incomplete_sys = SystemMetrics(
+            peak_vram_mb=None
+        )  # Benchmark requires peak_vram_mb
+        with pytest.raises(IncompleteMetricsError):
+            ledger.complete_and_set_baseline(
+                rec.exp_id,
+                WorkloadType.BENCHMARK,
+                accuracy=acc,
+                system=incomplete_sys,
+                artifacts=art,
+            )
+        after_failed2 = ledger.get_experiment(rec.exp_id)
+        assert after_failed2 is not None
+        assert after_failed2.status == ExperimentStatus.RUNNING
+        assert ledger.get_baseline(WorkloadType.BENCHMARK) is None
+
+        # 3. Successful atomic completion and designation in single transaction
+        completed_rec = ledger.complete_and_set_baseline(
+            rec.exp_id,
+            WorkloadType.BENCHMARK,
+            accuracy=acc,
+            system=sys_m,
+            artifacts=art,
+            notes="Atomic root baseline",
+        )
+        assert completed_rec.status == ExperimentStatus.COMPLETED
+        active = ledger.get_baseline(WorkloadType.BENCHMARK)
+        assert active is not None
+        assert active.exp_id == rec.exp_id
 
 
 # ===========================================================================
@@ -1277,18 +1903,17 @@ class TestPhase5ArchitecturalBoundaryInvariants:
 
         with pytest.raises(EvaluationApprovalRequiredError) as exc_info:
             establish_dataset_baseline(
-                BaselineEstablishmentRequest(
-                    dataset_manifest=manifest,
-                    item_metadata=meta,
-                    checkpoint_manifest=ckpt,
-                    model_artifact=art,
-                    evaluation_plan=plan,
-                    operation_identity=op_id,
-                    approval_request=req,
-                    approval_decision=dec,
-                    target_id=None,  # No target supplied
-                    tool_id=ToolId("eval-tool"),
-                    tool_executor=MockToolExecutor(),
+                _make_clean_baseline_request(
+                    manifest,
+                    meta,
+                    ckpt,
+                    art,
+                    plan,
+                    op_id,
+                    req,
+                    dec,
+                    None,  # No target supplied
+                    MockToolExecutor(),
                 )
             )
 
@@ -1329,18 +1954,18 @@ class TestPhase5ArchitecturalBoundaryInvariants:
         ledger = SQLiteExperimentLedger(tmp_path)
         workflow = DatasetBaselineWorkflow(experiment_ledger=ledger)
 
-        request = BaselineEstablishmentRequest(
-            dataset_manifest=manifest,
-            item_metadata=meta,
-            checkpoint_manifest=ckpt,
-            model_artifact=art,
-            evaluation_plan=plan,
-            operation_identity=op_id,
-            approval_request=req,
-            approval_decision=dec,
-            target_id=target_id,
-            tool_id=ToolId("eval-tool"),
-            tool_executor=mock_executor,
+        request = _make_clean_baseline_request(
+            manifest,
+            meta,
+            ckpt,
+            art,
+            plan,
+            op_id,
+            req,
+            dec,
+            target_id,
+            mock_executor,
+            experiment_ledger=ledger,
         )
 
         result = workflow.establish_baseline(request)

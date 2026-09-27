@@ -68,9 +68,9 @@ The four entity identities remain distinct and stable:
 
 ```python
 CapabilityId = NewType("CapabilityId", str)
-SkillId = NewType("SkillId", str)
-ToolId = NewType("ToolId", str)
-AgentId = NewType("AgentId", str)
+SkillId      = NewType("SkillId", str)
+ToolId       = NewType("ToolId", str)
+AgentId      = NewType("AgentId", str)
 ```
 
 Each identifier MUST be a non-empty, case-sensitive ASCII string conforming to `[a-z0-9_.-]+(/[a-z0-9_.-]+)*` (namespaced lowercase alphanumeric tokens separated by hyphens, underscores, dots, or hierarchy slashes). Identifiers provide semantic namespace separation and MUST remain independent of implementation/specification version. Versions are separate typed metadata and are resolved through compatibility constraints.
@@ -102,12 +102,10 @@ class SkillBinding(Protocol):
     priority: int
     provenance: "Provenance"
 
-
 class ToolBinding(Protocol):
     skill_id: SkillId
     tool_id: ToolId
     compatibility: "CompatibilityConstraint"
-
 
 class AgentBinding(Protocol):
     tool_id: ToolId
@@ -251,7 +249,6 @@ class ResolvedToolRef(NamedTuple):
     tool_id: ToolId
     tool_version: str
 
-
 class ResolutionSnapshot(Protocol):
     snapshot_id: str
     registry_version: str
@@ -326,7 +323,6 @@ Stage = Literal[
     "MONITOR",
 ]
 
-
 class Capability(Protocol):
     id: CapabilityId
     version: str
@@ -334,7 +330,6 @@ class Capability(Protocol):
     description: str
     risk_level: str
     requires_approval: bool
-
 
 class Resolution(NamedTuple):
     capability: Capability
@@ -348,7 +343,6 @@ class Resolution(NamedTuple):
     rejected_candidates: tuple[str, ...]
     snapshot: "ResolutionSnapshot | None"
 
-
 class CapabilityResolver(Protocol):
     def resolve(
         self,
@@ -356,7 +350,6 @@ class CapabilityResolver(Protocol):
         *,
         context: object | None = None,
     ) -> Resolution: ...
-
 
 class CapabilityRegistry(Protocol):
     def capabilities(

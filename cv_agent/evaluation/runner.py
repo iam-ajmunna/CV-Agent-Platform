@@ -517,16 +517,30 @@ class DefaultEvaluationRunner:
         )
 
         # 4. Environment record
-        env = EvaluationEnvironmentRecord(
-            git_commit_sha="0" * 40,
-            git_is_dirty=False,
-            dataset_manifest_hash=plan.dataset_binding.dataset_manifest_hash,
-            weights_hash=plan.model_artifact.weights_hash,
-            metric_definition_versions=tuple(m.version for m in plan.metrics),
-            python_version="3.11.0",
-            torch_version="2.4.0",
-            target_hardware="Target Hardware",
-        )
+        env_raw = output_data.get("environment")
+        if isinstance(env_raw, EvaluationEnvironmentRecord):
+            env = env_raw
+        elif isinstance(env_raw, (dict, Mapping)):
+            env_dict = dict(env_raw)
+            env_dict.setdefault(
+                "dataset_manifest_hash", plan.dataset_binding.dataset_manifest_hash
+            )
+            env_dict.setdefault("weights_hash", plan.model_artifact.weights_hash)
+            env_dict.setdefault(
+                "metric_definition_versions", tuple(m.version for m in plan.metrics)
+            )
+            env = EvaluationEnvironmentRecord.model_validate(env_dict)
+        else:
+            env = EvaluationEnvironmentRecord(
+                git_commit_sha="0" * 40,
+                git_is_dirty=False,
+                dataset_manifest_hash=plan.dataset_binding.dataset_manifest_hash,
+                weights_hash=plan.model_artifact.weights_hash,
+                metric_definition_versions=tuple(m.version for m in plan.metrics),
+                python_version="3.11.0",
+                torch_version="2.4.0",
+                target_hardware="Target Hardware",
+            )
 
         return EvaluationResult(
             evaluation_id=plan.evaluation_id,
