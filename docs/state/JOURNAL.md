@@ -2363,3 +2363,26 @@ Remediated all three architectural blockers identified in the Official PM's seco
 **Learned:** Upstream evaluation runners must provide a mechanism for real execution tools to pass through authentic environment evidence rather than relying on synthetic defaults. Multi-step lifecycle operations that logically represent a single state transition (such as experiment completion and root baseline designation) must be bound into a single atomic database transaction to prevent split-brain state.
 
 **Left open:** Push remediated commit to `origin feature/ajmunna/phase-5-data-baseline`, verify green GitHub CI checks on PR #73, and report PR #73 + exact head SHA to Official PM for formal re-review.
+
+---
+
+## 2026-09-27 — Phase 5 PR #73 B30 Final Remediation (Unconditional Atomic Publication)
+
+**Did:** Fully discharged the remaining blocker B30 following Official PM re-review of PR #73 (commit `d4d61b18bb36ca2849b1c65d2bf77b260db477f1`):
+1. **Removed Non-Atomic Compatibility Fallback:** Eliminated the `else: ledger.complete_experiment(...) ledger.set_active_baseline(...)` fallback branch in `cv_agent/orchestration/data_baseline.py`. Enforced that `ledger.complete_and_set_baseline` is called unconditionally.
+2. **Fail-Closed Ledger Validation:** Added explicit pre-condition validation in `establish_dataset_baseline` checking that `request.experiment_ledger` implements a callable `complete_and_set_baseline` method, raising `BaselineValidationError` fail-closed if missing or non-callable.
+3. **Adversarial Test Case 24 Added:** Implemented `test_case_24_legacy_nonconforming_ledger_fails_closed_without_fallback` in `tests/test_data_baseline_phase5_exit.py`. Proved that a legacy ledger lacking `complete_and_set_baseline` raises `BaselineValidationError` with strictly zero calls to `complete_experiment` and zero calls to `set_active_baseline`.
+4. **Preserved Atomic Rollback Test:** Retained `test_case_23_atomic_baseline_publication_and_rollback` verifying that SQLite transaction rollback occurs cleanly on relational integrity or metric completeness violations.
+5. **Quality Gates Verification:**
+   - 27/27 Phase 5 exit tests passing.
+   - 718/718 full regression test suite passing across 27 suites with zero regressions.
+   - Ruff check clean (0 errors), Ruff format clean (198 files), Mypy clean (121 source files), `git diff --check` clean.
+   - `python -m build` and `pip-audit` clean (0 vulnerabilities).
+
+**Why:** Enforces ADR-0004 atomic publication invariant (Gate G4) and resolves the sole outstanding blocker (B30) on PR #73 per Official PM review instruction.
+
+**Broke:** Nothing broken. 718/718 tests passing.
+
+**Learned:** Compatibility paths that emulate atomic operations through multiple non-atomic calls undermine transactional invariants and create silent split-brain risks under failure; interfaces must require atomic contracts unconditionally and fail closed when contract invariants are not satisfied.
+
+**Left open:** Push commit to `feature/ajmunna/phase-5-data-baseline`, verify green GitHub CI checks on PR #73, and transmit the new exact head SHA to the Official PM for merge authorization.

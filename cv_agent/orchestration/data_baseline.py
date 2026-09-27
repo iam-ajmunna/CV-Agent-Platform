@@ -497,6 +497,15 @@ def establish_dataset_baseline(
         ws_root = Path(request.workspace_root) if request.workspace_root else Path(".")
         ledger = SQLiteExperimentLedger(workspace_root=ws_root)
 
+    if not hasattr(ledger, "complete_and_set_baseline") or not callable(
+        ledger.complete_and_set_baseline
+    ):
+        raise BaselineValidationError(
+            f"Experiment ledger {ledger.__class__.__name__} does not implement mandatory atomic "
+            "complete_and_set_baseline() method per ADR-0004. Two-step completion/designation fallback "
+            "is strictly prohibited to prevent split-brain non-atomic baseline states."
+        )
+
     req_names = tuple(str(m.metric.metric_id) for m in eval_result.quality_metrics)
 
     spec = ExperimentSpec(
@@ -592,24 +601,14 @@ def establish_dataset_baseline(
     )
 
     # Atomically complete experiment and designate as active root baseline in a single transaction (Gate G4)
-    if hasattr(ledger, "complete_and_set_baseline"):
-        exp_rec = ledger.complete_and_set_baseline(
-            exp_id=exp_rec.exp_id,
-            workload_type=request.workload_type,
-            accuracy=acc_metrics,
-            system=sys_metrics,
-            artifacts=art_manifest,
-            notes=f"Empirical root baseline on {request.target_id} for {manifest.dataset_id} v{manifest.version}",
-        )
-    else:
-        exp_rec = ledger.complete_experiment(
-            exp_rec.exp_id,
-            accuracy=acc_metrics,
-            system=sys_metrics,
-            artifacts=art_manifest,
-            notes=f"Empirical root baseline on {request.target_id} for {manifest.dataset_id} v{manifest.version}",
-        )
-        ledger.set_active_baseline(exp_rec.exp_id, request.workload_type)
+    exp_rec = ledger.complete_and_set_baseline(
+        exp_id=exp_rec.exp_id,
+        workload_type=request.workload_type,
+        accuracy=acc_metrics,
+        system=sys_metrics,
+        artifacts=art_manifest,
+        notes=f"Empirical root baseline on {request.target_id} for {manifest.dataset_id} v{manifest.version}",
+    )
 
     return BaselineEstablishmentResult(
         experiment_record=exp_rec,

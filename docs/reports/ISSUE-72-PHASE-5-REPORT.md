@@ -19,9 +19,9 @@ The core architectural mandate of Phase 5 is:
 > **Measurable ground truth.** (`[P§26]`)<br>
 > Accuracy without deployability is incomplete (`[P§29.4]`). A baseline run is not established until measurable ground truth is established with co-equal measurement of model quality, latency, memory, and power on a named target accelerator with hardware-synchronized timing (`[P§13]`, `[P§29.4]`).
 
-Following initial review of PR #73, three blockers were remediated:
+Following PM reviews of PR #73, all blockers have been remediated:
 - **B29 (Authoritative Ledger Provenance):** Eliminated substring target guessing, commit SHA repair/hashing, seed defaulting to 42, and manufactured configs/hyperparameters. Enforced explicit authoritative provenance in `BaselineEstablishmentRequest`.
-- **B30 (Atomic Baseline Publication Transaction):** Implemented `complete_and_set_baseline` in `SQLiteExperimentLedger` within a single immediate SQLite transaction (`BEGIN IMMEDIATE ... COMMIT;`), ensuring zero split-brain orphan baseline states.
+- **B30 (Atomic Baseline Publication Transaction & Elimination of Fallback):** Implemented `complete_and_set_baseline` in `SQLiteExperimentLedger` within a single immediate SQLite transaction (`BEGIN IMMEDIATE ... COMMIT;`), ensuring zero split-brain orphan baseline states. Eliminated legacy two-step fallback (`complete_experiment` + `set_active_baseline`) in `cv_agent/orchestration/data_baseline.py` and enforced fail-closed validation rejecting non-conforming ledgers.
 - **B31 (Rejection of Upstream Placeholder Evidence):** Enabled `DefaultEvaluationRunner` to ingest authentic environment telemetry, and enforced fail-closed validation rejecting placeholder commit SHAs (`"0"*40`), dirty git state, placeholder hardware names, and missing seeds.
 - **Non-blocking Cleanups:** Restored 6 unrelated frozen files to clean `main` format.
 
@@ -34,8 +34,8 @@ Following initial review of PR #73, three blockers were remediated:
 | **G1** | **Dataset Versioning & Integrity** | Manifest verification, content-addressed storage hashes, payload root checksum validation, and write-once immutability in `DatasetRegistry`. | `verify_payload_root_checksum`, `test_case_04_payload_root_mismatch_rejects`, `test_case_13_attempt_to_overwrite_immutable_dataset_version_rejects` | **PASS** |
 | **G2** | **Leakage Fail-Closed Gate** | Mandatory 5-dimension leakage check (temporal, camera/site, duplicate, identity, annotation-round). Leaky splits fail closed with zero evaluation dispatch. | `StandardLeakageAuditor.audit_splits`, `test_case_01_temporal_leakage_only_rejects`, `test_case_02_camera_site_leakage_only_rejects`, `test_case_03_both_leakages_rejects_and_zero_evaluation_dispatch` | **PASS** |
 | **G3** | **Clean Baseline Evaluation** | Evaluation on named target accelerator via ADR-0005. Requires empirical accuracy, latency, memory (VRAM), and power, with hardware-synchronized timing (`timing_synchronized=True`). Ingests authentic environment evidence. | `establish_dataset_baseline`, `test_case_07_target_mismatch_or_unauthorized_target_rejects`, `test_case_08_unsynchronized_accelerator_timing_rejects`, `test_case_09_missing_power_baseline_not_publishable`, `test_case_10_missing_memory_baseline_not_publishable`, `test_case_15`–`test_case_19` | **PASS** |
-| **G4** | **Ledger Integrity & Active Root Baseline** | Atomic SQLite ledger persistence. Single-transaction completion and active baseline designation (`complete_and_set_baseline`). Zero corrupt/orphan baselines. Explicit non-empty hyperparameters (`[P§25]`). | `SQLiteExperimentLedger.complete_and_set_baseline`, `test_case_12_failed_evaluation_no_active_baseline`, `test_case_14_clean_dataset_complete_evidence_creates_root_baseline`, `test_case_20`–`test_case_23` | **PASS** |
-| **G5** | **Boundary & Adversarial Regression** | 23 mandatory adversarial cases, zero direct subprocess/SSH execution in orchestration, zero target synthesis, clean service delegation. | `tests/test_data_baseline_phase5_exit.py` (all 26 test cases passing) | **PASS** |
+| **G4** | **Ledger Integrity & Active Root Baseline** | Atomic SQLite ledger persistence. Single-transaction completion and active baseline designation (`complete_and_set_baseline`). Zero corrupt/orphan baselines. Explicit non-empty hyperparameters (`[P§25]`). Unconditional atomic publication with zero legacy two-step fallback. | `SQLiteExperimentLedger.complete_and_set_baseline`, `test_case_12_failed_evaluation_no_active_baseline`, `test_case_14_clean_dataset_complete_evidence_creates_root_baseline`, `test_case_20`–`test_case_24` | **PASS** |
+| **G5** | **Boundary & Adversarial Regression** | 24 mandatory adversarial cases, zero direct subprocess/SSH execution in orchestration, zero target synthesis, clean service delegation. | `tests/test_data_baseline_phase5_exit.py` (all 27 test cases passing) | **PASS** |
 
 ---
 
@@ -66,6 +66,7 @@ Following initial review of PR #73, three blockers were remediated:
 | **Case 21** | Invalid config provenance | Rejects empty config URI or malformed 64-hex config hash | `BaselineValidationError: config_uri / config_hash` |
 | **Case 22** | Empty hyperparameters mapping | Rejects empty hyperparameters without manufacturing placeholders | `BaselineValidationError: hyperparameters must be non-empty` |
 | **Case 23** | Atomic publication & rollback | `complete_and_set_baseline` rolls back completely on error | Atomic transaction verified; full rollback on integrity error |
+| **Case 24** | Legacy non-conforming ledger | Rejects missing `complete_and_set_baseline` fail-closed | `BaselineValidationError`, 0 calls to `complete_experiment` / `set_active_baseline` |
 
 ---
 
@@ -79,9 +80,11 @@ Following initial review of PR #73, three blockers were remediated:
 
 ## 5. Repository Quality Gates
 
-- **Test Suite**: 717/717 passing tests across 27 suites with zero regressions.
-- **Phase 5 Exit Suite**: 26/26 passing tests in `tests/test_data_baseline_phase5_exit.py`.
+- **Test Suite**: 718/718 passing tests across 27 suites with zero regressions.
+- **Phase 5 Exit Suite**: 27/27 passing tests in `tests/test_data_baseline_phase5_exit.py`.
 - **Ruff Linter**: `ruff check .` clean (0 errors).
 - **Ruff Formatter**: `ruff format --check` clean (198 source files formatted).
 - **Mypy Type Checker**: `mypy cv_agent` clean (0 issues across 121 source files).
 - **Git Diffs**: `git diff --check` clean.
+- **Package Build**: `python -m build` passes.
+- **Security Audit**: `pip-audit` clean (0 known vulnerabilities).

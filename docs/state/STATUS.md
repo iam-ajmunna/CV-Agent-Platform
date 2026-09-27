@@ -3,24 +3,22 @@
 > **Rewritten** every session. Describes **now**, never history — history lives in
 > `JOURNAL.md`. Hard cap: 60 lines. If it exceeds that, you are logging, not stating.
 
-**Updated:** 2026-09-27 · **Phase:** Phase 5 PR #73 Remediation Complete · **Health:** green
+**Updated:** 2026-09-27 · **Phase:** Phase 5 PR #73 Final Remediation Complete · **Health:** green
 
 ## Where we are
 
-PR #73 blockers B29–B31 are remediated and verified on `feature/ajmunna/phase-5-data-baseline`:
-- B29: Ledger provenance is strictly authoritative. No target guessing, no SHA1 repairs, no seed defaulting, no manufactured configs/hyperparameters.
-- B30: Baseline completion and designation execute in a single atomic SQLite transaction (`complete_and_set_baseline`) with rollback on error.
-- B31: Synthetic upstream environment placeholders (`"0"*40`, dirty git, placeholder hardware, missing seed) are rejected fail-closed.
-- Non-blocking cleanup: Unrelated frozen files restored to clean `main` state.
-- 26/26 exit & boundary tests passing in `tests/test_data_baseline_phase5_exit.py`.
-- 717/717 total repository tests passing with zero regressions.
+Final PM re-review blocker B30 is fully remediated on `feature/ajmunna/phase-5-data-baseline`:
+- B30 (Full Remediation): Eliminated two-step fallback (`complete_experiment` + `set_active_baseline`) in `establish_dataset_baseline`. Added fail-closed check requiring callable `complete_and_set_baseline` and unconditional invocation per ADR-0004.
+- Adversarial Case 24 added: verifies legacy non-conforming ledger fails closed with zero calls to `complete_experiment` or `set_active_baseline`. Existing SQLite transaction rollback test (`test_case_23`) retained.
+- 27/27 exit & boundary tests passing in `tests/test_data_baseline_phase5_exit.py`.
+- 718/718 total repository tests passing with zero regressions.
 - Static analysis clean: Ruff check clean, Ruff format clean, Mypy clean (121 source files), Git diff check clean.
 
 ## In flight
 
 | Item | Issue | PR | State |
 |---|---|---|---|
-| Phase 5 Data & Baseline Workflow | #72 | #73 | B29–B31 remediated; awaiting PM re-review |
+| Phase 5 Data & Baseline Workflow | #72 | #73 | B30 fully remediated; awaiting PM re-review |
 
 ## Next 3 actions
 

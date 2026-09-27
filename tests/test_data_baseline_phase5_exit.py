@@ -67,6 +67,7 @@ from cv_agent.experiments import (
     AccuracyMetrics,
     ArtifactManifest,
     ExecutionTarget,
+    ExperimentRecord,
     ExperimentSpec,
     ExperimentStatus,
     IncompleteMetricsError,
@@ -1845,6 +1846,148 @@ class TestPhase5DataBaselineAcceptance:
         active = ledger.get_baseline(WorkloadType.BENCHMARK)
         assert active is not None
         assert active.exp_id == rec.exp_id
+
+    # -----------------------------------------------------------------------
+    # Case 24: legacy non-conforming ledger fails closed without two-step fallback
+    # -----------------------------------------------------------------------
+    def test_case_24_legacy_nonconforming_ledger_fails_closed_without_fallback(
+        self, tmp_path: Path
+    ) -> None:
+        """Adversarial Case 24: A legacy ledger lacking complete_and_set_baseline must fail closed.
+
+        Proves that establish_dataset_baseline raises BaselineValidationError and strictly
+        prevents invoking complete_experiment + set_active_baseline in separate steps.
+        """
+
+        class LegacyNonConformingLedger:
+            def __init__(self) -> None:
+                self.create_experiment_called = 0
+                self.complete_experiment_called = 0
+                self.set_active_baseline_called = 0
+
+            def create_experiment(self, spec: ExperimentSpec) -> ExperimentRecord:
+                self.create_experiment_called += 1
+                return ExperimentRecord(
+                    exp_id="exp-legacy",
+                    spec=spec,
+                    status=ExperimentStatus.PROPOSED,
+                    created_at=datetime.now(timezone.utc).isoformat(),
+                    started_at=None,
+                    completed_at=None,
+                    job_id=None,
+                    accuracy_metrics=None,
+                    system_metrics=None,
+                    artifacts=None,
+                    error_message=None,
+                    notes=None,
+                )
+
+            def transition_status(
+                self, exp_id: str, new_status: ExperimentStatus, **kwargs: Any
+            ) -> ExperimentRecord:
+                return ExperimentRecord(
+                    exp_id=exp_id,
+                    spec=ExperimentSpec(
+                        name="legacy",
+                        hypothesis="legacy",
+                        workload_type=WorkloadType.BENCHMARK,
+                        target=ExecutionTarget.REMOTE_GPU,
+                        model_name="yolov8n",
+                        model_variant="baseline",
+                        commit_sha="a" * 40,
+                        dataset_version="v1.0.0",
+                        seed=42,
+                        batch_size=1,
+                        input_resolution=(640, 640),
+                        precision="fp16_amp",
+                        config_uri="file:///configs/eval.yaml",
+                        config_hash="c" * 64,
+                        hyperparameters={"bs": 1},
+                        accuracy_metric_requirements=("map_50",),
+                    ),
+                    status=new_status,
+                    created_at=datetime.now(timezone.utc).isoformat(),
+                    started_at=None,
+                    completed_at=None,
+                    job_id=None,
+                    accuracy_metrics=None,
+                    system_metrics=None,
+                    artifacts=None,
+                    error_message=None,
+                    notes=None,
+                )
+
+            def complete_experiment(
+                self, *args: Any, **kwargs: Any
+            ) -> ExperimentRecord:
+                self.complete_experiment_called += 1
+                raise AssertionError(
+                    "complete_experiment must not be called when complete_and_set_baseline is missing!"
+                )
+
+            def set_active_baseline(self, *args: Any, **kwargs: Any) -> None:
+                self.set_active_baseline_called += 1
+                raise AssertionError(
+                    "set_active_baseline must not be called when complete_and_set_baseline is missing!"
+                )
+
+            def get_experiment(self, exp_id: str) -> None:
+                return None
+
+            def get_baseline(self, workload_type: WorkloadType) -> None:
+                return None
+
+        legacy_ledger = LegacyNonConformingLedger()
+
+        manifest, meta = _make_clean_manifest_and_metadata()
+        ckpt, art = _make_checkpoint_and_model_artifact()
+        target_id = TargetId("jetson-orin-01")
+
+        metric = MetricDefinition(
+            metric_id=MetricId("map_50"),
+            name="mAP@0.50",
+            task_type=TaskType.DETECTION,
+        )
+        plan = build_baseline_evaluation_plan(
+            evaluation_id="eval-024",
+            experiment_id="exp-baseline-024",
+            dataset_manifest=manifest,
+            model_artifact=art,
+            task_type=TaskType.DETECTION,
+            metrics=(metric,),
+        )
+        op_id, req, dec = _make_approval_credentials(plan, target_id)
+        canned_output = _make_canned_evaluation_output(target_id=target_id)
+        mock_executor = MockToolExecutor(
+            canned_result=ToolResult(
+                execution_id=ExecutionId("exec-024"),
+                tool_id=ToolId("eval-tool"),
+                target_id=target_id,
+                status=ToolExecutionStatus.SUCCESS,
+                structured_output=canned_output,
+            )
+        )
+
+        request = _make_clean_baseline_request(
+            manifest,
+            meta,
+            ckpt,
+            art,
+            plan,
+            op_id,
+            req,
+            dec,
+            target_id,
+            mock_executor,
+            experiment_ledger=legacy_ledger,
+        )
+
+        with pytest.raises(BaselineValidationError) as exc_info:
+            establish_dataset_baseline(request)
+
+        assert "complete_and_set_baseline" in str(exc_info.value)
+        assert legacy_ledger.complete_experiment_called == 0
+        assert legacy_ledger.set_active_baseline_called == 0
 
 
 # ===========================================================================
