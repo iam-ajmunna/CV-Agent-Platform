@@ -6,7 +6,7 @@
 **Pull Request:** [PR #73](https://github.com/iam-ajmunna/CV-Agent-Platform/pull/73)<br>
 **Issue:** [Issue #72](https://github.com/iam-ajmunna/CV-Agent-Platform/issues/72)<br>
 **Authoritative Contracts:** Frozen `ADR-0009`, `ADR-0011`, `ADR-0005`, `ADR-0004`, `[P§7]`, `[P§12]`, `[P§13]`, `[P§21]`, `[P§22]`, `[P§24]`, `[P§25]`, `[P§26]`, `[P§29.2]`, `[P§29.4]`, `[P§34]`<br>
-**Status:** REMEDIATION COMPLETE — AWAITING OFFICIAL PM RE-REVIEW
+**Status:** ACCEPTED AND SQUASH-MERGED TO MAIN (`0e9dd84f232e0b00530a3accb2bc6ddd268abc05`)
 
 ---
 

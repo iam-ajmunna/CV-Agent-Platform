@@ -2386,3 +2386,21 @@ Remediated all three architectural blockers identified in the Official PM's seco
 **Learned:** Compatibility paths that emulate atomic operations through multiple non-atomic calls undermine transactional invariants and create silent split-brain risks under failure; interfaces must require atomic contracts unconditionally and fail closed when contract invariants are not satisfied.
 
 **Left open:** Push commit to `feature/ajmunna/phase-5-data-baseline`, verify green GitHub CI checks on PR #73, and transmit the new exact head SHA to the Official PM for merge authorization.
+
+---
+
+## 2026-09-28 — Phase 5 Acceptance & Squash-Merge into `main` (D-072, Issue #72, PR #73)
+
+**Did:** Official PM completed final acceptance re-review and squash-merged PR #73 (`feature/ajmunna/phase-5-data-baseline`) into `main` at `0e9dd84f232e0b00530a3accb2bc6ddd268abc05`:
+1. **Official PM Acceptance:** Fully discharged all blockers (B29, B30, B31). Verified that non-atomic fallback is removed, `complete_and_set_baseline()` is mandatory and invoked unconditionally, non-conforming legacy ledgers fail closed, Case 24 proves zero `complete_experiment()` and zero `set_active_baseline()` fallback calls, and SQLite rollback coverage remains intact.
+2. **Quality Gates & CI:** Verified 27/27 Phase 5 exit/adversarial tests and 718/718 total repository tests passing across 27 suites with zero regressions. All static gates clean (Ruff check, Ruff format across 198 files, Mypy across 121 files, `git diff --check`, `python -m build`, `pip-audit`). Exact-head GitHub CI independently verified green across Python 3.10–3.13 and GitGuardian.
+3. **Trunk Synchronization:** Squash-merged PR #73 to `main` at commit `0e9dd84f232e0b00530a3accb2bc6ddd268abc05`; closed Issue #72 (`completed`). Local `feature/ajmunna/phase-5-data-baseline` branch deleted.
+4. **Rolling State Sync:** Synchronized `STATUS.md`, `JOURNAL.md`, `DECISIONS.md` (D-072), and `ISSUE-72-PHASE-5-REPORT.md` on `main`.
+
+**Why:** `[P§7]`, `[P§12]`, `[P§13]`, `[P§21]`, `[P§22]`, `[P§24]`, `[P§25]`, `[P§26]`, `[P§29.2]`, `[P§29.4]`, `[P§34]` — marks Phase 5 as complete, establishing empirical dataset validation, leakage auditing, on-target baseline evaluation, and atomic experiment ledger persistence on `main`.
+
+**Broke:** Nothing broken. 718/718 tests pass on `main`.
+
+**Learned:** Strict adherence to atomic database transactions and fail-closed interfaces prevents split-brain orphan states and eliminates the danger of compatibility fallbacks degrading system invariants under edge-case failures.
+
+**Left open:** Phase 5 closed. `main` at `0e9dd84f232e0b00530a3accb2bc6ddd268abc05` is the authoritative baseline for Phase 6 architectural scoping.
