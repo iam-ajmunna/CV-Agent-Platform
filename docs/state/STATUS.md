@@ -3,31 +3,28 @@
 > **Rewritten** every session. Describes **now**, never history — history lives in
 > `JOURNAL.md`. Hard cap: 60 lines. If it exceeds that, you are logging, not stating.
 
-**Updated:** 2026-09-25 · **Phase:** Phase 4 Accepted & Merged · **Health:** green
+**Updated:** 2026-09-27 · **Phase:** Phase 5 PR #73 Final Remediation Complete · **Health:** green
 
 ## Where we are
 
-Phase 4 (DISCOVER / DEFINE Workflow, Issue #70 / PR #71) is accepted by Official PM and squash-merged to `main` at `25e7748f992ff60766034e12e2b261f7b80c579b`:
-- All 3 PM blockers fully discharged: B26 (`operational_definition` deterministic pre-DEFINE check), B27 (lossless round-trip `CapabilityIntent` persistence), B28 (zero fabricated hardware defaults; unknown facts remain `None` / `()`).
-- 5 Exit Gates & 6 Adversarial Scenarios verified (17 tests in `tests/test_discover_define_phase4_exit.py`).
-- Issue #70 closed (`completed`); PR #71 merged.
-- `main` at `25e7748f992ff60766034e12e2b261f7b80c579b` is the authoritative baseline for subsequent phase scoping.
-
-Repository quality gates:
-- 691/691 total tests passing across 26 test suites with zero regressions.
-- Static analysis clean: Ruff check clean, Ruff format clean (195 source files), Mypy clean (0 issues across 120 source files), Git diff check clean.
+Final PM re-review blocker B30 is fully remediated on `feature/ajmunna/phase-5-data-baseline`:
+- B30 (Full Remediation): Eliminated two-step fallback (`complete_experiment` + `set_active_baseline`) in `establish_dataset_baseline`. Added fail-closed check requiring callable `complete_and_set_baseline` and unconditional invocation per ADR-0004.
+- Adversarial Case 24 added: verifies legacy non-conforming ledger fails closed with zero calls to `complete_experiment` or `set_active_baseline`. Existing SQLite transaction rollback test (`test_case_23`) retained.
+- 27/27 exit & boundary tests passing in `tests/test_data_baseline_phase5_exit.py`.
+- 718/718 total repository tests passing with zero regressions.
+- Static analysis clean: Ruff check clean, Ruff format clean, Mypy clean (121 source files), Git diff check clean.
 
 ## In flight
 
 | Item | Issue | PR | State |
 |---|---|---|---|
-| Phase 4 DISCOVER / DEFINE Workflow | #70 | #71 | Accepted & merged to `main` (`25e7748f992ff60766034e12e2b261f7b80c579b`); closed |
+| Phase 5 Data & Baseline Workflow | #72 | #73 | B30 fully remediated; awaiting PM re-review |
 
 ## Next 3 actions
 
-1. Await Official PM scoping issue and architectural instructions for subsequent phase.
-2. Maintain baseline integrity on `main` (`25e7748f992ff60766034e12e2b261f7b80c579b`).
-3. Prepare branch and test harness upon issue approval.
+1. Commit and push remediated commit to `feature/ajmunna/phase-5-data-baseline`.
+2. Verify all GitHub CI checks pass green on PR #73.
+3. Transmit PR #73 link and exact head SHA to Official PM for formal re-review.
 
 ## Blockers
 
@@ -35,4 +32,4 @@ Repository quality gates:
 
 ## Scope guard
 
-Phase 4 complete. Subsequent work requires a new scoping issue and PM authorization before implementation.
+A baseline is not established without empirical on-target measurements of accuracy, latency, memory, and power with hardware-synchronized timing (`[P§29.4]`).

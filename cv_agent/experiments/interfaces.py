@@ -183,6 +183,23 @@ class ExperimentLedger(Protocol):
         """Atomically record results and mark experiment as COMPLETED (immutable thereafter)."""
         ...
 
+    def complete_and_set_baseline(
+        self,
+        exp_id: str,
+        workload_type: WorkloadType,
+        accuracy: AccuracyMetrics,
+        system: SystemMetrics,
+        artifacts: ArtifactManifest,
+        notes: str | None = None,
+    ) -> ExperimentRecord:
+        """Atomically record results, mark experiment as COMPLETED, and designate as active baseline.
+
+        Executed within a single immediate SQLite transaction. If any validation or
+        persistence step fails, all mutations roll back so no completed orphan baseline
+        can exist without its required active designation.
+        """
+        ...
+
     def fail_experiment(self, exp_id: str, error_message: str) -> ExperimentRecord:
         """Mark an experiment as FAILED with diagnostic error message (immutable thereafter)."""
         ...

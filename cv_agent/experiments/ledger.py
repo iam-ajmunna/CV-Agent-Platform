@@ -880,6 +880,160 @@ class SQLiteExperimentLedger(ExperimentLedger):
                 conn.execute("ROLLBACK;")
                 raise
 
+    def complete_and_set_baseline(
+        self,
+        exp_id: str,
+        workload_type: WorkloadType,
+        accuracy: AccuracyMetrics,
+        system: SystemMetrics,
+        artifacts: ArtifactManifest,
+        notes: str | None = None,
+    ) -> ExperimentRecord:
+        """Atomically record results, mark experiment as COMPLETED, and designate as active baseline.
+
+        Executed within a single immediate SQLite transaction. If any validation or
+        persistence step fails, all mutations roll back so no completed orphan baseline
+        can exist without its required active designation.
+        """
+        now_str = datetime.now(timezone.utc).isoformat()
+        with self._get_connection() as conn:
+            conn.execute("BEGIN IMMEDIATE;")
+            try:
+                cur = conn.execute(
+                    "SELECT status, workload_type, accuracy_metric_requirements FROM experiments WHERE exp_id = ?",
+                    (exp_id,),
+                )
+                row = cur.fetchone()
+                if not row:
+                    raise LedgerError(f"Experiment {exp_id!r} not found.")
+
+                current_status = ExperimentStatus(row["status"])
+                validate_experiment_transition(
+                    current_status, ExperimentStatus.COMPLETED
+                )
+
+                exp_workload = WorkloadType(row["workload_type"])
+                if exp_workload != workload_type:
+                    raise RelationalIntegrityError(
+                        f"Experiment {exp_id!r} workload {exp_workload.value!r} does not match "
+                        f"target baseline workload {workload_type.value!r}."
+                    )
+
+                raw_reqs = row["accuracy_metric_requirements"]
+                reqs = tuple(json.loads(raw_reqs)) if raw_reqs else ()
+                validate_metric_completeness(
+                    workload_type,
+                    accuracy,
+                    system,
+                    accuracy_metric_requirements=reqs,
+                )
+
+                # Persist accuracy metrics
+                acc_dict: dict[str, float] = {}
+                if accuracy.map_50 is not None:
+                    acc_dict["map_50"] = accuracy.map_50
+                if accuracy.map_50_95 is not None:
+                    acc_dict["map_50_95"] = accuracy.map_50_95
+                if accuracy.precision is not None:
+                    acc_dict["precision"] = accuracy.precision
+                if accuracy.recall is not None:
+                    acc_dict["recall"] = accuracy.recall
+                if accuracy.f1_score is not None:
+                    acc_dict["f1_score"] = accuracy.f1_score
+                if accuracy.additional_metrics:
+                    acc_dict.update(accuracy.additional_metrics)
+
+                for mk, mv in acc_dict.items():
+                    conn.execute(
+                        "INSERT OR REPLACE INTO accuracy_metrics (exp_id, metric_key, metric_value) VALUES (?, ?, ?)",
+                        (exp_id, mk, float(mv)),
+                    )
+
+                # Persist system metrics
+                sys_dict: dict[str, float] = {}
+                if system.peak_vram_mb is not None:
+                    sys_dict["peak_vram_mb"] = system.peak_vram_mb
+                if system.peak_ram_mb is not None:
+                    sys_dict["peak_ram_mb"] = system.peak_ram_mb
+                if system.gpu_hours is not None:
+                    sys_dict["gpu_hours"] = system.gpu_hours
+                if system.training_time_seconds is not None:
+                    sys_dict["training_time_seconds"] = system.training_time_seconds
+                if system.latency_e2e_ms is not None:
+                    sys_dict["latency_e2e_ms"] = system.latency_e2e_ms
+                if system.latency_inference_ms is not None:
+                    sys_dict["latency_inference_ms"] = system.latency_inference_ms
+                if system.throughput_fps is not None:
+                    sys_dict["throughput_fps"] = system.throughput_fps
+                if system.power_draw_watts is not None:
+                    sys_dict["power_draw_watts"] = system.power_draw_watts
+
+                for sk, sv in sys_dict.items():
+                    conn.execute(
+                        "INSERT OR REPLACE INTO system_metrics (exp_id, metric_key, metric_value) VALUES (?, ?, ?)",
+                        (exp_id, sk, float(sv)),
+                    )
+
+                # Persist artifacts
+                art_items: list[tuple[str, str, str | None]] = []
+                if artifacts.weights_uri:
+                    art_items.append(("weights", artifacts.weights_uri, None))
+                if artifacts.engine_uri:
+                    art_items.append(("engine", artifacts.engine_uri, None))
+                if artifacts.plots_uri:
+                    art_items.append(("plots", artifacts.plots_uri, None))
+                if artifacts.failure_analysis_ref:
+                    art_items.append(
+                        ("failure_analysis", artifacts.failure_analysis_ref, None)
+                    )
+
+                for atype, auri, _ in art_items:
+                    chk = (
+                        artifacts.checksums.get(atype) if artifacts.checksums else None
+                    )
+                    conn.execute(
+                        "INSERT OR REPLACE INTO artifacts (exp_id, artifact_type, uri, checksum) VALUES (?, ?, ?, ?)",
+                        (exp_id, atype, auri, chk),
+                    )
+
+                # Mark experiment as COMPLETED
+                conn.execute(
+                    """
+                    UPDATE experiments
+                    SET status = ?, completed_at = ?, notes = COALESCE(?, notes)
+                    WHERE exp_id = ?
+                    """,
+                    (ExperimentStatus.COMPLETED.value, now_str, notes, exp_id),
+                )
+
+                # Atomically designate as active baseline in the same transaction
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO active_baselines (workload_type, exp_id, updated_at)
+                    VALUES (?, ?, ?)
+                    """,
+                    (workload_type.value, exp_id, now_str),
+                )
+
+                conn.execute("COMMIT;")
+            except sqlite3.DatabaseError as err:
+                conn.execute("ROLLBACK;")
+                if "terminal" in str(err).lower():
+                    raise ExperimentImmutabilityError(str(err)) from err
+                if "active baseline" in str(err).lower():
+                    raise RelationalIntegrityError(str(err)) from err
+                raise
+            except Exception:
+                conn.execute("ROLLBACK;")
+                raise
+
+        record = self.get_experiment(exp_id)
+        if not record:
+            raise LedgerError(
+                f"Failed to retrieve completed baseline experiment {exp_id}"
+            )
+        return record
+
     def get_baseline(
         self, workload_type: WorkloadType | None = None
     ) -> ExperimentRecord | None:
