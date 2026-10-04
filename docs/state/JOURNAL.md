@@ -2404,3 +2404,34 @@ Remediated all three architectural blockers identified in the Official PM's seco
 **Learned:** Strict adherence to atomic database transactions and fail-closed interfaces prevents split-brain orphan states and eliminates the danger of compatibility fallbacks degrading system invariants under edge-case failures.
 
 **Left open:** Phase 5 closed. `main` at `0e9dd84f232e0b00530a3accb2bc6ddd268abc05` is the authoritative baseline for Phase 6 architectural scoping.
+
+---
+
+## 2026-10-03 — Phase 6: Train / Evaluate / Diagnose Implementation (feature/ajmunna/phase-6-train-evaluate-diagnose)
+
+**Did:**
+1. Created branch `feature/ajmunna/phase-6-train-evaluate-diagnose` from `main` to implement Issue #74.
+2. Implemented `cv_agent/orchestration/train_evaluate_diagnose.py`:
+   - Domain contracts: `TargetConstraint`, `TargetConstraintVerdict`, `OperatingPoint`, `CompositeEvaluationResult`, `RankedFailureCategory`, `FailureCategoryAnalysis`, `ProposedNextExperiment`.
+   - Workflow request/result models: `TrainEvaluateDiagnoseRequest`, `TrainEvaluateDiagnoseResult`, `TrainEvaluateDiagnoseWorkflow`, `run_train_evaluate_diagnose`, `build_training_evaluation_plan`.
+   - Exception hierarchy: `TrainEvaluateDiagnoseError`, `Phase6ValidationError`, `Phase6ApprovalError`, `Phase6ExecutionError`, `Phase6EvaluationError`, `Phase6DiagnosisError`.
+   - Invariants: Pretrained base checkpoint verification, deterministic cost estimation, human PM approval binding and expiration, crash recovery and ambiguous execution reconciliation, duplicate dispatch rejection, reproducibility metadata enforcement (40-hex commit SHA, non-placeholder, non-default seed, config URI/hash, hyperparameters), telemetry divergence monitoring (NaN/Inf, OOM), checkpoint provenance, held-out evaluation split enforcement, hardware-synchronized accelerator timing check, composite delta comparison against active root baseline, empirical error category ranking with causal hypotheses, and strictly undispatched next-experiment proposals.
+3. Updated `cv_agent/evaluation/types.py`:
+   - Allowed uppercase alphanumeric characters in `_EXPERIMENT_ID_PATTERN` to support canonical ADR-0004 `EXP-YYYYMMDD-NNNN` experiment identifiers seamlessly in evaluation plans and results.
+4. Updated `cv_agent/orchestration/__init__.py`:
+   - Exported Phase 6 symbols with clean lazy `__getattr__` and sorted `__all__`.
+5. Created comprehensive exit test suite in `tests/test_train_evaluate_diagnose_phase6_exit.py`:
+   - 20 mandatory adversarial cases covering all 5 Phase 6 acceptance gates (G1–G5).
+6. Quality gates verified:
+   - 20/20 Phase 6 exit tests passing.
+   - 738/738 repository tests passing across 28 test suites with zero regressions.
+   - Static analysis clean: Ruff check clean (0 errors), Ruff format clean, Mypy clean (122 source files), `git diff --check` clean.
+7. Generated implementation report in `docs/reports/ISSUE-74-PHASE-6-REPORT.md`, updated `STATUS.md`, and recorded D-073 in `DECISIONS.md`.
+
+**Why:** `[P§7]`, `[P§12]`, `[P§13]`, `[P§19]`, `[P§20]`, `[P§21]`, `[P§22]`, `[P§24]`, `[P§25]`, `[P§26]`, `[P§29.1]`, `[P§29.2]`, `[P§29.3]`, `[P§29.4]`, `[P§34]` — fulfills Issue #74 and ROADMAP.md Phase 6, establishing the complete closed-loop experiment lifecycle from approved training to composite evaluation and evidence-grounded diagnosis.
+
+**Broke:** Nothing broken. All 738 tests passing with zero regressions.
+
+**Learned:** Subsystem integration in a layered architecture requires strict boundary discipline: orchestration must never own execution transport, evaluation metrics, or experiment persistence, but instead coordinate typed contracts across specialized domain authorities while maintaining end-to-end auditability and reproducibility.
+
+**Left open:** Commit, push branch, open PR against `main` referencing Issue #74, and provide exact head SHA to Official PM for review.

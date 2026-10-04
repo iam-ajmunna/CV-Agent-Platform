@@ -44,11 +44,14 @@ def validate_benchmark_id(value: str) -> BenchmarkId:
     return BenchmarkId(value)
 
 
+_EXPERIMENT_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_.-]+(/[a-zA-Z0-9_.-]+)*$")
+
+
 def validate_experiment_id(value: str) -> ExperimentId:
     """Validate ExperimentId conforms to canonical identifier syntax."""
-    if not isinstance(value, str) or not _IDENTIFIER_PATTERN.match(value):
+    if not isinstance(value, str) or not _EXPERIMENT_ID_PATTERN.match(value):
         raise ValueError(
-            f"ExperimentId {value!r} does not conform to canonical syntax '^[a-z0-9_.-]+(/[a-z0-9_.-]+)*$'"
+            f"ExperimentId {value!r} does not conform to canonical syntax '^[a-zA-Z0-9_.-]+(/[a-zA-Z0-9_.-]+)*$'"
         )
     return ExperimentId(value)
 
