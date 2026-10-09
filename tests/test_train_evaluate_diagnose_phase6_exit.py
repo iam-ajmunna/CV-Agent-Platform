@@ -33,6 +33,7 @@ Authoritative Acceptance Suite for Issue #74 & ROADMAP.md Phase 6:
 from __future__ import annotations
 
 import hashlib
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -57,8 +58,10 @@ from cv_agent.dataset import (
     compute_payload_root_checksum,
 )
 from cv_agent.domain import CapabilityId
+from cv_agent.evaluation.canonicalization import compute_evaluation_payload_hash
 from cv_agent.evaluation.contracts import (
     ErrorAnalysisRecord,
+    EvaluationPlan,
     MetricDefinition,
 )
 from cv_agent.evaluation.errors import (
@@ -91,6 +94,7 @@ from cv_agent.orchestration.contracts import (
     OperationIntent,
     OperationPayloadEnvelope,
     OperationStatus,
+    OrchestrationStore,
 )
 from cv_agent.orchestration.fencing import LeaseManager
 from cv_agent.orchestration.reconciliation import (
@@ -112,8 +116,11 @@ from cv_agent.orchestration.train_evaluate_diagnose import (
     run_train_evaluate_diagnose,
 )
 from cv_agent.tools import (
+    DefaultToolRegistry,
     ExecutionId,
+    ExecutionTargetDescriptor,
     TargetId,
+    TargetType,
     ToolExecutionStatus,
     ToolExecutor,
     ToolId,
@@ -462,9 +469,17 @@ def _make_clean_request(
     base_checkpoint: CheckpointManifest | None = None,
     telemetry_stream: list[TrainingTelemetryRecord] | None = None,
     terminal_checkpoint: CheckpointManifest | None = None,
+    training_system_metrics: SystemMetrics | None = None,
+    evaluation_plan: EvaluationPlan | None = None,
+    evaluation_operation_identity: OperationIdentity | None = None,
+    evaluation_approval_request: ApprovalRequest | None = None,
+    evaluation_approval_decision: ApprovalDecision | None = None,
     active_baseline_spec: ExperimentSpec | None = None,
     active_baseline_acc: AccuracyMetrics | None = None,
     active_baseline_sys: SystemMetrics | None = None,
+    tool_registry: DefaultToolRegistry | None = None,
+    orchestration_store: OrchestrationStore | None = None,
+    reconciliation_coordinator: ReconciliationCoordinator | None = None,
 ) -> TrainEvaluateDiagnoseRequest:
     """Construct a clean, valid TrainEvaluateDiagnoseRequest."""
     manifest, metadata = _make_clean_manifest_and_metadata()
@@ -508,6 +523,88 @@ def _make_clean_request(
             workload_type=WorkloadType.BENCHMARK,
         )
 
+    # B32: Authoritative terminal training checkpoint
+    weights_hash = "f" * 64
+    weights_uri = f"file:///checkpoints/{plan.plan_id}/best.pt"
+    clean_terminal_ckpt = terminal_checkpoint
+    if clean_terminal_ckpt is None:
+        clean_terminal_ckpt = CheckpointManifest(
+            checkpoint_id=CheckpointId(f"ckpt-{plan.plan_id}"),
+            job_id=TrainingJobId(f"job-{plan.plan_id}"),
+            plan_id=plan.plan_id,
+            epoch=plan.epochs,
+            step=1000,
+            weights_uri=weights_uri,
+            weights_hash=ContentHash(weights_hash),
+            created_at=datetime.now(timezone.utc),
+            metrics={
+                "map_50": 0.88,
+                "map_50_95": 0.65,
+                "precision": 0.86,
+                "recall": 0.84,
+            },
+        )
+
+    # B33: Empirical training system metrics
+    clean_train_sys = training_system_metrics or SystemMetrics(
+        gpu_hours=0.5,
+        training_time_seconds=1800.0,
+        peak_vram_mb=4096.0,
+        power_draw_watts=45.0,
+        latency_inference_ms=12.0,
+        latency_e2e_ms=15.0,
+        throughput_fps=80.0,
+    )
+
+    # B34: Authoritative evaluation credentials and plan binding
+    clean_eval_plan = evaluation_plan
+    if clean_eval_plan is None:
+        metric_def = MetricDefinition(
+            metric_id=MetricId("map_50"),
+            name="mAP@0.50",
+            task_type=TaskType.DETECTION,
+        )
+        clean_eval_plan = build_training_evaluation_plan(
+            evaluation_id=f"eval-{clean_terminal_ckpt.checkpoint_id}".lower(),
+            experiment_id="exp-p6-001",
+            dataset_manifest=manifest,
+            checkpoint_manifest=clean_terminal_ckpt,
+            task_type=TaskType.DETECTION,
+            metrics=(metric_def,),
+            architecture_name=plan.architecture_name,
+            input_resolution=plan.augmentation.image_size,
+            split_name="test",
+        )
+    eval_payload_hash = compute_evaluation_payload_hash(clean_eval_plan)
+
+    eval_op_id = evaluation_operation_identity or OperationIdentity(
+        operation_id="op-eval-001",
+        operation_version="1",
+        canonical_payload_hash=eval_payload_hash,
+        target_identity=f"target:{tgt_id}",
+    )
+    eval_app_req = evaluation_approval_request or ApprovalRequest(
+        request_id="req-eval-001",
+        session_id="sess-eval-001",
+        operation_id=OperationId(value="op-eval-001"),
+        operation_version=1,
+        canonical_payload_hash=eval_payload_hash,
+        policy_version="1.0",
+        action_type="evaluation.execute",
+        risk_level="HIGH",
+        resource_scope=f"target:{tgt_id}",
+        created_at=datetime.now(timezone.utc),
+    )
+    eval_app_dec = evaluation_approval_decision or ApprovalDecision(
+        request_id="req-eval-001",
+        decision=ApprovalStatus.APPROVED,
+        principal="human_pm",
+        resolved_at=datetime.now(timezone.utc),
+        bound_payload_hash=eval_payload_hash,
+        bound_resource_scope=f"target:{tgt_id}",
+        bound_policy_version="1.0",
+    )
+
     return TrainEvaluateDiagnoseRequest(
         training_plan=plan,
         dataset_manifest=manifest,
@@ -533,9 +630,27 @@ def _make_clean_request(
         seed=42,
         config_uri="file:///configs/yolov8.yaml",
         config_hash="b" * 64,
-        hyperparameters={"lr": 0.001, "batch_size": 16},
+        hyperparameters={
+            "lr": 0.001,
+            "batch_size": 16,
+            "dataset_id": str(manifest.dataset_id),
+            "split_name": "test",
+            "target_id": str(tgt_id),
+            "operating_point": {
+                "confidence_threshold": 0.5,
+                "max_false_positive_rate": 0.05,
+            },
+        },
         telemetry_stream=telemetry_stream,
-        terminal_checkpoint=terminal_checkpoint,
+        terminal_checkpoint=clean_terminal_ckpt,
+        training_system_metrics=clean_train_sys,
+        evaluation_plan=clean_eval_plan,
+        evaluation_operation_identity=eval_op_id,
+        evaluation_approval_request=eval_app_req,
+        evaluation_approval_decision=eval_app_dec,
+        tool_registry=tool_registry,
+        orchestration_store=orchestration_store,
+        reconciliation_coordinator=reconciliation_coordinator,
     )
 
 
@@ -652,6 +767,29 @@ def test_case_4_unregistered_named_target_rejects_zero_local_synthesis(tmp_path:
     req_ph = _make_clean_request(tmp_path, target_id=TargetId("placeholder-target"))
     with pytest.raises(EvaluationApprovalRequiredError, match="synthesized target"):
         run_train_evaluate_diagnose(req_ph)
+
+    # 3. Unregistered named target in ToolRegistry
+    reg = DefaultToolRegistry(
+        targets=[
+            ExecutionTargetDescriptor(
+                target_id=TargetId("orin-agx-01"),
+                target_type=TargetType.LOCAL,
+                is_available=True,
+                description="Jetson AGX Orin local target",
+            )
+        ]
+    )
+    req_unreg = _make_clean_request(
+        tmp_path, target_id=TargetId("unregistered-accelerator")
+    )
+    req_unreg = TrainEvaluateDiagnoseRequest(
+        **{**req_unreg.__dict__, "tool_registry": reg}
+    )
+    with pytest.raises(
+        Phase6ValidationError,
+        match="not registered in the authoritative target inventory",
+    ):
+        run_train_evaluate_diagnose(req_unreg)
 
 
 def test_case_5_missing_nonfinite_cost_inputs_or_invented_hourly_price_rejects(
@@ -771,16 +909,20 @@ def test_case_8_approval_interrupt_survives_restart_and_resumes_once(tmp_path: P
         owner_instance_id="worker-01",
     )
 
+    req_base = _make_clean_request(tmp_path, target_id=TargetId("orin-agx-01"))
+    plan = req_base.training_plan
+    op_payload_hash = compute_training_payload_hash(plan)
+
     intent = OperationIntent(
         operation_id=OperationId(value="op-train-resume-001"),
         session_id="sess-p6-01",
         operation_version=1,
-        operation_type="train",
+        operation_type="training",
         canonical_payload=OperationPayloadEnvelope(
             schema_id="training_plan",
             schema_version=1,
             canonicalization_version="1.0",
-            payload_hash="c" * 64,
+            payload_hash=op_payload_hash,
             payload={},
         ),
         target_identity="target:orin-agx-01",
@@ -790,7 +932,7 @@ def test_case_8_approval_interrupt_survives_restart_and_resumes_once(tmp_path: P
     # 1. Create approval request before interrupt
     app_req = approval_mgr.create_request(
         operation=intent,
-        action_type="train.execute",
+        action_type="training.execute",
         risk_level="HIGH",
         policy_version="1.0",
         resource_scope="target:orin-agx-01",
@@ -799,19 +941,43 @@ def test_case_8_approval_interrupt_survives_restart_and_resumes_once(tmp_path: P
     assert app_req.request_id is not None
 
     # Record decision
-    approval_mgr.record_decision(
+    app_dec = approval_mgr.record_decision(
         request_id=app_req.request_id,
         decision=ApprovalStatus.APPROVED,
         principal="human_pm",
         lease=lease,
     )
+    store.release_lease(lease)
 
     # 2. Simulate restart by opening a fresh store on the same sqlite file
     restarted_store = SQLiteOrchestrationStore(db_path)
     found_approval = restarted_store.find_approval(app_req.request_id)
     assert found_approval is not None
     assert found_approval["decision"] == "approved"
-    assert found_approval["bound_payload_hash"] == "c" * 64
+    assert found_approval["bound_payload_hash"] == op_payload_hash
+
+    # 3. Resume and execute workflow using restarted store
+    op_id = OperationIdentity(
+        operation_id="op-train-resume-001",
+        operation_version="1",
+        canonical_payload_hash=op_payload_hash,
+        target_identity="target:orin-agx-01",
+    )
+    req_resumed = TrainEvaluateDiagnoseRequest(
+        **{
+            **req_base.__dict__,
+            "operation_identity": op_id,
+            "approval_request": app_req,
+            "approval_decision": app_dec,
+            "orchestration_store": restarted_store,
+        }
+    )
+    res = run_train_evaluate_diagnose(req_resumed)
+    assert res.experiment_record.status == ExperimentStatus.COMPLETED
+
+    # 4. Attempting duplicate replay with the same operation identity rejects
+    with pytest.raises(Phase6ExecutionError, match="Duplicate dispatch rejected"):
+        run_train_evaluate_diagnose(req_resumed)
 
 
 def test_case_9_duplicate_replayed_dispatch_does_not_launch_duplicate_paid_jobs(
@@ -849,19 +1015,23 @@ def test_case_10_ambiguous_external_execution_remains_reconciling_until_reconcil
         owner_instance_id="worker-01",
     )
 
+    req_base = _make_clean_request(tmp_path)
+    op_payload_hash = compute_training_payload_hash(req_base.training_plan)
+    op_val = "op-ambiguous-001"
+
     intent = OperationIntent(
-        operation_id=OperationId(value="op-ambiguous-001"),
+        operation_id=OperationId(value=op_val),
         session_id="sess-rec-01",
         operation_version=1,
-        operation_type="train",
+        operation_type="training",
         canonical_payload=OperationPayloadEnvelope(
             schema_id="training_plan",
             schema_version=1,
             canonicalization_version="1.0",
-            payload_hash="d" * 64,
+            payload_hash=op_payload_hash,
             payload={},
         ),
-        target_identity="target:orin-agx-01",
+        target_identity=f"target:{req_base.target_id}",
         created_at=datetime.now(timezone.utc),
     )
     store.save_operation(intent, lease)
@@ -886,13 +1056,44 @@ def test_case_10_ambiguous_external_execution_remains_reconciling_until_reconcil
     # Reconciling without reconciler produces UNRESOLVED, never silently mapped to SUCCESS
     outcome = coord.reconcile_operation(intent, lease)
     assert outcome == ReconciliationOutcome.UNRESOLVED
+    store.release_lease(lease)
+
+    # Workflow fails closed when dispatch is attempted on an ambiguous operation
+    op_id = OperationIdentity(
+        operation_id=op_val,
+        operation_version="1",
+        canonical_payload_hash=op_payload_hash,
+        target_identity=f"target:{req_base.target_id}",
+    )
+    ambig_req = TrainEvaluateDiagnoseRequest(
+        **{
+            **req_base.__dict__,
+            "operation_identity": op_id,
+            "orchestration_store": store,
+            "reconciliation_coordinator": coord,
+        }
+    )
+    with pytest.raises(
+        Phase6ExecutionError, match="ambiguous and remains UNRESOLVED / RECONCILING"
+    ):
+        run_train_evaluate_diagnose(ambig_req)
 
 
 def test_case_11_async_dispatch_success_without_terminal_evidence_cannot_complete(
     tmp_path: Path,
 ):
     """Case 11: Async dispatch SUCCESS without terminal evidence cannot mark training complete."""
-    # Terminal checkpoint manifest with empty weights hash
+    # 1. Missing terminal checkpoint manifest (B32)
+    req_no_ckpt = _make_clean_request(tmp_path / "p1")
+    req_no_ckpt = TrainEvaluateDiagnoseRequest(
+        **{**req_no_ckpt.__dict__, "terminal_checkpoint": None}
+    )
+    with pytest.raises(
+        Phase6ValidationError, match="Terminal training checkpoint manifest is missing"
+    ):
+        run_train_evaluate_diagnose(req_no_ckpt)
+
+    # 2. Terminal checkpoint manifest with corrupt weights hash
     bad_ckpt = CheckpointManifest(
         checkpoint_id=CheckpointId("ckpt-corrupt-001"),
         job_id=TrainingJobId("job-001"),
@@ -902,8 +1103,9 @@ def test_case_11_async_dispatch_success_without_terminal_evidence_cannot_complet
         weights_uri="file:///weights/model.pt",
         weights_hash=ContentHash("0" * 63),  # Invalid length (63 instead of 64)
         created_at=datetime.now(timezone.utc),
+        metrics={"map_50": 0.88, "precision": 0.86, "recall": 0.84},
     )
-    req = _make_clean_request(tmp_path, terminal_checkpoint=bad_ckpt)
+    req = _make_clean_request(tmp_path / "p2", terminal_checkpoint=bad_ckpt)
 
     with pytest.raises(Phase6ValidationError, match="weights hash"):
         run_train_evaluate_diagnose(req)
@@ -982,6 +1184,46 @@ def test_case_13_invalid_checkpoint_hash_or_missing_reproducibility_prevents_com
     with pytest.raises(Phase6ValidationError, match="config_hash"):
         run_train_evaluate_diagnose(req4_bad)
 
+    # 5. Missing required accuracy metrics in checkpoint (B33)
+    incomplete_ckpt = CheckpointManifest(
+        checkpoint_id=CheckpointId("ckpt-no-acc"),
+        job_id=TrainingJobId("job-001"),
+        plan_id=PlanId("plan-yolov8n-01"),
+        epoch=10,
+        step=1000,
+        weights_uri="file:///weights/model.pt",
+        weights_hash=ContentHash("a" * 64),
+        created_at=datetime.now(timezone.utc),
+        metrics={"map_50": 0.88},  # Missing map_50_95, precision, recall
+    )
+    req5 = _make_clean_request(tmp_path / "p5", terminal_checkpoint=incomplete_ckpt)
+    with pytest.raises(Phase6ValidationError, match="missing required.*metrics"):
+        run_train_evaluate_diagnose(req5)
+
+    # 6. Missing empirical training system metrics (B33)
+    req6 = _make_clean_request(tmp_path / "p6")
+    req6_bad = TrainEvaluateDiagnoseRequest(
+        **{**req6.__dict__, "training_system_metrics": None}
+    )
+    with pytest.raises(
+        Phase6ValidationError, match="Missing empirical training_system_metrics"
+    ):
+        run_train_evaluate_diagnose(req6_bad)
+
+    # 7. Non-positive/incomplete training system metrics (B33)
+    bad_sys = SystemMetrics(
+        training_time_seconds=-10.0,
+        peak_vram_mb=4096.0,
+        power_draw_watts=45.0,
+        throughput_fps=80.0,
+    )
+    req7 = _make_clean_request(tmp_path / "p7", training_system_metrics=bad_sys)
+    with pytest.raises(
+        Phase6ValidationError,
+        match="Training system metrics must contain positive finite values",
+    ):
+        run_train_evaluate_diagnose(req7)
+
 
 def test_case_14_failed_partial_training_never_produces_completed_ledger_or_evaluation(
     tmp_path: Path,
@@ -1049,6 +1291,27 @@ def test_case_15_evaluation_wrong_dataset_test_split_checkpoint_target_rejects(
                 split_name=bad_split,
             )
 
+    # Missing evaluation authorization credentials (B34)
+    req_clean1 = _make_clean_request(tmp_path / "part_dec")
+    req_no_eval_dec = TrainEvaluateDiagnoseRequest(
+        **{**req_clean1.__dict__, "evaluation_approval_decision": None}
+    )
+    with pytest.raises(
+        EvaluationApprovalRequiredError,
+        match="Evaluation requires explicit human approval",
+    ):
+        run_train_evaluate_diagnose(req_no_eval_dec)
+
+    req_clean2 = _make_clean_request(tmp_path / "part_req")
+    req_no_eval_req = TrainEvaluateDiagnoseRequest(
+        **{**req_clean2.__dict__, "evaluation_approval_request": None}
+    )
+    with pytest.raises(
+        EvaluationApprovalRequiredError,
+        match="Evaluation requires explicit human approval",
+    ):
+        run_train_evaluate_diagnose(req_no_eval_req)
+
 
 def test_case_16_missing_telemetry_or_unsynchronized_accelerator_timing_rejects(
     tmp_path: Path,
@@ -1058,7 +1321,7 @@ def test_case_16_missing_telemetry_or_unsynchronized_accelerator_timing_rejects(
     unsync_output = _make_canned_evaluation_output(
         TargetId("orin-agx-01"), timing_synchronized=False
     )
-    req1 = _make_clean_request(tmp_path, canned_eval_output=unsync_output)
+    req1 = _make_clean_request(tmp_path / "part1", canned_eval_output=unsync_output)
     with pytest.raises(
         (Phase6EvaluationError, EvaluationError), match="Hardware-synchronized timing"
     ):
@@ -1071,10 +1334,28 @@ def test_case_16_missing_telemetry_or_unsynchronized_accelerator_timing_rejects(
     with pytest.raises(Phase6EvaluationError, match="missing system_benchmarks"):
         run_train_evaluate_diagnose(req2)
 
+    # 3. Missing peak_vram_gb (B35)
+    no_vram_output = _make_canned_evaluation_output(
+        TargetId("orin-agx-01"), peak_vram_gb=None
+    )
+    req3 = _make_clean_request(tmp_path / "part3", canned_eval_output=no_vram_output)
+    with pytest.raises(Phase6EvaluationError, match="missing empirical peak_vram_gb"):
+        run_train_evaluate_diagnose(req3)
+
+    # 4. Missing power_watts_avg (B35)
+    no_power_output = _make_canned_evaluation_output(
+        TargetId("orin-agx-01"), power_watts_avg=None
+    )
+    req4 = _make_clean_request(tmp_path / "part4", canned_eval_output=no_power_output)
+    with pytest.raises(
+        Phase6EvaluationError, match="missing empirical power_watts_avg"
+    ):
+        run_train_evaluate_diagnose(req4)
+
 
 def test_case_17_incomparable_baseline_cannot_claim_delta(tmp_path: Path):
     """Case 17: Incomparable baseline (dataset/split/threshold/target) cannot claim delta."""
-    # Baseline on different dataset version v0.9.0 vs v1.0.0
+    # 1. Baseline on different dataset version v0.9.0 vs v1.0.0
     diff_dataset_baseline_spec = ExperimentSpec(
         name="old-baseline",
         hypothesis="Baseline on old dataset",
@@ -1090,12 +1371,12 @@ def test_case_17_incomparable_baseline_cannot_claim_delta(tmp_path: Path):
         precision="fp16_amp",
         config_uri="file:///cfg.yaml",
         config_hash="c" * 64,
-        hyperparameters={"lr": 0.001},
+        hyperparameters={"lr": 0.001, "dataset_id": "ds-security"},
         accuracy_metric_requirements=("map_50",),
     )
 
     req = _make_clean_request(
-        tmp_path,
+        tmp_path / "diff_ver",
         active_baseline_spec=diff_dataset_baseline_spec,
         active_baseline_acc=AccuracyMetrics(map_50=0.80),
         active_baseline_sys=SystemMetrics(
@@ -1106,15 +1387,55 @@ def test_case_17_incomparable_baseline_cannot_claim_delta(tmp_path: Path):
             power_draw_watts=40.0,
         ),
     )
-    with pytest.raises(Phase6ValidationError, match="Incomparable baseline"):
+    with pytest.raises(
+        Phase6ValidationError, match="Incomparable baseline.*dataset version"
+    ):
         run_train_evaluate_diagnose(req)
+
+    # 2. Baseline on different target (B36)
+    diff_target_baseline = replace(
+        diff_dataset_baseline_spec,
+        dataset_version="v1.0.0",
+        hyperparameters={
+            "lr": 0.001,
+            "dataset_id": "ds-security",
+            "split_name": "test",
+            "target_id": "different-target",
+        },
+    )
+    req_tgt = _make_clean_request(
+        tmp_path / "diff_tgt",
+        active_baseline_spec=diff_target_baseline,
+        active_baseline_acc=AccuracyMetrics(map_50=0.80),
+    )
+    with pytest.raises(Phase6ValidationError, match="Incomparable baseline.*target"):
+        run_train_evaluate_diagnose(req_tgt)
+
+    # 3. Baseline on different evaluation split (B36)
+    diff_split_baseline = replace(
+        diff_dataset_baseline_spec,
+        dataset_version="v1.0.0",
+        hyperparameters={
+            "lr": 0.001,
+            "dataset_id": "ds-security",
+            "split_name": "val",
+            "target_id": "orin-agx-01",
+        },
+    )
+    req_split = _make_clean_request(
+        tmp_path / "diff_split",
+        active_baseline_spec=diff_split_baseline,
+        active_baseline_acc=AccuracyMetrics(map_50=0.80),
+    )
+    with pytest.raises(Phase6ValidationError, match="Incomparable baseline.*split"):
+        run_train_evaluate_diagnose(req_split)
 
 
 def test_case_18_missing_failure_category_counts_cannot_produce_fabricated_ranking(
     tmp_path: Path,
 ):
     """Case 18: Missing failure-category counts/evidence cannot produce a fabricated ranking."""
-    # Error analysis record with zero localization/classification/FP/slice failures
+    # 1. Error analysis record with zero localization/classification/FP/slice failures
     empty_error_record = ErrorAnalysisRecord(
         total_samples=100,
         failed_samples_count=5,
@@ -1130,7 +1451,7 @@ def test_case_18_missing_failure_category_counts_cannot_produce_fabricated_ranki
         def analyze(self, predictions, ground_truth, dataset_binding):
             return empty_error_record
 
-    req = _make_clean_request(tmp_path)
+    req = _make_clean_request(tmp_path / "p1")
     req_empty_err = TrainEvaluateDiagnoseRequest(
         **{**req.__dict__, "error_analyzer": EmptyErrorAnalyzer()}
     )
@@ -1138,6 +1459,31 @@ def test_case_18_missing_failure_category_counts_cannot_produce_fabricated_ranki
         Phase6DiagnosisError, match="Missing empirical failure-category counts"
     ):
         run_train_evaluate_diagnose(req_empty_err)
+
+    # 2. Low slice performance without empirical failure counts does NOT invent counts (B37)
+    slice_drop_error_record = ErrorAnalysisRecord(
+        total_samples=100,
+        failed_samples_count=5,
+        false_positive_count=0,
+        false_negative_count=0,
+        localization_errors=0,
+        classification_errors=0,
+        slice_performance={"night_lighting": 0.50, "small_objects": 0.40},
+        diagnostics_summary="Low slice performance without empirical failure counts.",
+    )
+
+    class SliceDropErrorAnalyzer:
+        def analyze(self, predictions, ground_truth, dataset_binding):
+            return slice_drop_error_record
+
+    req_slice = _make_clean_request(tmp_path / "p2")
+    req_slice_err = TrainEvaluateDiagnoseRequest(
+        **{**req_slice.__dict__, "error_analyzer": SliceDropErrorAnalyzer()}
+    )
+    with pytest.raises(
+        Phase6DiagnosisError, match="Missing empirical failure-category counts"
+    ):
+        run_train_evaluate_diagnose(req_slice_err)
 
 
 def test_case_19_next_experiment_proposal_cannot_auto_dispatch(tmp_path: Path):
@@ -1173,7 +1519,16 @@ def test_case_20_clean_approved_run_full_cycle(tmp_path: Path):
         precision="fp16_amp",
         config_uri="file:///cfg.yaml",
         config_hash="b" * 64,
-        hyperparameters={"lr": 0.001},
+        hyperparameters={
+            "lr": 0.001,
+            "dataset_id": "ds-security",
+            "split_name": "test",
+            "target_id": "orin-agx-01",
+            "operating_point": {
+                "confidence_threshold": 0.5,
+                "max_false_positive_rate": 0.05,
+            },
+        },
         accuracy_metric_requirements=("map_50",),
     )
 

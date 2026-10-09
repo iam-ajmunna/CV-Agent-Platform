@@ -213,6 +213,10 @@ class OrchestrationStore(Protocol):
         self, operation_id: OperationId, status: OperationStatus, lease: ExecutionLease
     ) -> None: ...
 
+    def get_operation_status(
+        self, operation_id: OperationId
+    ) -> OperationStatus | None: ...
+
     def record_event(
         self,
         session_id: str,

@@ -80,3 +80,30 @@ All 5 acceptance gates G1–G5 and all 20 mandatory adversarial test cases are f
 - **Ruff Formatter:** `ruff format --check cv_agent/orchestration/train_evaluate_diagnose.py cv_agent/evaluation/types.py tests/test_train_evaluate_diagnose_phase6_exit.py` clean.
 - **Mypy Type Checker:** `mypy cv_agent` clean (`Success: no issues found in 122 source files`).
 - **Git Diffs:** `git diff --check` clean.
+
+---
+
+## 6. Official PM Review Remediation (B32–B38 Discharged)
+
+Following Official PM Review (comment `5992301343` on PR #75), seven blocking findings were remediated and verified:
+
+1. **B32 — Elimination of Synthetic Checkpoint Synthesis:**
+   In `run_train_evaluate_diagnose`, if execution finishes without an authoritative `terminal_checkpoint`, the workflow fails closed with `Phase6ValidationError`. No placeholder checkpoint, synthetic weights hash, or default accuracy metrics are manufactured.
+
+2. **B33 — Elimination of Fabricated Training Evidence:**
+   Checkpoint manifest metrics completeness is strictly verified; missing validation metrics fail closed. Removed all hard-coded/defaulted system telemetry (GPU hours, duration, VRAM, power, latency, FPS). Empirical `training_system_metrics` are strictly required and recorded losslessly into `SQLiteExperimentLedger`.
+
+3. **B34 — Enforcement of External ADR-0003 Evaluation Approvals:**
+   The workflow no longer self-generates `OperationIdentity`, `ApprovalRequest`, or `APPROVED` `ApprovalDecision` for evaluation. Explicit caller-supplied ADR-0003 credentials with verified canonical payload hash binding and human approver are strictly mandatory.
+
+4. **B35 — Elimination of Evaluation Telemetry Defaults:**
+   Removed 4096 MB VRAM and 45 W power fallbacks. Evaluation benchmark telemetry must be strictly positive and empirical; missing or non-positive system metrics fail closed with `Phase6EvaluationError`.
+
+5. **B36 — 6-Dimensional Root-Baseline Comparability:**
+   Baseline delta comparison strictly validates: (1) exact dataset ID, (2) dataset version, (3) evaluation split, (4) named `TargetId`, (5) `ExecutionTarget`, and (6) operating point threshold and false-positive tolerance. Incomparable baselines fail closed without claiming false deltas.
+
+6. **B37 — Empirical Error Analysis without Count Synthesizing:**
+   Removed synthetic count generation from slice performance percentages. Failure category ranking is grounded purely in empirical error counts (`localization_errors`, `classification_errors`, `false_positive_count`, `false_negative_count`, or empirical `category_error_counts`).
+
+7. **B38 — Orchestration Store, Fencing Lease, and State Reconciliation:**
+   Integrated `OrchestrationStore` and `LeaseManager` into `run_train_evaluate_diagnose`, acquiring an active execution lease and progressing operation status cleanly through `CREATED -> VALIDATED -> DISPATCHING -> RUNNING -> COMPLETED` / `FAILED`. Ambiguous external execution is guarded by `ReconciliationCoordinator`, fencing stale workers and failing closed on unresolved states.

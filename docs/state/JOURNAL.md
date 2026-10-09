@@ -2435,3 +2435,32 @@ Remediated all three architectural blockers identified in the Official PM's seco
 **Learned:** Subsystem integration in a layered architecture requires strict boundary discipline: orchestration must never own execution transport, evaluation metrics, or experiment persistence, but instead coordinate typed contracts across specialized domain authorities while maintaining end-to-end auditability and reproducibility.
 
 **Left open:** Commit, push branch, open PR against `main` referencing Issue #74, and provide exact head SHA to Official PM for review.
+
+---
+
+## 2026-10-09 — Phase 6 PR #75 Remediation of PM Review Blockers B32–B38 (D-074)
+
+**Did:**
+1. Discharged all seven blocking findings from Official PM Review (comment `5992301343` on PR #75):
+   - **B32 (Synthetic Terminal Checkpoint Elimination):** Removed fallback checkpoint synthesis in `run_train_evaluate_diagnose`. Missing `terminal_checkpoint` now fails closed with `Phase6ValidationError`.
+   - **B33 (Fabricated Training Evidence Elimination):** Enforced strict checkpoint manifest metrics verification and real empirical `training_system_metrics`. Hard-coded GPU hours, duration, VRAM, power, latency, and FPS defaults were completely eliminated before permanent SQLite ledger recording.
+   - **B34 (Evaluation Self-Approval Elimination):** Removed local generation of `OperationIdentity`, `ApprovalRequest`, and `APPROVED` `ApprovalDecision`. Explicit caller-supplied ADR-0003 credentials with verified canonical payload hash binding and human approver are strictly mandatory.
+   - **B35 (Defaulted Evaluation Telemetry Elimination):** Removed 4096 MB VRAM and 45 W power fallbacks. Missing or non-positive evaluation telemetry strictly fails closed with `Phase6EvaluationError`.
+   - **B36 (6-Dimensional Root-Baseline Comparability):** Enforced 6-dimensional verification before claiming baseline delta: dataset ID, dataset version, evaluation split, named `TargetId`, `ExecutionTarget`, and operating point threshold / false positive tolerance.
+   - **B37 (Synthesized Error Counts Elimination):** Eliminated arbitrary count translations from slice performance drops. Failure category ranking is grounded purely in empirical error counts.
+   - **B38 (Orchestration Store, Lease Fencing, and Reconciliation Integration):** Added `get_operation_status` to `OrchestrationStore` protocol and SQLite implementation; integrated `LeaseManager` and `ReconciliationCoordinator` into `run_train_evaluate_diagnose` with state transitions (`CREATED -> VALIDATED -> DISPATCHING -> RUNNING -> COMPLETED` / `FAILED`) and ambiguous execution fencing.
+   - **Case 4 Target Inventory:** Added `ToolRegistry.get_target` check verifying execution target registration in authoritative target inventory.
+2. Updated adversarial test suite `tests/test_train_evaluate_diagnose_phase6_exit.py` covering B32–B38 failure modes.
+3. Verified quality gates:
+   - 20/20 Phase 6 exit tests passing.
+   - 738/738 full repository tests passing across 28 suites with zero regressions.
+   - Static analysis clean: Ruff check clean (0 errors), Ruff format clean (201 files), Mypy clean (122 source files), `git diff --check` clean.
+4. Updated `docs/reports/ISSUE-74-PHASE-6-REPORT.md`, `docs/state/STATUS.md`, and recorded `D-074` in `docs/state/DECISIONS.md`.
+
+**Why:** `[P§7]`, `[P§12]`, `[P§13]`, `[P§19]`, `[P§20]`, `[P§21]`, `[P§22]`, `[P§24]`, `[P§25]`, `[P§26]`, `[P§29.1]`–`[P§29.4]`, `[P§34]` — addresses all findings from Official PM review on PR #75, guaranteeing that only genuine empirical evidence, authorized ADR-0003 approvals, and verified comparable baselines are persisted and reported.
+
+**Broke:** Nothing broken. All 738 tests passing.
+
+**Learned:** Workflows must never synthesize or repair missing artifacts, approvals, or telemetry on behalf of downstream consumers; failing closed when authoritative empirical data is absent ensures auditability and preserves zero-fabrication guarantees.
+
+**Left open:** Push commit to `feature/ajmunna/phase-6-train-evaluate-diagnose`, verify GitHub CI checks on PR #75, and report PR #75 + exact head SHA to Official PM for formal re-review.
