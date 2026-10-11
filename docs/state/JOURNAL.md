@@ -2464,3 +2464,29 @@ Remediated all three architectural blockers identified in the Official PM's seco
 **Learned:** Workflows must never synthesize or repair missing artifacts, approvals, or telemetry on behalf of downstream consumers; failing closed when authoritative empirical data is absent ensures auditability and preserves zero-fabrication guarantees.
 
 **Left open:** Push commit to `feature/ajmunna/phase-6-train-evaluate-diagnose`, verify GitHub CI checks on PR #75, and report PR #75 + exact head SHA to Official PM for formal re-review.
+
+---
+
+## 2026-10-11 — Phase 6 PR #75 Remediation of PM Re-Review Findings B32–B39 (D-075)
+
+**Did:**
+1. Discharged all remaining findings from Official PM Re-Review (comment `6100697470` on PR #75):
+   - **B32 (Terminal Checkpoint Job ID Binding & Unresolved State Retention):** Bound `terminal_checkpoint.job_id` strictly to dispatched `job_record.job_id` and `terminal_checkpoint.plan_id` to `plan.plan_id`. When terminal checkpoint is missing, state is NOT converted to `FAILED`; instead, both operation in `OrchestrationStore` and experiment record in `ExperimentLedger` remain in-flight (`RUNNING`) for ADR-0003 reconciliation, raising `Phase6ExecutionError`.
+   - **B33 (Attested Training System Metrics Lineage & Explicit Finiteness):** Replaced un-attested caller input with `AttestedTrainingSystemMetrics(job_id, execution_id, target_id, metrics)`. Enforced strict job/target lineage and finite positive floats (`math.isfinite(v) and v > 0.0`) across duration, peak VRAM, power, throughput, and GPU hours, rejecting `NaN`, `Inf`, and non-positive values.
+   - **B35 (Exact Benchmark Target ID Attestation & Monotonic Non-Zero Telemetry):** Enforced exact `BenchmarkResult.target_id` matching requested `request.target_id`. Enforced finite positive latency (`latency_p50_ms`, `latency_p95_ms`), throughput (`throughput_fps`), peak VRAM, and power with zero defaulting.
+   - **B36 (Strict 6-Dimensional Root-Baseline Comparability):** Enforced exact 6-dimensional verification before claiming baseline delta: dataset ID (from `hyperparameters["dataset_id"]`), payload root checksum (from `hyperparameters["payload_root_checksum"]` matching manifest), dataset version (matching manifest), evaluation split (from `hyperparameters["split_name"]`, zero defaulting to "test"), named `target_id` (from `hyperparameters["target_id"]`, zero hypothesis parsing), and operating point (mandatory threshold and false-positive tolerance, zero skipping).
+   - **B38 (Mandatory Orchestration Store & Crash-Replay Guard):** Made `orchestration_store` and `tool_registry` strictly mandatory on `TrainEvaluateDiagnoseRequest`. Wrapped lease lifecycle in `try ... finally: lease_mgr.release(lease)`. Added dedicated adversarial test `test_crash_after_paid_dispatch_rejects_duplicate_dispatch_zero_new_jobs` proving duplicate dispatch after crash is rejected and launches 0 new paid jobs.
+   - **B39 (Mandatory Pre-Approval Cost Estimate Binding):** `TrainingPlan` must have `cost_estimate: CostEstimate` populated and bound before approval. `compute_training_payload_hash(plan)` cryptographically hashes the plan *with* the cost estimate. `ApprovalDecision.decision_metadata` must contain `estimated_cost_usd` matching the calculated estimate.
+2. Verified all quality gates:
+   - 21/21 Phase 6 exit tests passing.
+   - 739/739 repository tests passing across 28 suites with zero regressions.
+   - Static analysis clean: Ruff check clean (0 errors), Ruff format clean, Mypy clean (122 source files), `git diff --check` clean.
+3. Updated `docs/reports/ISSUE-74-PHASE-6-REPORT.md`, `docs/state/STATUS.md`, and recorded `D-075` in `docs/state/DECISIONS.md`.
+
+**Why:** `[P§7]`, `[P§12]`, `[P§13]`, `[P§19]`, `[P§20]`, `[P§21]`, `[P§22]`, `[P§24]`, `[P§25]`, `[P§26]`, `[P§29.1]`–`[P§29.4]`, `[P§34]` — addresses all findings from Official PM re-review on PR #75, guaranteeing that missing evidence is preserved for reconciliation, metrics have verified cryptographic and target lineage, baseline comparison is mathematically exact across 6 dimensions, and cost estimates are bound before human approval.
+
+**Broke:** Nothing broken. 739/739 repository tests pass.
+
+**Learned:** In multi-stage agentic workflows, execution state cannot assume failure on missing terminal evidence when external jobs may still be running; preserving in-flight status (`RUNNING`) enables crash-safe external reconciliation while fencing prevents split-brain duplicate execution.
+
+**Left open:** Push commit to `feature/ajmunna/phase-6-train-evaluate-diagnose`, verify GitHub CI checks on PR #75, and report PR #75 + exact head SHA to Official PM for formal re-review.

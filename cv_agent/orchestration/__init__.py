@@ -43,6 +43,7 @@ if TYPE_CHECKING:
         establish_dataset_baseline,
     )
     from cv_agent.orchestration.train_evaluate_diagnose import (
+        AttestedTrainingSystemMetrics,
         CompositeEvaluationResult,
         FailureCategoryAnalysis,
         OperatingPoint,
@@ -103,6 +104,7 @@ __all__ = [
     "ApprovalRequest",
     "ApprovalSecurityError",
     "ApprovalStatus",
+    "AttestedTrainingSystemMetrics",
     "BaselineEstablishmentRequest",
     "BaselineEstablishmentResult",
     "CheckpointCorruptionError",
@@ -175,6 +177,7 @@ def __getattr__(name: str) -> Any:
 
         return getattr(_data_baseline, name)
     if name in (
+        "AttestedTrainingSystemMetrics",
         "CompositeEvaluationResult",
         "FailureCategoryAnalysis",
         "OperatingPoint",

@@ -3,26 +3,25 @@
 > **Rewritten** every session. Describes **now**, never history — history lives in
 > `JOURNAL.md`. Hard cap: 60 lines. If it exceeds that, you are logging, not stating.
 
-**Updated:** 2026-10-09 · **Phase:** Phase 6 Remediation Complete / Ready for PM Re-review · **Health:** green
+**Updated:** 2026-10-11 · **Phase:** Phase 6 Re-review Remediation Complete / Ready for PM Acceptance · **Health:** green
 
 ## Where we are
 
-Phase 6 (Train / Evaluate / Diagnose) PM review findings B32–B38 are fully remediated on branch `feature/ajmunna/phase-6-train-evaluate-diagnose` (PR #75, Issue #74):
-- Discharged B32 (eliminated synthetic checkpoints; fail closed on absent terminal checkpoint).
-- Discharged B33 (eliminated fabricated metrics and hard-coded telemetry; empirical metrics required).
-- Discharged B34 (eliminated workflow self-approval; explicit ADR-0003 credentials mandatory).
-- Discharged B35 (eliminated telemetry defaults 4096MB/45W; empirical non-zero telemetry required).
-- Discharged B36 (enforced 6-dimensional root-baseline comparability before claiming deltas).
-- Discharged B37 (eliminated synthetic count translations from slice performance drops).
-- Discharged B38 (integrated OrchestrationStore leasing, state machine, and reconciliation).
-- 20/20 Phase 6 exit tests and 738/738 repository tests passing (0 regressions).
-- Mypy (122 source files), Ruff check, Ruff format, and git diff check all 100% clean.
+Phase 6 (Train / Evaluate / Diagnose) PM re-review findings B32–B39 are fully discharged on branch `feature/ajmunna/phase-6-train-evaluate-diagnose` (PR #75, Issue #74):
+- Discharged B32: bound checkpoint `job_id` to dispatched job; missing terminal checkpoint keeps in-flight (`RUNNING`) for ADR-0003 external reconciliation without marking failed.
+- Discharged B33: enforced `AttestedTrainingSystemMetrics` with strict job/target lineage and finite positive floats (>0.0), rejecting NaN/Inf.
+- Discharged B35: enforced exact `BenchmarkResult.target_id` and strictly finite positive latency, throughput, VRAM, and power with zero defaulting.
+- Discharged B36: enforced exhaustive 6-dimensional root-baseline comparability (dataset ID, root checksum, version, split, target ID, operating point) with zero inference or defaulting.
+- Discharged B38: mandatory `orchestration_store` and `tool_registry`; lease released in `finally`; added adversarial test proving replay after paid crash launches 0 new paid jobs.
+- Discharged B39: enforced mandatory pre-approval `cost_estimate` bound in `TrainingPlan`, hashed in payload, and verified against approval decision metadata.
+- 21/21 Phase 6 exit tests and 739/739 repository tests pass with zero regressions.
+- Mypy (122 source files), Ruff check, Ruff format, and diff check all 100% clean.
 
 ## In flight
 
 | Item | Issue | PR | State |
 |---|---|---|---|
-| Phase 6 Train / Evaluate / Diagnose Remediation | #74 | #75 | B32–B38 discharged; pushing for PM re-review |
+| Phase 6 Train / Evaluate / Diagnose Remediation | #74 | #75 | B32–B39 discharged; ready for PM re-review |
 
 ## Next 3 actions
 

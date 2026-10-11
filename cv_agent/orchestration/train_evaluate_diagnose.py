@@ -91,7 +91,6 @@ from cv_agent.orchestration.approvals import (
     ApprovalStatus,
 )
 from cv_agent.orchestration.contracts import (
-    ExecutionLease,
     OperationId,
     OperationIntent,
     OperationPayloadEnvelope,
@@ -103,7 +102,7 @@ from cv_agent.orchestration.reconciliation import (
     ReconciliationCoordinator,
     ReconciliationOutcome,
 )
-from cv_agent.tools import TargetId, ToolExecutor, ToolId
+from cv_agent.tools import ExecutionId, TargetId, ToolExecutor, ToolId
 from cv_agent.tools.contracts import ToolRegistry
 from cv_agent.training.canonicalization import compute_training_payload_hash
 from cv_agent.training.contracts import (
@@ -124,11 +123,13 @@ from cv_agent.training.launcher import (
     TrainingLauncher,
 )
 from cv_agent.training.types import (
+    TrainingJobId,
     TrainingJobStatus,
     TrainingPrecision,
 )
 
 __all__ = [
+    "AttestedTrainingSystemMetrics",
     "CompositeEvaluationResult",
     "FailureCategoryAnalysis",
     "OperatingPoint",
@@ -309,6 +310,16 @@ class ProposedNextExperiment:
 
 
 @dataclass(frozen=True)
+class AttestedTrainingSystemMetrics:
+    """Empirical training system telemetry attested with job, execution, and target lineage."""
+
+    job_id: TrainingJobId | str
+    execution_id: ExecutionId | str
+    target_id: TargetId | str
+    metrics: SystemMetrics
+
+
+@dataclass(frozen=True)
 class TrainEvaluateDiagnoseRequest:
     """Authoritative request specifying all parameters for the Phase 6 workflow."""
 
@@ -318,6 +329,8 @@ class TrainEvaluateDiagnoseRequest:
     target_id: TargetId
     tool_id: ToolId
     tool_executor: ToolExecutor
+    tool_registry: ToolRegistry
+    orchestration_store: OrchestrationStore
     execution_target: ExecutionTarget
     operation_identity: OperationIdentity
     approval_request: ApprovalRequest
@@ -325,6 +338,7 @@ class TrainEvaluateDiagnoseRequest:
     target_hourly_rate_usd: Decimal
     sample_step_latency_sec: float
     operating_point: OperatingPoint
+    training_system_metrics: AttestedTrainingSystemMetrics
     target_constraints: tuple[TargetConstraint, ...] = ()
     base_checkpoint: CheckpointManifest | None = None
     dataset_registry: DatasetRegistry | None = None
@@ -335,6 +349,8 @@ class TrainEvaluateDiagnoseRequest:
     error_analyzer: ErrorAnalyzer | None = None
     leakage_auditor: LeakageAuditor | None = None
     workspace_root: Path | str | None = None
+    reconciliation_coordinator: ReconciliationCoordinator | None = None
+    job_id: TrainingJobId | str | None = None
     # Provenance and reproducibility evidence per ADR-0004 & [P§25]
     commit_sha: str | None = None
     seed: int | None = None
@@ -342,15 +358,11 @@ class TrainEvaluateDiagnoseRequest:
     config_hash: str | None = None
     hyperparameters: Mapping[str, Any] | None = None
     telemetry_stream: Sequence[TrainingTelemetryRecord] | None = None
-    training_system_metrics: SystemMetrics | None = None
     evaluation_plan: EvaluationPlan | None = None
     evaluation_operation_identity: OperationIdentity | None = None
     evaluation_approval_request: ApprovalRequest | None = None
     evaluation_approval_decision: ApprovalDecision | None = None
     terminal_checkpoint: CheckpointManifest | None = None
-    tool_registry: ToolRegistry | None = None
-    orchestration_store: OrchestrationStore | None = None
-    reconciliation_coordinator: ReconciliationCoordinator | None = None
 
 
 @dataclass(frozen=True)
@@ -521,12 +533,13 @@ def run_train_evaluate_diagnose(
             f"Execution target {request.target_id!r} is a placeholder or synthesized target. "
             "An authorized named target accelerator is strictly required."
         )
-    if (
-        request.tool_registry is not None
-        and request.tool_registry.get_target(request.target_id) is None
-    ):
+    if request.tool_registry.get_target(request.target_id) is None:
         raise Phase6ValidationError(
             f"Execution target {request.target_id!r} is not registered in the authoritative target inventory."
+        )
+    if request.tool_registry.get(request.tool_id) is None:
+        raise Phase6ValidationError(
+            f"Tool {request.tool_id!r} is not registered in the authoritative tool registry."
         )
 
     # 2. Dataset manifest & plan binding integrity
@@ -684,10 +697,14 @@ def run_train_evaluate_diagnose(
         target_hourly_rate_usd=request.target_hourly_rate_usd,
     )
 
-    # If plan already embedded a cost estimate, verify consistency
+    # B39: Plan must have cost_estimate bound before approval and dispatch
+    if plan.cost_estimate is None:
+        raise Phase6ValidationError(
+            "TrainingPlan must contain an authoritative cost_estimate bound into the plan before approval and dispatch."
+        )
     if (
-        plan.cost_estimate is not None
-        and plan.cost_estimate.estimated_cost_usd != cost_estimate.estimated_cost_usd
+        plan.cost_estimate.estimated_cost_usd != cost_estimate.estimated_cost_usd
+        or plan.cost_estimate.estimated_gpu_hours != cost_estimate.estimated_gpu_hours
     ):
         raise Phase6ValidationError(
             f"Plan cost estimate ({plan.cost_estimate.estimated_cost_usd} USD) differs from "
@@ -744,15 +761,18 @@ def run_train_evaluate_diagnose(
                 f"TargetId {request.target_id!r} conflicts with authorized approval scope target {scope_target!r}."
             )
 
-    # Verify estimate in approval decision or metadata
+    # B39: Verify estimate in approval decision metadata is present and matches
     dec_meta = request.approval_decision.decision_metadata
-    if "estimated_cost_usd" in dec_meta:
-        dec_cost = Decimal(str(dec_meta["estimated_cost_usd"]))
-        if dec_cost != cost_estimate.estimated_cost_usd:
-            raise Phase6ApprovalError(
-                f"Approval decision cost estimate ({dec_cost}) "
-                f"differs from calculated cost estimate ({cost_estimate.estimated_cost_usd})."
-            )
+    if "estimated_cost_usd" not in dec_meta:
+        raise Phase6ApprovalError(
+            "Approval decision metadata is missing required 'estimated_cost_usd' binding per Issue #74."
+        )
+    dec_cost = Decimal(str(dec_meta["estimated_cost_usd"]))
+    if dec_cost != cost_estimate.estimated_cost_usd:
+        raise Phase6ApprovalError(
+            f"Approval decision cost estimate ({dec_cost}) "
+            f"differs from calculated cost estimate ({cost_estimate.estimated_cost_usd})."
+        )
 
     # -----------------------------------------------------------------------
     # Gate G3: Training Execution & Telemetry Monitoring
@@ -801,52 +821,54 @@ def run_train_evaluate_diagnose(
     # Gate G2 / ADR-0003: Idempotency, In-Flight Recovery & Operation Tracking (B38)
     # -----------------------------------------------------------------------
     orch_store = request.orchestration_store
-    lease: ExecutionLease | None = None
     op_id = OperationId(value=str(request.operation_identity.operation_id))
     reconciler = request.reconciliation_coordinator
 
-    if orch_store is not None:
-        # Check durable orchestration store for existing operation state
-        existing_status = orch_store.get_operation_status(op_id)
-        if existing_status in (OperationStatus.RUNNING, OperationStatus.COMPLETED):
-            raise Phase6ExecutionError(
-                f"Duplicate dispatch rejected: operation {op_id.value!r} is already {existing_status.value!r} in orchestration store."
-            )
-        if existing_status in (OperationStatus.UNKNOWN, OperationStatus.RECONCILING):
-            if reconciler is not None:
-                existing_op = orch_store.find_operation(op_id)
-                if existing_op is not None:
-                    lease_mgr = LeaseManager(orch_store)
-                    rec_lease = lease_mgr.acquire(
-                        session_id=existing_op.session_id,
-                        thread_id="th-reconcile",
-                        owner_instance_id="p6-worker",
-                    )
-                    outcome = reconciler.reconcile_operation(existing_op, rec_lease)
-                    if outcome == ReconciliationOutcome.UNRESOLVED:
-                        raise Phase6ExecutionError(
-                            f"Operation {op_id.value!r} is ambiguous and remains UNRESOLVED / RECONCILING. Cannot dispatch until reconciled."
-                        )
-                    if outcome == ReconciliationOutcome.CONFIRMED_COMPLETED:
-                        raise Phase6ExecutionError(
-                            f"Duplicate dispatch rejected: operation {op_id.value!r} was reconciled as CONFIRMED_COMPLETED."
-                        )
-            else:
-                raise Phase6ExecutionError(
-                    f"Operation {op_id.value!r} is ambiguous and remains {existing_status.value!r}. Cannot dispatch without reconciliation."
-                )
-        if existing_status == OperationStatus.DISPATCHING:
-            raise Phase6ExecutionError(
-                f"Duplicate dispatch rejected: operation {op_id.value!r} is currently DISPATCHING."
-            )
-
-        # Acquire execution lease and record operation intent in store BEFORE paid dispatch
-        lease_mgr = LeaseManager(orch_store)
-        lease = lease_mgr.acquire(
-            session_id=request.approval_request.session_id,
-            thread_id="th-phase6",
-            owner_instance_id="p6-worker",
+    # Check durable orchestration store for existing operation state
+    existing_status = orch_store.get_operation_status(op_id)
+    if existing_status in (OperationStatus.RUNNING, OperationStatus.COMPLETED):
+        raise Phase6ExecutionError(
+            f"Duplicate dispatch rejected: operation {op_id.value!r} is already {existing_status.value!r} in orchestration store."
         )
+    if existing_status in (OperationStatus.UNKNOWN, OperationStatus.RECONCILING):
+        if reconciler is not None:
+            existing_op = orch_store.find_operation(op_id)
+            if existing_op is not None:
+                lease_mgr = LeaseManager(orch_store)
+                rec_lease = lease_mgr.acquire(
+                    session_id=existing_op.session_id,
+                    thread_id="th-reconcile",
+                    owner_instance_id="p6-worker",
+                )
+                try:
+                    outcome = reconciler.reconcile_operation(existing_op, rec_lease)
+                finally:
+                    lease_mgr.release(rec_lease)
+                if outcome == ReconciliationOutcome.UNRESOLVED:
+                    raise Phase6ExecutionError(
+                        f"Operation {op_id.value!r} is ambiguous and remains UNRESOLVED / RECONCILING. Cannot dispatch until reconciled."
+                    )
+                if outcome == ReconciliationOutcome.CONFIRMED_COMPLETED:
+                    raise Phase6ExecutionError(
+                        f"Duplicate dispatch rejected: operation {op_id.value!r} was reconciled as CONFIRMED_COMPLETED."
+                    )
+        else:
+            raise Phase6ExecutionError(
+                f"Operation {op_id.value!r} is ambiguous and remains {existing_status.value!r}. Cannot dispatch without reconciliation."
+            )
+    if existing_status == OperationStatus.DISPATCHING:
+        raise Phase6ExecutionError(
+            f"Duplicate dispatch rejected: operation {op_id.value!r} is currently DISPATCHING."
+        )
+
+    # Acquire execution lease and record operation intent in store BEFORE paid dispatch
+    lease_mgr = LeaseManager(orch_store)
+    lease = lease_mgr.acquire(
+        session_id=request.approval_request.session_id,
+        thread_id="th-phase6",
+        owner_instance_id="p6-worker",
+    )
+    try:
         op_intent = OperationIntent(
             operation_id=op_id,
             session_id=request.approval_request.session_id,
@@ -881,488 +903,557 @@ def run_train_evaluate_diagnose(
                 op_id, OperationStatus.DISPATCHING, lease
             )
 
-    # Reject duplicate/replayed dispatch in ledger
-    for exp in ledger.list_experiments():
-        if (
-            exp.spec.model_name == plan.architecture_name
-            and str(exp.spec.dataset_version) == str(manifest.version)
-            and exp.spec.name == f"train-{manifest.dataset_id}-{plan.plan_id}"
-            and exp.status in (ExperimentStatus.RUNNING, ExperimentStatus.COMPLETED)
-        ):
-            raise Phase6ExecutionError(
-                f"Duplicate dispatch rejected: experiment {exp.exp_id!r} with plan {plan.plan_id!r} is already {exp.status.value!r}."
-            )
-
-    # Register experiment in ledger
-    exp_spec = ExperimentSpec(
-        name=f"train-{manifest.dataset_id}-{plan.plan_id}",
-        hypothesis=f"Empirical training run on {request.target_id} for {manifest.dataset_id}",
-        workload_type=WorkloadType.TRAINING,
-        target=request.execution_target,
-        model_name=plan.architecture_name,
-        model_variant="trained",
-        commit_sha=commit_sha,
-        dataset_version=str(manifest.version),
-        seed=seed,
-        batch_size=plan.batch_size_per_device,
-        input_resolution=plan.augmentation.image_size,
-        precision=str(plan.precision.value),
-        config_uri=config_uri,
-        config_hash=config_hash,
-        hyperparameters=dict(hyperparameters),
-        accuracy_metric_requirements=("map_50", "map_50_95", "precision", "recall"),
-    )
-
-    exp_rec = ledger.create_experiment(exp_spec)
-
-    launcher = request.training_launcher or DefaultTrainingLauncher()
-
-    job_record = launcher.launch(
-        plan=plan,
-        tool_id=request.tool_id,
-        operation_identity=request.operation_identity,
-        approval_request=request.approval_request,
-        approval_decision=request.approval_decision,
-        tool_executor=request.tool_executor,
-        target_id=request.target_id,
-    )
-
-    if job_record.status == TrainingJobStatus.FAILED:
-        if orch_store is not None and lease is not None:
-            orch_store.update_operation_status(op_id, OperationStatus.FAILED, lease)
-        ledger.fail_experiment(
-            exp_rec.exp_id, job_record.failure_details or "Training job failed"
-        )
-        raise Phase6ExecutionError(
-            f"Training failed: {job_record.failure_details or 'Unspecified execution failure'}"
-        )
-
-    if job_record.status != TrainingJobStatus.RUNNING:
-        if orch_store is not None and lease is not None:
-            orch_store.update_operation_status(op_id, OperationStatus.UNKNOWN, lease)
-        raise Phase6ExecutionError(
-            f"Training launch failed to advance to RUNNING: {job_record.status.value!r}"
-        )
-
-    if orch_store is not None and lease is not None:
-        orch_store.update_operation_status(op_id, OperationStatus.RUNNING, lease)
-
-    ledger.transition_status(
-        exp_rec.exp_id, ExperimentStatus.RUNNING, job_id=str(job_record.job_id)
-    )
-
-    # Monitor telemetry for divergence or OOM
-    if request.telemetry_stream:
-        for t in request.telemetry_stream:
-            if math.isnan(t.train_loss) or math.isinf(t.train_loss):
-                if orch_store is not None and lease is not None:
-                    orch_store.update_operation_status(
-                        op_id, OperationStatus.FAILED, lease
-                    )
-                ledger.fail_experiment(
-                    exp_rec.exp_id,
-                    f"Training divergence detected at epoch {t.epoch} step {t.step}: loss={t.train_loss}",
-                )
-                raise Phase6ExecutionError(
-                    f"Divergence detected in telemetry: train_loss={t.train_loss}"
-                )
-            if t.val_loss is not None and (
-                math.isnan(t.val_loss) or math.isinf(t.val_loss)
+        # Reject duplicate/replayed dispatch in ledger
+        for exp in ledger.list_experiments():
+            if (
+                exp.spec.model_name == plan.architecture_name
+                and str(exp.spec.dataset_version) == str(manifest.version)
+                and exp.spec.name == f"train-{manifest.dataset_id}-{plan.plan_id}"
+                and exp.status in (ExperimentStatus.RUNNING, ExperimentStatus.COMPLETED)
             ):
-                if orch_store is not None and lease is not None:
-                    orch_store.update_operation_status(
-                        op_id, OperationStatus.FAILED, lease
-                    )
-                ledger.fail_experiment(
-                    exp_rec.exp_id,
-                    f"Training divergence detected at epoch {t.epoch} step {t.step}: val_loss={t.val_loss}",
-                )
                 raise Phase6ExecutionError(
-                    f"Divergence detected in telemetry: val_loss={t.val_loss}"
+                    f"Duplicate dispatch rejected: experiment {exp.exp_id!r} with plan {plan.plan_id!r} is already {exp.status.value!r}."
                 )
-            if t.vram_allocated_gb > 80.0:  # OOM condition
-                if orch_store is not None and lease is not None:
-                    orch_store.update_operation_status(
-                        op_id, OperationStatus.FAILED, lease
-                    )
-                ledger.fail_experiment(
-                    exp_rec.exp_id,
-                    f"OOM condition detected: vram_allocated_gb={t.vram_allocated_gb}",
-                )
-                raise Phase6ExecutionError("OOM condition detected in telemetry.")
 
-    # Obtain terminal training checkpoint manifest (B32: Zero synthetic checkpoint evidence)
-    ckpt_manifest = request.terminal_checkpoint
-    if ckpt_manifest is None:
-        if orch_store is not None and lease is not None:
-            orch_store.update_operation_status(op_id, OperationStatus.FAILED, lease)
-        ledger.fail_experiment(
-            exp_rec.exp_id,
-            "Terminal training checkpoint manifest is missing. Synthesizing checkpoints is strictly prohibited.",
-        )
-        raise Phase6ValidationError(
-            "Terminal training checkpoint manifest is missing. Training completion requires authoritative checkpoint evidence."
-        )
-
-    # Checkpoint integrity check
-    if not ckpt_manifest.weights_hash or len(str(ckpt_manifest.weights_hash)) != 64:
-        if orch_store is not None and lease is not None:
-            orch_store.update_operation_status(op_id, OperationStatus.FAILED, lease)
-        ledger.fail_experiment(
-            exp_rec.exp_id, "Corrupt or missing checkpoint weights hash"
-        )
-        raise Phase6ValidationError("Checkpoint weights hash is missing or invalid.")
-    try:
-        int(str(ckpt_manifest.weights_hash), 16)
-    except ValueError as exc:
-        if orch_store is not None and lease is not None:
-            orch_store.update_operation_status(op_id, OperationStatus.FAILED, lease)
-        ledger.fail_experiment(
-            exp_rec.exp_id, "Checkpoint weights hash is non-hexadecimal"
-        )
-        raise Phase6ValidationError(
-            "Checkpoint weights hash is non-hexadecimal."
-        ) from exc
-
-    if str(ckpt_manifest.plan_id) != str(plan.plan_id):
-        if orch_store is not None and lease is not None:
-            orch_store.update_operation_status(op_id, OperationStatus.FAILED, lease)
-        ledger.fail_experiment(exp_rec.exp_id, "Checkpoint plan_id mismatch")
-        raise Phase6ValidationError(
-            f"Checkpoint plan_id {ckpt_manifest.plan_id!r} does not match TrainingPlan {plan.plan_id!r}"
-        )
-
-    # Record completed experiment in ledger (B33: Zero fabricated accuracy or system evidence)
-    missing_metrics = [
-        req_m
-        for req_m in exp_spec.accuracy_metric_requirements
-        if req_m not in ckpt_manifest.metrics
-    ]
-    if missing_metrics:
-        if orch_store is not None and lease is not None:
-            orch_store.update_operation_status(op_id, OperationStatus.FAILED, lease)
-        ledger.fail_experiment(
-            exp_rec.exp_id,
-            f"Checkpoint is missing required validation accuracy metrics: {missing_metrics}",
-        )
-        raise Phase6ValidationError(
-            f"Terminal checkpoint manifest missing required metrics: {missing_metrics}. "
-            "Synthesizing accuracy metrics is strictly prohibited."
-        )
-
-    m50 = ckpt_manifest.metrics["map_50"]
-    m50_95 = ckpt_manifest.metrics.get("map_50_95")
-    prec = ckpt_manifest.metrics["precision"]
-    rec = ckpt_manifest.metrics["recall"]
-    train_acc = AccuracyMetrics(
-        map_50=m50,
-        map_50_95=m50_95,
-        precision=prec,
-        recall=rec,
-        f1_score=round(2 * prec * rec / (prec + rec), 4) if (prec + rec) > 0 else 0.0,
-        additional_metrics={
-            k: v
-            for k, v in ckpt_manifest.metrics.items()
-            if k not in ("map_50", "map_50_95", "precision", "recall")
-        },
-    )
-
-    if request.training_system_metrics is not None:
-        ts = request.training_system_metrics
-        if (
-            ts.training_time_seconds is None
-            or ts.training_time_seconds <= 0.0
-            or ts.peak_vram_mb is None
-            or ts.peak_vram_mb <= 0.0
-            or ts.power_draw_watts is None
-            or ts.power_draw_watts <= 0.0
-            or ts.throughput_fps is None
-            or ts.throughput_fps <= 0.0
-        ):
-            if orch_store is not None and lease is not None:
-                orch_store.update_operation_status(op_id, OperationStatus.FAILED, lease)
-            ledger.fail_experiment(
-                exp_rec.exp_id, "Incomplete or non-positive training system metrics"
-            )
-            raise Phase6ValidationError(
-                "Training system metrics must contain positive finite values for duration, vram, power, and throughput."
-            )
-        train_sys = ts
-    else:
-        if orch_store is not None and lease is not None:
-            orch_store.update_operation_status(op_id, OperationStatus.FAILED, lease)
-        ledger.fail_experiment(
-            exp_rec.exp_id,
-            "Missing empirical training system metrics. Fabricating training evidence is strictly prohibited per [P§29.4].",
-        )
-        raise Phase6ValidationError(
-            "Missing empirical training_system_metrics. Fabricating training duration, vram, or power is strictly prohibited per [P§29.4]."
-        )
-
-    train_art = ArtifactManifest(
-        weights_uri=ckpt_manifest.weights_uri,
-        checksums={"weights": str(ckpt_manifest.weights_hash)},
-    )
-
-    exp_rec = ledger.complete_experiment(
-        exp_id=exp_rec.exp_id,
-        accuracy=train_acc,
-        system=train_sys,
-        artifacts=train_art,
-        notes=f"Trained model on {request.target_id} for {manifest.dataset_id}",
-    )
-    if orch_store is not None and lease is not None:
-        orch_store.update_operation_status(op_id, OperationStatus.COMPLETED, lease)
-
-    # -----------------------------------------------------------------------
-    # Gate G4: Composite Evaluation
-    # -----------------------------------------------------------------------
-
-    # Retrieve active root baseline from ledger for delta comparison
-    active_baseline = ledger.get_baseline(
-        WorkloadType.BENCHMARK
-    ) or ledger.get_baseline(WorkloadType.EVALUATION)
-
-    # Construct EvaluationPlan for the trained checkpoint if not provided
-    eval_plan = request.evaluation_plan
-    if eval_plan is None:
-        metric_def = MetricDefinition(
-            metric_id=MetricId("map_50"),
-            name="mAP@0.50",
-            task_type=TaskType.DETECTION,
-        )
-        eval_plan = build_training_evaluation_plan(
-            evaluation_id=f"eval-{exp_rec.exp_id}".lower(),
-            experiment_id=exp_rec.exp_id,
-            dataset_manifest=manifest,
-            checkpoint_manifest=ckpt_manifest,
-            task_type=TaskType.DETECTION,
-            metrics=(metric_def,),
-            architecture_name=plan.architecture_name,
+        # Register experiment in ledger
+        exp_spec = ExperimentSpec(
+            name=f"train-{manifest.dataset_id}-{plan.plan_id}",
+            hypothesis=f"Empirical training run on {request.target_id} for {manifest.dataset_id}",
+            workload_type=WorkloadType.TRAINING,
+            target=request.execution_target,
+            model_name=plan.architecture_name,
+            model_variant="trained",
+            commit_sha=commit_sha,
+            dataset_version=str(manifest.version),
+            seed=seed,
+            batch_size=plan.batch_size_per_device,
             input_resolution=plan.augmentation.image_size,
-            split_name="test",
-            baseline_experiment_id=active_baseline.exp_id if active_baseline else None,
+            precision=str(plan.precision.value),
+            config_uri=config_uri,
+            config_hash=config_hash,
+            hyperparameters=dict(hyperparameters),
+            accuracy_metric_requirements=("map_50", "map_50_95", "precision", "recall"),
         )
 
-    # Validate evaluation plan binding consistency
-    if str(eval_plan.dataset_binding.dataset_id) != str(manifest.dataset_id):
-        raise Phase6EvaluationError(
-            f"Evaluation plan dataset_id {eval_plan.dataset_binding.dataset_id!r} "
-            f"does not match manifest {manifest.dataset_id!r}"
-        )
-    if str(eval_plan.dataset_binding.dataset_version) != str(manifest.version):
-        raise Phase6EvaluationError(
-            f"Evaluation plan dataset_version {eval_plan.dataset_binding.dataset_version!r} "
-            f"does not match manifest {manifest.version!r}"
-        )
-    if str(eval_plan.model_artifact.checkpoint_id) != str(ckpt_manifest.checkpoint_id):
-        raise Phase6EvaluationError(
-            f"Evaluation plan checkpoint_id {eval_plan.model_artifact.checkpoint_id!r} "
-            f"does not match checkpoint {ckpt_manifest.checkpoint_id!r}"
-        )
-    if str(eval_plan.model_artifact.weights_hash) != str(ckpt_manifest.weights_hash):
-        raise Phase6EvaluationError(
-            f"Evaluation plan weights_hash {eval_plan.model_artifact.weights_hash!r} "
-            f"does not match checkpoint {ckpt_manifest.weights_hash!r}"
-        )
+        exp_rec = ledger.create_experiment(exp_spec)
 
-    # Ensure evaluation credentials are provided by ADR-0003 approval authority (B34)
-    if (
-        request.evaluation_operation_identity is None
-        or request.evaluation_approval_request is None
-        or request.evaluation_approval_decision is None
-    ):
-        raise EvaluationApprovalRequiredError(
-            "Evaluation requires explicit human approval via ADR-0003. "
-            "Self-approving evaluation or manufacturing approval decisions is strictly prohibited."
-        )
+        launcher = request.training_launcher or DefaultTrainingLauncher()
 
-    eval_op_id = request.evaluation_operation_identity
-    eval_app_req = request.evaluation_approval_request
-    eval_app_dec = request.evaluation_approval_decision
-
-    if eval_app_dec.decision != ApprovalStatus.APPROVED:
-        raise Phase6ApprovalError(
-            f"Evaluation approval was NOT granted (decision: {eval_app_dec.decision.value!r})."
-        )
-    if (
-        eval_app_req.expires_at is not None
-        and eval_app_dec.resolved_at > eval_app_req.expires_at
-    ):
-        raise Phase6ApprovalError(
-            f"Evaluation approval expired at {eval_app_req.expires_at.isoformat()}."
-        )
-    eval_payload_hash = compute_evaluation_payload_hash(eval_plan)
-    if eval_app_dec.bound_payload_hash != eval_payload_hash:
-        raise Phase6ApprovalError(
-            f"Evaluation approval bound payload hash mismatch: decision has {eval_app_dec.bound_payload_hash!r}, "
-            f"computed EvaluationPlan has {eval_payload_hash!r}."
-        )
-    if eval_app_req.canonical_payload_hash != eval_app_dec.bound_payload_hash:
-        raise Phase6ApprovalError(
-            "Evaluation approval request payload hash does not match approval decision bound payload hash."
-        )
-    if ":" in eval_app_req.resource_scope:
-        _, scope_target = eval_app_req.resource_scope.split(":", 1)
-        if scope_target != str(request.target_id):
-            raise Phase6ApprovalError(
-                f"TargetId {request.target_id!r} conflicts with evaluation approval scope target {scope_target!r}."
-            )
-
-    # Execute evaluation via ADR-0011 runner
-    eval_runner = request.evaluation_runner or DefaultEvaluationRunner()
-    try:
-        eval_result = eval_runner.execute(
-            plan=eval_plan,
-            operation_identity=eval_op_id,
-            approval_request=eval_app_req,
-            approval_decision=eval_app_dec,
+        job_record = launcher.launch(
+            plan=plan,
             tool_id=request.tool_id,
+            operation_identity=request.operation_identity,
+            approval_request=request.approval_request,
+            approval_decision=request.approval_decision,
             tool_executor=request.tool_executor,
             target_id=request.target_id,
-        )
-    except Phase6EvaluationError:
-        raise
-    except Exception as exc:
-        raise Phase6EvaluationError(f"Evaluation execution failed: {exc}") from exc
-
-    # Verify empirical metrics and timing attestation
-    if not eval_result.quality_metrics:
-        raise Phase6EvaluationError(
-            "EvaluationResult missing quality_metrics. Empirical evaluation is mandatory per [P§12]."
-        )
-    if not eval_result.system_benchmarks:
-        raise Phase6EvaluationError(
-            "EvaluationResult missing system_benchmarks. Empirical telemetry is mandatory per [P§29.4]."
+            job_id=TrainingJobId(str(request.job_id)) if request.job_id else None,
         )
 
-    bench = eval_result.system_benchmarks[0]
-    if not bench.timing_synchronized:
-        raise Phase6EvaluationError(
-            "Hardware-synchronized timing is mandatory on target accelerator per ADR-0011 §3.13."
-        )
-
-    # System metrics extraction (B35: Zero defaulting of VRAM or power)
-    if (
-        bench.peak_vram_gb is None
-        or not math.isfinite(bench.peak_vram_gb)
-        or bench.peak_vram_gb <= 0.0
-    ):
-        raise Phase6EvaluationError(
-            "EvaluationResult system_benchmarks missing empirical peak_vram_gb. "
-            "Defaulting VRAM telemetry is strictly prohibited per [P§29.4]."
-        )
-    if (
-        bench.power_watts_avg is None
-        or not math.isfinite(bench.power_watts_avg)
-        or bench.power_watts_avg <= 0.0
-    ):
-        raise Phase6EvaluationError(
-            "EvaluationResult system_benchmarks missing empirical power_watts_avg. "
-            "Defaulting power telemetry is strictly prohibited per [P§29.4]."
-        )
-
-    fps = bench.throughput_fps
-    vram_mb = bench.peak_vram_gb * 1024.0
-    power_watts = bench.power_watts_avg
-
-    eval_sys = SystemMetrics(
-        peak_vram_mb=vram_mb,
-        power_draw_watts=power_watts,
-        latency_inference_ms=bench.latency_p50_ms,
-        latency_e2e_ms=bench.latency_p95_ms,
-        throughput_fps=fps,
-    )
-
-    # Quality metrics extraction
-    eval_map50: float | None = None
-    eval_prec: float | None = None
-    eval_rec: float | None = None
-    eval_f1: float | None = None
-    add_metrics: dict[str, float] = {}
-
-    for qm in eval_result.quality_metrics:
-        mid_str = str(qm.metric.metric_id)
-        add_metrics[mid_str] = qm.primary_value
-        if mid_str == "map_50":
-            eval_map50 = qm.primary_value
-        elif mid_str == "precision":
-            eval_prec = qm.primary_value
-        elif mid_str == "recall":
-            eval_rec = qm.primary_value
-        elif mid_str == "f1_score":
-            eval_f1 = qm.primary_value
-
-    if eval_map50 is None:
-        eval_map50 = eval_result.quality_metrics[0].primary_value
-
-    eval_acc = AccuracyMetrics(
-        map_50=eval_map50,
-        precision=eval_prec,
-        recall=eval_rec,
-        f1_score=eval_f1,
-        additional_metrics=add_metrics,
-    )
-
-    # Baseline delta calculation (B36: Strict baseline comparability)
-    baseline_delta: dict[str, float] = {}
-    if active_baseline is not None and active_baseline.accuracy_metrics is not None:
-        # Check comparability dimensions:
-        # 1. Dataset ID / Root
-        base_ds_id = active_baseline.spec.hyperparameters.get("dataset_id")
-        if not base_ds_id and "-" in active_baseline.spec.name:
-            parts = active_baseline.spec.name.split("-")
-            if len(parts) >= 2:
-                base_ds_id = parts[1]
-        if base_ds_id and str(base_ds_id) != str(manifest.dataset_id):
-            raise Phase6ValidationError(
-                f"Incomparable baseline: active baseline dataset ({base_ds_id}) "
-                f"differs from current dataset ({manifest.dataset_id}). Cannot claim delta."
+        if job_record.status == TrainingJobStatus.FAILED:
+            orch_store.update_operation_status(op_id, OperationStatus.FAILED, lease)
+            ledger.fail_experiment(
+                exp_rec.exp_id, job_record.failure_details or "Training job failed"
+            )
+            raise Phase6ExecutionError(
+                f"Training failed: {job_record.failure_details or 'Unspecified execution failure'}"
             )
 
-        # 2. Dataset Version
-        if str(active_baseline.spec.dataset_version) != str(manifest.version):
-            raise Phase6ValidationError(
-                f"Incomparable baseline: active baseline dataset version ({active_baseline.spec.dataset_version}) "
-                f"differs from current dataset version ({manifest.version}). Cannot claim delta."
+        if job_record.status != TrainingJobStatus.RUNNING:
+            orch_store.update_operation_status(op_id, OperationStatus.UNKNOWN, lease)
+            raise Phase6ExecutionError(
+                f"Training launch failed to advance to RUNNING: {job_record.status.value!r}"
             )
 
-        # 3. Evaluation Split (must be held-out test)
-        base_split = active_baseline.spec.hyperparameters.get("split_name", "test")
-        if base_split != eval_plan.dataset_binding.split_name:
-            raise Phase6ValidationError(
-                f"Incomparable baseline: active baseline split ({base_split}) "
-                f"differs from current evaluation split ({eval_plan.dataset_binding.split_name}). Cannot claim delta."
+        orch_store.update_operation_status(op_id, OperationStatus.RUNNING, lease)
+
+        ledger.transition_status(
+            exp_rec.exp_id, ExperimentStatus.RUNNING, job_id=str(job_record.job_id)
+        )
+
+        # Monitor telemetry for divergence or OOM
+        if request.telemetry_stream:
+            for t in request.telemetry_stream:
+                if math.isnan(t.train_loss) or math.isinf(t.train_loss):
+                    orch_store.update_operation_status(
+                        op_id, OperationStatus.FAILED, lease
+                    )
+                    ledger.fail_experiment(
+                        exp_rec.exp_id,
+                        f"Training divergence detected at epoch {t.epoch} step {t.step}: loss={t.train_loss}",
+                    )
+                    raise Phase6ExecutionError(
+                        f"Divergence detected in telemetry: train_loss={t.train_loss}"
+                    )
+                if t.val_loss is not None and (
+                    math.isnan(t.val_loss) or math.isinf(t.val_loss)
+                ):
+                    orch_store.update_operation_status(
+                        op_id, OperationStatus.FAILED, lease
+                    )
+                    ledger.fail_experiment(
+                        exp_rec.exp_id,
+                        f"Training divergence detected at epoch {t.epoch} step {t.step}: val_loss={t.val_loss}",
+                    )
+                    raise Phase6ExecutionError(
+                        f"Divergence detected in telemetry: val_loss={t.val_loss}"
+                    )
+                if t.vram_allocated_gb > 80.0:  # OOM condition
+                    orch_store.update_operation_status(
+                        op_id, OperationStatus.FAILED, lease
+                    )
+                    ledger.fail_experiment(
+                        exp_rec.exp_id,
+                        f"OOM condition detected: vram_allocated_gb={t.vram_allocated_gb}",
+                    )
+                    raise Phase6ExecutionError("OOM condition detected in telemetry.")
+
+        # Obtain terminal training checkpoint manifest (B32: Zero synthetic checkpoint evidence)
+        ckpt_manifest = request.terminal_checkpoint
+        if ckpt_manifest is None:
+            # Operation remains in-flight/RUNNING for ADR-0003 reconciliation; do NOT mark FAILED.
+            raise Phase6ExecutionError(
+                "Training execution is in flight awaiting terminal checkpoint evidence. "
+                "Operation remains unresolved for ADR-0003 reconciliation."
             )
 
-        # 4. TargetId
-        base_target_id = active_baseline.spec.hyperparameters.get("target_id")
-        if not base_target_id and "on " in active_baseline.spec.hypothesis:
-            base_target_id = active_baseline.spec.hypothesis.split("on ")[-1].strip()
-        if base_target_id and str(base_target_id) != str(request.target_id):
+        # Checkpoint integrity check
+        if not ckpt_manifest.weights_hash or len(str(ckpt_manifest.weights_hash)) != 64:
+            orch_store.update_operation_status(op_id, OperationStatus.FAILED, lease)
+            ledger.fail_experiment(
+                exp_rec.exp_id, "Corrupt or missing checkpoint weights hash"
+            )
             raise Phase6ValidationError(
-                f"Incomparable baseline: active baseline target ({base_target_id}) "
-                f"differs from current execution target ({request.target_id}). Cannot claim delta."
+                "Checkpoint weights hash is missing or invalid."
+            )
+        try:
+            int(str(ckpt_manifest.weights_hash), 16)
+        except ValueError as exc:
+            orch_store.update_operation_status(op_id, OperationStatus.FAILED, lease)
+            ledger.fail_experiment(
+                exp_rec.exp_id, "Checkpoint weights hash is non-hexadecimal"
+            )
+            raise Phase6ValidationError(
+                "Checkpoint weights hash is non-hexadecimal."
+            ) from exc
+
+        if str(ckpt_manifest.plan_id) != str(plan.plan_id):
+            orch_store.update_operation_status(op_id, OperationStatus.FAILED, lease)
+            ledger.fail_experiment(exp_rec.exp_id, "Checkpoint plan_id mismatch")
+            raise Phase6ValidationError(
+                f"Checkpoint plan_id {ckpt_manifest.plan_id!r} does not match TrainingPlan {plan.plan_id!r}"
             )
 
-        # 5. Coarse ExecutionTarget
-        if active_baseline.spec.target != request.execution_target:
+        if str(ckpt_manifest.job_id) != str(job_record.job_id):
+            orch_store.update_operation_status(op_id, OperationStatus.FAILED, lease)
+            ledger.fail_experiment(exp_rec.exp_id, "Checkpoint job_id mismatch")
             raise Phase6ValidationError(
-                f"Incomparable baseline: active baseline target ({active_baseline.spec.target}) "
-                f"differs from current execution target ({request.execution_target}). Cannot claim delta."
+                f"Checkpoint job_id {ckpt_manifest.job_id!r} does not match dispatched TrainingJobId {job_record.job_id!r}"
             )
 
-        # 6. Operating threshold and false-positive tolerance
-        base_op = active_baseline.spec.hyperparameters.get("operating_point")
-        if isinstance(base_op, dict):
+        # Record completed experiment in ledger (B33: Zero fabricated accuracy or system evidence)
+        missing_metrics = [
+            req_m
+            for req_m in exp_spec.accuracy_metric_requirements
+            if req_m not in ckpt_manifest.metrics
+        ]
+        if missing_metrics:
+            orch_store.update_operation_status(op_id, OperationStatus.FAILED, lease)
+            ledger.fail_experiment(
+                exp_rec.exp_id,
+                f"Checkpoint is missing required validation accuracy metrics: {missing_metrics}",
+            )
+            raise Phase6ValidationError(
+                f"Terminal checkpoint manifest missing required metrics: {missing_metrics}. "
+                "Synthesizing accuracy metrics is strictly prohibited."
+            )
+
+        m50 = ckpt_manifest.metrics["map_50"]
+        m50_95 = ckpt_manifest.metrics.get("map_50_95")
+        prec = ckpt_manifest.metrics["precision"]
+        rec = ckpt_manifest.metrics["recall"]
+        train_acc = AccuracyMetrics(
+            map_50=m50,
+            map_50_95=m50_95,
+            precision=prec,
+            recall=rec,
+            f1_score=round(2 * prec * rec / (prec + rec), 4)
+            if (prec + rec) > 0
+            else 0.0,
+            additional_metrics={
+                k: v
+                for k, v in ckpt_manifest.metrics.items()
+                if k not in ("map_50", "map_50_95", "precision", "recall")
+            },
+        )
+
+        # B33: Verify attested training system metrics
+        attested_ts = request.training_system_metrics
+        if not isinstance(attested_ts, AttestedTrainingSystemMetrics):
+            orch_store.update_operation_status(op_id, OperationStatus.FAILED, lease)
+            ledger.fail_experiment(
+                exp_rec.exp_id,
+                "Missing empirical training system metrics. Fabricating training evidence is strictly prohibited per [P§29.4].",
+            )
+            raise Phase6ValidationError(
+                "training_system_metrics must be an AttestedTrainingSystemMetrics instance."
+            )
+
+        if str(attested_ts.job_id) != str(job_record.job_id):
+            orch_store.update_operation_status(op_id, OperationStatus.FAILED, lease)
+            ledger.fail_experiment(
+                exp_rec.exp_id, "Attested training metrics job_id mismatch"
+            )
+            raise Phase6ValidationError(
+                f"Attested metrics job_id {attested_ts.job_id!r} does not match dispatched TrainingJobId {job_record.job_id!r}."
+            )
+
+        if str(attested_ts.target_id) != str(request.target_id):
+            orch_store.update_operation_status(op_id, OperationStatus.FAILED, lease)
+            ledger.fail_experiment(
+                exp_rec.exp_id, "Attested training metrics target_id mismatch"
+            )
+            raise Phase6ValidationError(
+                f"Attested metrics target_id {attested_ts.target_id!r} does not match requested TargetId {request.target_id!r}."
+            )
+
+        if not attested_ts.execution_id or not str(attested_ts.execution_id).strip():
+            orch_store.update_operation_status(op_id, OperationStatus.FAILED, lease)
+            ledger.fail_experiment(
+                exp_rec.exp_id, "Attested training metrics execution_id missing"
+            )
+            raise Phase6ValidationError(
+                "Attested training metrics must contain a valid execution_id."
+            )
+
+        ts = attested_ts.metrics
+        for metric_field, val in [
+            ("training_time_seconds", ts.training_time_seconds),
+            ("peak_vram_mb", ts.peak_vram_mb),
+            ("power_draw_watts", ts.power_draw_watts),
+            ("throughput_fps", ts.throughput_fps),
+        ]:
+            if val is None or not math.isfinite(val) or val <= 0.0:
+                orch_store.update_operation_status(op_id, OperationStatus.FAILED, lease)
+                ledger.fail_experiment(
+                    exp_rec.exp_id,
+                    f"Incomplete, non-finite, or non-positive {metric_field}: {val}",
+                )
+                raise Phase6ValidationError(
+                    f"Training system metric '{metric_field}' must be a strictly positive finite number, got {val}."
+                )
+
+        if ts.gpu_hours is not None and (
+            not math.isfinite(ts.gpu_hours) or ts.gpu_hours <= 0.0
+        ):
+            orch_store.update_operation_status(op_id, OperationStatus.FAILED, lease)
+            ledger.fail_experiment(
+                exp_rec.exp_id, f"Non-positive or non-finite gpu_hours: {ts.gpu_hours}"
+            )
+            raise Phase6ValidationError(
+                f"Training system metric 'gpu_hours' must be a strictly positive finite number, got {ts.gpu_hours}."
+            )
+
+        train_sys = ts
+
+        train_art = ArtifactManifest(
+            weights_uri=ckpt_manifest.weights_uri,
+            checksums={"weights": str(ckpt_manifest.weights_hash)},
+        )
+
+        exp_rec = ledger.complete_experiment(
+            exp_id=exp_rec.exp_id,
+            accuracy=train_acc,
+            system=train_sys,
+            artifacts=train_art,
+            notes=f"Trained model on {request.target_id} for {manifest.dataset_id}",
+        )
+        orch_store.update_operation_status(op_id, OperationStatus.COMPLETED, lease)
+
+        # -----------------------------------------------------------------------
+        # Gate G4: Composite Evaluation
+        # -----------------------------------------------------------------------
+
+        # Retrieve active root baseline from ledger for delta comparison
+        active_baseline = ledger.get_baseline(
+            WorkloadType.BENCHMARK
+        ) or ledger.get_baseline(WorkloadType.EVALUATION)
+
+        # Construct EvaluationPlan for the trained checkpoint if not provided
+        eval_plan = request.evaluation_plan
+        if eval_plan is None:
+            metric_def = MetricDefinition(
+                metric_id=MetricId("map_50"),
+                name="mAP@0.50",
+                task_type=TaskType.DETECTION,
+            )
+            eval_plan = build_training_evaluation_plan(
+                evaluation_id=f"eval-{exp_rec.exp_id}".lower(),
+                experiment_id=exp_rec.exp_id,
+                dataset_manifest=manifest,
+                checkpoint_manifest=ckpt_manifest,
+                task_type=TaskType.DETECTION,
+                metrics=(metric_def,),
+                architecture_name=plan.architecture_name,
+                input_resolution=plan.augmentation.image_size,
+                split_name="test",
+                baseline_experiment_id=active_baseline.exp_id
+                if active_baseline
+                else None,
+            )
+
+        # Validate evaluation plan binding consistency
+        if str(eval_plan.dataset_binding.dataset_id) != str(manifest.dataset_id):
+            raise Phase6EvaluationError(
+                f"Evaluation plan dataset_id {eval_plan.dataset_binding.dataset_id!r} "
+                f"does not match manifest {manifest.dataset_id!r}"
+            )
+        if str(eval_plan.dataset_binding.dataset_version) != str(manifest.version):
+            raise Phase6EvaluationError(
+                f"Evaluation plan dataset_version {eval_plan.dataset_binding.dataset_version!r} "
+                f"does not match manifest {manifest.version!r}"
+            )
+        if str(eval_plan.model_artifact.checkpoint_id) != str(
+            ckpt_manifest.checkpoint_id
+        ):
+            raise Phase6EvaluationError(
+                f"Evaluation plan checkpoint_id {eval_plan.model_artifact.checkpoint_id!r} "
+                f"does not match checkpoint {ckpt_manifest.checkpoint_id!r}"
+            )
+        if str(eval_plan.model_artifact.weights_hash) != str(
+            ckpt_manifest.weights_hash
+        ):
+            raise Phase6EvaluationError(
+                f"Evaluation plan weights_hash {eval_plan.model_artifact.weights_hash!r} "
+                f"does not match checkpoint {ckpt_manifest.weights_hash!r}"
+            )
+
+        # Ensure evaluation credentials are provided by ADR-0003 approval authority (B34)
+        if (
+            request.evaluation_operation_identity is None
+            or request.evaluation_approval_request is None
+            or request.evaluation_approval_decision is None
+        ):
+            raise EvaluationApprovalRequiredError(
+                "Evaluation requires explicit human approval via ADR-0003. "
+                "Self-approving evaluation or manufacturing approval decisions is strictly prohibited."
+            )
+
+        eval_op_id = request.evaluation_operation_identity
+        eval_app_req = request.evaluation_approval_request
+        eval_app_dec = request.evaluation_approval_decision
+
+        if eval_app_dec.decision != ApprovalStatus.APPROVED:
+            raise Phase6ApprovalError(
+                f"Evaluation approval was NOT granted (decision: {eval_app_dec.decision.value!r})."
+            )
+        if (
+            eval_app_req.expires_at is not None
+            and eval_app_dec.resolved_at > eval_app_req.expires_at
+        ):
+            raise Phase6ApprovalError(
+                f"Evaluation approval expired at {eval_app_req.expires_at.isoformat()}."
+            )
+        eval_payload_hash = compute_evaluation_payload_hash(eval_plan)
+        if eval_app_dec.bound_payload_hash != eval_payload_hash:
+            raise Phase6ApprovalError(
+                f"Evaluation approval bound payload hash mismatch: decision has {eval_app_dec.bound_payload_hash!r}, "
+                f"computed EvaluationPlan has {eval_payload_hash!r}."
+            )
+        if eval_app_req.canonical_payload_hash != eval_app_dec.bound_payload_hash:
+            raise Phase6ApprovalError(
+                "Evaluation approval request payload hash does not match approval decision bound payload hash."
+            )
+        if ":" in eval_app_req.resource_scope:
+            _, scope_target = eval_app_req.resource_scope.split(":", 1)
+            if scope_target != str(request.target_id):
+                raise Phase6ApprovalError(
+                    f"TargetId {request.target_id!r} conflicts with evaluation approval scope target {scope_target!r}."
+                )
+
+        # Execute evaluation via ADR-0011 runner
+        eval_runner = request.evaluation_runner or DefaultEvaluationRunner()
+        try:
+            eval_result = eval_runner.execute(
+                plan=eval_plan,
+                operation_identity=eval_op_id,
+                approval_request=eval_app_req,
+                approval_decision=eval_app_dec,
+                tool_id=request.tool_id,
+                tool_executor=request.tool_executor,
+                target_id=request.target_id,
+            )
+        except Phase6EvaluationError:
+            raise
+        except Exception as exc:
+            raise Phase6EvaluationError(f"Evaluation execution failed: {exc}") from exc
+
+        # Verify empirical metrics and timing attestation
+        if not eval_result.quality_metrics:
+            raise Phase6EvaluationError(
+                "EvaluationResult missing quality_metrics. Empirical evaluation is mandatory per [P§12]."
+            )
+        if not eval_result.system_benchmarks:
+            raise Phase6EvaluationError(
+                "EvaluationResult missing system_benchmarks. Empirical telemetry is mandatory per [P§29.4]."
+            )
+
+        bench = eval_result.system_benchmarks[0]
+        if not bench.timing_synchronized:
+            raise Phase6EvaluationError(
+                "Hardware-synchronized timing is mandatory on target accelerator per ADR-0011 §3.13."
+            )
+
+        # B35: Exact benchmark TargetId attestation
+        if str(bench.target_id) != str(request.target_id):
+            raise Phase6EvaluationError(
+                f"BenchmarkResult target_id {bench.target_id!r} does not match requested TargetId {request.target_id!r}."
+            )
+
+        # B35: Zero defaulting of VRAM or power, strictly positive finite numbers
+        for metric_name, val in [
+            ("peak_vram_gb", bench.peak_vram_gb),
+            ("power_watts_avg", bench.power_watts_avg),
+            ("latency_p50_ms", bench.latency_p50_ms),
+            ("latency_p95_ms", bench.latency_p95_ms),
+            ("throughput_fps", bench.throughput_fps),
+        ]:
+            if val is None or not math.isfinite(val) or val <= 0.0:
+                raise Phase6EvaluationError(
+                    f"EvaluationResult system_benchmarks missing, non-finite, or non-positive {metric_name} ({val}). "
+                    "Defaulting or non-positive telemetry is strictly prohibited per [P§29.4]."
+                )
+
+        fps = bench.throughput_fps
+        assert bench.peak_vram_gb is not None
+        vram_mb = bench.peak_vram_gb * 1024.0
+        assert bench.power_watts_avg is not None
+        power_watts = bench.power_watts_avg
+
+        eval_sys = SystemMetrics(
+            peak_vram_mb=vram_mb,
+            power_draw_watts=power_watts,
+            latency_inference_ms=bench.latency_p50_ms,
+            latency_e2e_ms=bench.latency_p95_ms,
+            throughput_fps=fps,
+        )
+
+        # Quality metrics extraction
+        eval_map50: float | None = None
+        eval_prec: float | None = None
+        eval_rec: float | None = None
+        eval_f1: float | None = None
+        add_metrics: dict[str, float] = {}
+
+        for qm in eval_result.quality_metrics:
+            mid_str = str(qm.metric.metric_id)
+            add_metrics[mid_str] = qm.primary_value
+            if mid_str == "map_50":
+                eval_map50 = qm.primary_value
+            elif mid_str == "precision":
+                eval_prec = qm.primary_value
+            elif mid_str == "recall":
+                eval_rec = qm.primary_value
+            elif mid_str == "f1_score":
+                eval_f1 = qm.primary_value
+
+        if eval_map50 is None:
+            eval_map50 = eval_result.quality_metrics[0].primary_value
+
+        eval_acc = AccuracyMetrics(
+            map_50=eval_map50,
+            precision=eval_prec,
+            recall=eval_rec,
+            f1_score=eval_f1,
+            additional_metrics=add_metrics,
+        )
+
+        # Baseline delta calculation (B36: Strict baseline comparability)
+        baseline_delta: dict[str, float] = {}
+        if active_baseline is not None and active_baseline.accuracy_metrics is not None:
+            # 1. Dataset ID
+            base_ds_id = active_baseline.spec.hyperparameters.get("dataset_id")
+            if not base_ds_id:
+                raise Phase6ValidationError(
+                    "Active baseline is missing authoritative 'dataset_id' in hyperparameters. "
+                    "Inferring dataset facts is strictly prohibited."
+                )
+            if str(base_ds_id) != str(manifest.dataset_id):
+                raise Phase6ValidationError(
+                    f"Incomparable baseline: active baseline dataset ({base_ds_id}) "
+                    f"differs from current dataset ({manifest.dataset_id}). Cannot claim delta."
+                )
+
+            # 2. Dataset Root Checksum
+            base_root_checksum = active_baseline.spec.hyperparameters.get(
+                "payload_root_checksum"
+            )
+            if not base_root_checksum:
+                raise Phase6ValidationError(
+                    "Active baseline is missing authoritative 'payload_root_checksum' in hyperparameters. "
+                    "Verifying exact dataset root checksum is mandatory."
+                )
+            if str(base_root_checksum) != str(manifest.payload_root_checksum):
+                raise Phase6ValidationError(
+                    f"Incomparable baseline: active baseline payload_root_checksum ({base_root_checksum}) "
+                    f"differs from current dataset payload_root_checksum ({manifest.payload_root_checksum}). Cannot claim delta."
+                )
+
+            # 3. Dataset Version
+            if str(active_baseline.spec.dataset_version) != str(manifest.version):
+                raise Phase6ValidationError(
+                    f"Incomparable baseline: active baseline dataset version ({active_baseline.spec.dataset_version}) "
+                    f"differs from current dataset version ({manifest.version}). Cannot claim delta."
+                )
+
+            # 4. Evaluation Split
+            base_split = active_baseline.spec.hyperparameters.get("split_name")
+            if not base_split:
+                raise Phase6ValidationError(
+                    "Active baseline is missing authoritative 'split_name' in hyperparameters. "
+                    "Defaulting split is strictly prohibited."
+                )
+            if base_split != eval_plan.dataset_binding.split_name:
+                raise Phase6ValidationError(
+                    f"Incomparable baseline: active baseline split ({base_split}) "
+                    f"differs from current evaluation split ({eval_plan.dataset_binding.split_name}). Cannot claim delta."
+                )
+
+            # 5. TargetId
+            base_target_id = active_baseline.spec.hyperparameters.get("target_id")
+            if not base_target_id:
+                raise Phase6ValidationError(
+                    "Active baseline is missing authoritative 'target_id' in hyperparameters. "
+                    "Inferring target facts is strictly prohibited."
+                )
+            if str(base_target_id) != str(request.target_id):
+                raise Phase6ValidationError(
+                    f"Incomparable baseline: active baseline target ({base_target_id}) "
+                    f"differs from current execution target ({request.target_id}). Cannot claim delta."
+                )
+
+            # 6. Coarse ExecutionTarget
+            if active_baseline.spec.target != request.execution_target:
+                raise Phase6ValidationError(
+                    f"Incomparable baseline: active baseline target ({active_baseline.spec.target}) "
+                    f"differs from current execution target ({request.execution_target}). Cannot claim delta."
+                )
+
+            # 7. Operating point (threshold and false-positive tolerance)
+            base_op = active_baseline.spec.hyperparameters.get("operating_point")
+            if not isinstance(base_op, dict):
+                raise Phase6ValidationError(
+                    "Active baseline is missing authoritative 'operating_point' mapping in hyperparameters. "
+                    "Skipping operating point verification is strictly prohibited."
+                )
             base_conf = base_op.get("confidence_threshold")
             if base_conf is None:
                 base_conf = base_op.get("threshold")
-            if (
-                base_conf is not None
-                and abs(float(base_conf) - float(request.operating_point.threshold))
-                > 1e-4
-            ):
+            if base_conf is None:
+                raise Phase6ValidationError(
+                    "Active baseline operating_point is missing required confidence threshold."
+                )
+            if abs(float(base_conf) - float(request.operating_point.threshold)) > 1e-4:
                 raise Phase6ValidationError(
                     f"Incomparable baseline: operating confidence threshold ({base_conf}) "
                     f"differs from current operating point ({request.operating_point.threshold}). Cannot claim delta."
@@ -1370,178 +1461,191 @@ def run_train_evaluate_diagnose(
             base_fpr = base_op.get("max_false_positive_rate")
             if base_fpr is None:
                 base_fpr = base_op.get("false_positive_tolerance")
-            if (
-                base_fpr is not None
-                and request.operating_point.false_positive_tolerance is not None
-                and abs(
-                    float(base_fpr)
-                    - float(request.operating_point.false_positive_tolerance)
-                )
-                > 1e-4
-            ):
+            if request.operating_point.false_positive_tolerance is not None:
+                if base_fpr is None:
+                    raise Phase6ValidationError(
+                        "Active baseline operating_point is missing false positive tolerance required by current operating point."
+                    )
+                if (
+                    abs(
+                        float(base_fpr)
+                        - float(request.operating_point.false_positive_tolerance)
+                    )
+                    > 1e-4
+                ):
+                    raise Phase6ValidationError(
+                        f"Incomparable baseline: operating false positive tolerance ({base_fpr}) "
+                        f"differs from current operating point ({request.operating_point.false_positive_tolerance}). Cannot claim delta."
+                    )
+            elif base_fpr is not None:
                 raise Phase6ValidationError(
-                    f"Incomparable baseline: operating false positive tolerance ({base_fpr}) "
-                    f"differs from current operating point ({request.operating_point.false_positive_tolerance}). Cannot claim delta."
+                    "Active baseline operating_point specifies false positive tolerance but current operating point has None."
                 )
 
-        if active_baseline.accuracy_metrics.map_50 is not None:
-            baseline_delta["delta_map_50"] = round(
-                (eval_acc.map_50 or 0.0) - active_baseline.accuracy_metrics.map_50, 4
-            )
-        if (
-            active_baseline.system_metrics is not None
-            and active_baseline.system_metrics.throughput_fps is not None
-        ):
-            baseline_delta["delta_fps"] = round(
-                fps - active_baseline.system_metrics.throughput_fps, 2
-            )
-            baseline_delta["delta_vram_mb"] = round(
-                vram_mb - (active_baseline.system_metrics.peak_vram_mb or 0.0), 1
-            )
-            baseline_delta["delta_power_watts"] = round(
-                power_watts - (active_baseline.system_metrics.power_draw_watts or 0.0),
-                1,
+            if active_baseline.accuracy_metrics.map_50 is not None:
+                baseline_delta["delta_map_50"] = round(
+                    (eval_acc.map_50 or 0.0) - active_baseline.accuracy_metrics.map_50,
+                    4,
+                )
+            if (
+                active_baseline.system_metrics is not None
+                and active_baseline.system_metrics.throughput_fps is not None
+            ):
+                baseline_delta["delta_fps"] = round(
+                    fps - active_baseline.system_metrics.throughput_fps, 2
+                )
+                baseline_delta["delta_vram_mb"] = round(
+                    vram_mb - (active_baseline.system_metrics.peak_vram_mb or 0.0), 1
+                )
+                baseline_delta["delta_power_watts"] = round(
+                    power_watts
+                    - (active_baseline.system_metrics.power_draw_watts or 0.0),
+                    1,
+                )
+
+        # Target constraints evaluation
+        constraint_verdicts: list[TargetConstraintVerdict] = []
+        meets_all = True
+        for c in request.target_constraints:
+            if c.metric_name == "throughput_fps":
+                v = c.evaluate(fps)
+            elif c.metric_name == "map_50":
+                v = c.evaluate(eval_acc.map_50 or 0.0)
+            elif c.metric_name == "peak_vram_mb":
+                v = c.evaluate(vram_mb)
+            elif c.metric_name == "power_draw_watts":
+                v = c.evaluate(power_watts)
+            else:
+                v = c.evaluate(0.0)
+            constraint_verdicts.append(v)
+            if not v.meets_constraint:
+                meets_all = False
+
+        composite_eval = CompositeEvaluationResult(
+            accuracy=eval_acc,
+            system_performance=eval_sys,
+            target_constraint_verdicts=tuple(constraint_verdicts),
+            baseline_delta=baseline_delta,
+            operating_point=request.operating_point,
+            raw_evaluation_result=eval_result,
+            meets_all_constraints=meets_all,
+        )
+
+        # -----------------------------------------------------------------------
+        # Gate G5: Diagnosis & Next Experiment Proposal
+        # -----------------------------------------------------------------------
+
+        # Extract structured error evidence
+        analyzer = request.error_analyzer or DefaultErrorAnalyzer()
+        error_analysis = analyzer.analyze(
+            predictions=eval_result.error_analysis or {},
+            ground_truth={},
+            dataset_binding=eval_plan.dataset_binding,
+        )
+
+        if error_analysis.total_samples <= 0 or error_analysis.failed_samples_count < 0:
+            raise Phase6DiagnosisError(
+                "Invalid error analysis counts: total_samples and failed_samples_count must be positive."
             )
 
-    # Target constraints evaluation
-    constraint_verdicts: list[TargetConstraintVerdict] = []
-    meets_all = True
-    for c in request.target_constraints:
-        if c.metric_name == "throughput_fps":
-            v = c.evaluate(fps)
-        elif c.metric_name == "map_50":
-            v = c.evaluate(eval_acc.map_50 or 0.0)
-        elif c.metric_name == "peak_vram_mb":
-            v = c.evaluate(vram_mb)
-        elif c.metric_name == "power_draw_watts":
-            v = c.evaluate(power_watts)
+        # Empirical failure category ranking (B37: Zero invented error counts)
+        observed_counts: dict[str, int] = {}
+        if error_analysis.localization_errors > 0:
+            observed_counts["localization_error"] = error_analysis.localization_errors
+        if error_analysis.classification_errors > 0:
+            observed_counts["class_confusion"] = error_analysis.classification_errors
+        if error_analysis.false_positive_count > 0:
+            observed_counts["false_positives"] = error_analysis.false_positive_count
+        if error_analysis.false_negative_count > 0:
+            observed_counts["missed_detections"] = error_analysis.false_negative_count
+
+        # Check for empirical category error counts in error_analysis predictions if provided
+        raw_preds: Any = eval_result.error_analysis
+        if isinstance(raw_preds, dict) and "category_error_counts" in raw_preds:
+            for cat_k, cat_v in raw_preds["category_error_counts"].items():
+                if isinstance(cat_v, int) and cat_v > 0:
+                    observed_counts[str(cat_k)] = cat_v
+
+        if not observed_counts:
+            raise Phase6DiagnosisError(
+                "Missing empirical failure-category counts/evidence; fabricated rankings are strictly prohibited."
+            )
+
+        # Sort categories by error count descending
+        total_failures = max(
+            error_analysis.failed_samples_count, sum(observed_counts.values())
+        )
+        sorted_cats = sorted(
+            observed_counts.items(), key=lambda kv: kv[1], reverse=True
+        )
+        ranked_categories: list[RankedFailureCategory] = []
+        for rank, (cat_name, count) in enumerate(sorted_cats, start=1):
+            share = round(count / total_failures, 4)
+            ranked_categories.append(
+                RankedFailureCategory(
+                    category_name=cat_name,
+                    error_count=count,
+                    error_share=share,
+                    severity_rank=rank,
+                )
+            )
+
+        top_failure = ranked_categories[0]
+        causal_hypo = (
+            f"Top failure mode is '{top_failure.category_name}' ({top_failure.error_count} errors, "
+            f"{top_failure.error_share * 100:.1f}% of failures). Model feature representation degrades under this condition."
+        )
+        pattern_desc = f"Observed failure pattern: {', '.join(f'{rc.category_name} ({rc.error_count})' for rc in ranked_categories)}"
+
+        failure_analysis = FailureCategoryAnalysis(
+            total_failed_samples=total_failures,
+            ranked_categories=tuple(ranked_categories),
+            ranking_method="observed_frequency_descending",
+            causal_hypothesis=causal_hypo,
+            measured_failure_pattern=pattern_desc,
+            raw_error_analysis=error_analysis,
+        )
+
+        # Next experiment proposal (STRICTLY UNDISPATCHED)
+        next_vars: dict[str, Any] = {}
+        if top_failure.category_name == "small_objects":
+            next_vars = {
+                "augmentation.mosaic_prob": 0.5,
+                "augmentation.image_size": (1280, 1280),
+            }
+            next_hypo = "Increasing input resolution to 1280x1280 with mosaic augmentation will improve small object recall."
+        elif top_failure.category_name == "low_illumination":
+            next_vars = {
+                "augmentation.color_jitter": 0.4,
+            }
+            next_hypo = "Adding color jitter augmentation will improve robustness under low illumination conditions."
         else:
-            v = c.evaluate(0.0)
-        constraint_verdicts.append(v)
-        if not v.meets_constraint:
-            meets_all = False
+            next_vars = {
+                "losses.focal_loss_gamma": 2.0,
+            }
+            next_hypo = f"Applying hard-example mining will mitigate {top_failure.category_name} degradation."
 
-    composite_eval = CompositeEvaluationResult(
-        accuracy=eval_acc,
-        system_performance=eval_sys,
-        target_constraint_verdicts=tuple(constraint_verdicts),
-        baseline_delta=baseline_delta,
-        operating_point=request.operating_point,
-        raw_evaluation_result=eval_result,
-        meets_all_constraints=meets_all,
-    )
-
-    # -----------------------------------------------------------------------
-    # Gate G5: Diagnosis & Next Experiment Proposal
-    # -----------------------------------------------------------------------
-
-    # Extract structured error evidence
-    analyzer = request.error_analyzer or DefaultErrorAnalyzer()
-    error_analysis = analyzer.analyze(
-        predictions=eval_result.error_analysis or {},
-        ground_truth={},
-        dataset_binding=eval_plan.dataset_binding,
-    )
-
-    if error_analysis.total_samples <= 0 or error_analysis.failed_samples_count < 0:
-        raise Phase6DiagnosisError(
-            "Invalid error analysis counts: total_samples and failed_samples_count must be positive."
+        proposed_experiment = ProposedNextExperiment(
+            proposal_id=f"prop-{uuid.uuid4().hex[:8]}",
+            hypothesis=next_hypo,
+            intended_changed_variables=next_vars,
+            baseline_comparator_exp_id=exp_rec.exp_id,
+            cost_estimate_required=True,
+            requires_fresh_approval=True,
+            is_dispatched=False,  # Enforce zero auto-dispatch
+            rationale=f"Grounded directly in empirical top failure mode '{top_failure.category_name}'.",
         )
 
-    # Empirical failure category ranking (B37: Zero invented error counts)
-    observed_counts: dict[str, int] = {}
-    if error_analysis.localization_errors > 0:
-        observed_counts["localization_error"] = error_analysis.localization_errors
-    if error_analysis.classification_errors > 0:
-        observed_counts["class_confusion"] = error_analysis.classification_errors
-    if error_analysis.false_positive_count > 0:
-        observed_counts["false_positives"] = error_analysis.false_positive_count
-    if error_analysis.false_negative_count > 0:
-        observed_counts["missed_detections"] = error_analysis.false_negative_count
-
-    # Check for empirical category error counts in error_analysis predictions if provided
-    raw_preds: Any = eval_result.error_analysis
-    if isinstance(raw_preds, dict) and "category_error_counts" in raw_preds:
-        for cat_k, cat_v in raw_preds["category_error_counts"].items():
-            if isinstance(cat_v, int) and cat_v > 0:
-                observed_counts[str(cat_k)] = cat_v
-
-    if not observed_counts:
-        raise Phase6DiagnosisError(
-            "Missing empirical failure-category counts/evidence; fabricated rankings are strictly prohibited."
+        return TrainEvaluateDiagnoseResult(
+            training_job=job_record,
+            experiment_record=exp_rec,
+            checkpoint_manifest=ckpt_manifest,
+            composite_evaluation=composite_eval,
+            failure_analysis=failure_analysis,
+            proposed_next_experiment=proposed_experiment,
         )
-
-    # Sort categories by error count descending
-    total_failures = max(
-        error_analysis.failed_samples_count, sum(observed_counts.values())
-    )
-    sorted_cats = sorted(observed_counts.items(), key=lambda kv: kv[1], reverse=True)
-    ranked_categories: list[RankedFailureCategory] = []
-    for rank, (cat_name, count) in enumerate(sorted_cats, start=1):
-        share = round(count / total_failures, 4)
-        ranked_categories.append(
-            RankedFailureCategory(
-                category_name=cat_name,
-                error_count=count,
-                error_share=share,
-                severity_rank=rank,
-            )
-        )
-
-    top_failure = ranked_categories[0]
-    causal_hypo = (
-        f"Top failure mode is '{top_failure.category_name}' ({top_failure.error_count} errors, "
-        f"{top_failure.error_share * 100:.1f}% of failures). Model feature representation degrades under this condition."
-    )
-    pattern_desc = f"Observed failure pattern: {', '.join(f'{rc.category_name} ({rc.error_count})' for rc in ranked_categories)}"
-
-    failure_analysis = FailureCategoryAnalysis(
-        total_failed_samples=total_failures,
-        ranked_categories=tuple(ranked_categories),
-        ranking_method="observed_frequency_descending",
-        causal_hypothesis=causal_hypo,
-        measured_failure_pattern=pattern_desc,
-        raw_error_analysis=error_analysis,
-    )
-
-    # Next experiment proposal (STRICTLY UNDISPATCHED)
-    next_vars: dict[str, Any] = {}
-    if top_failure.category_name == "small_objects":
-        next_vars = {
-            "augmentation.mosaic_prob": 0.5,
-            "augmentation.image_size": (1280, 1280),
-        }
-        next_hypo = "Increasing input resolution to 1280x1280 with mosaic augmentation will improve small object recall."
-    elif top_failure.category_name == "low_illumination":
-        next_vars = {
-            "augmentation.color_jitter": 0.4,
-        }
-        next_hypo = "Adding color jitter augmentation will improve robustness under low illumination conditions."
-    else:
-        next_vars = {
-            "losses.focal_loss_gamma": 2.0,
-        }
-        next_hypo = f"Applying hard-example mining will mitigate {top_failure.category_name} degradation."
-
-    proposed_experiment = ProposedNextExperiment(
-        proposal_id=f"prop-{uuid.uuid4().hex[:8]}",
-        hypothesis=next_hypo,
-        intended_changed_variables=next_vars,
-        baseline_comparator_exp_id=exp_rec.exp_id,
-        cost_estimate_required=True,
-        requires_fresh_approval=True,
-        is_dispatched=False,  # Enforce zero auto-dispatch
-        rationale=f"Grounded directly in empirical top failure mode '{top_failure.category_name}'.",
-    )
-
-    return TrainEvaluateDiagnoseResult(
-        training_job=job_record,
-        experiment_record=exp_rec,
-        checkpoint_manifest=ckpt_manifest,
-        composite_evaluation=composite_eval,
-        failure_analysis=failure_analysis,
-        proposed_next_experiment=proposed_experiment,
-    )
+    finally:
+        lease_mgr.release(lease)
 
 
 class TrainEvaluateDiagnoseWorkflow:
