@@ -351,6 +351,7 @@ class TrainEvaluateDiagnoseRequest:
     workspace_root: Path | str | None = None
     reconciliation_coordinator: ReconciliationCoordinator | None = None
     job_id: TrainingJobId | str | None = None
+    execution_id: ExecutionId | str | None = None
     # Provenance and reproducibility evidence per ADR-0004 & [P§25]
     commit_sha: str | None = None
     seed: int | None = None
@@ -533,13 +534,30 @@ def run_train_evaluate_diagnose(
             f"Execution target {request.target_id!r} is a placeholder or synthesized target. "
             "An authorized named target accelerator is strictly required."
         )
-    if request.tool_registry.get_target(request.target_id) is None:
+    target_desc = request.tool_registry.get_target(request.target_id)
+    if target_desc is None:
         raise Phase6ValidationError(
             f"Execution target {request.target_id!r} is not registered in the authoritative target inventory."
         )
-    if request.tool_registry.get(request.tool_id) is None:
+    tool_desc = request.tool_registry.get(request.tool_id)
+    if tool_desc is None:
         raise Phase6ValidationError(
             f"Tool {request.tool_id!r} is not registered in the authoritative tool registry."
+        )
+    if not target_desc.is_available:
+        raise Phase6ValidationError(
+            f"Execution target {request.target_id!r} is registered but unavailable: {target_desc.unavailable_reason or 'Target unavailable.'}"
+        )
+    if target_desc.target_type not in tool_desc.compatible_target_types:
+        raise Phase6ValidationError(
+            f"Execution target {request.target_id!r} type {target_desc.target_type.value!r} is incompatible with tool {request.tool_id!r} (compatible types: {[t.value for t in tool_desc.compatible_target_types]})."
+        )
+    avail_info = request.tool_registry.check_availability(
+        request.tool_id, request.target_id
+    )
+    if not avail_info.is_available:
+        raise Phase6ValidationError(
+            f"Authoritative tool registry availability check failed for tool {request.tool_id!r} on target {request.target_id!r}: {avail_info.reason or 'Unavailable or incompatible.'}"
         )
 
     # 2. Dataset manifest & plan binding integrity
@@ -702,13 +720,32 @@ def run_train_evaluate_diagnose(
         raise Phase6ValidationError(
             "TrainingPlan must contain an authoritative cost_estimate bound into the plan before approval and dispatch."
         )
-    if (
-        plan.cost_estimate.estimated_cost_usd != cost_estimate.estimated_cost_usd
-        or plan.cost_estimate.estimated_gpu_hours != cost_estimate.estimated_gpu_hours
-    ):
+    plan_cost = plan.cost_estimate
+    mismatches: list[str] = []
+    if plan_cost.estimated_cost_usd != cost_estimate.estimated_cost_usd:
+        mismatches.append(
+            f"estimated_cost_usd (plan: {plan_cost.estimated_cost_usd}, calculated: {cost_estimate.estimated_cost_usd})"
+        )
+    if plan_cost.estimated_gpu_hours != cost_estimate.estimated_gpu_hours:
+        mismatches.append(
+            f"estimated_gpu_hours (plan: {plan_cost.estimated_gpu_hours}, calculated: {cost_estimate.estimated_gpu_hours})"
+        )
+    if plan_cost.estimated_wall_clock_hours != cost_estimate.estimated_wall_clock_hours:
+        mismatches.append(
+            f"estimated_wall_clock_hours (plan: {plan_cost.estimated_wall_clock_hours}, calculated: {cost_estimate.estimated_wall_clock_hours})"
+        )
+    if plan_cost.estimated_storage_gb != cost_estimate.estimated_storage_gb:
+        mismatches.append(
+            f"estimated_storage_gb (plan: {plan_cost.estimated_storage_gb}, calculated: {cost_estimate.estimated_storage_gb})"
+        )
+    if plan_cost.basis_description != cost_estimate.basis_description:
+        mismatches.append(
+            f"basis_description (plan: {plan_cost.basis_description!r}, calculated: {cost_estimate.basis_description!r})"
+        )
+
+    if mismatches:
         raise Phase6ValidationError(
-            f"Plan cost estimate ({plan.cost_estimate.estimated_cost_usd} USD) differs from "
-            f"authoritative calculated estimate ({cost_estimate.estimated_cost_usd} USD)."
+            f"Plan-bound CostEstimate differs from authoritative calculated estimate: {', '.join(mismatches)}."
         )
 
     # -----------------------------------------------------------------------
@@ -830,7 +867,11 @@ def run_train_evaluate_diagnose(
         raise Phase6ExecutionError(
             f"Duplicate dispatch rejected: operation {op_id.value!r} is already {existing_status.value!r} in orchestration store."
         )
-    if existing_status in (OperationStatus.UNKNOWN, OperationStatus.RECONCILING):
+    if existing_status in (
+        OperationStatus.UNKNOWN,
+        OperationStatus.RECONCILING,
+        OperationStatus.DISPATCHING,
+    ):
         if reconciler is not None:
             existing_op = orch_store.find_operation(op_id)
             if existing_op is not None:
@@ -841,6 +882,13 @@ def run_train_evaluate_diagnose(
                     owner_instance_id="p6-worker",
                 )
                 try:
+                    if existing_status == OperationStatus.DISPATCHING:
+                        orch_store.update_operation_status(
+                            op_id, OperationStatus.UNKNOWN, rec_lease
+                        )
+                        reconciler.initiate_reconciliation(op_id, rec_lease)
+                    elif existing_status == OperationStatus.UNKNOWN:
+                        reconciler.initiate_reconciliation(op_id, rec_lease)
                     outcome = reconciler.reconcile_operation(existing_op, rec_lease)
                 finally:
                     lease_mgr.release(rec_lease)
@@ -852,14 +900,14 @@ def run_train_evaluate_diagnose(
                     raise Phase6ExecutionError(
                         f"Duplicate dispatch rejected: operation {op_id.value!r} was reconciled as CONFIRMED_COMPLETED."
                     )
+                if outcome == ReconciliationOutcome.CONFIRMED_FAILED:
+                    raise Phase6ExecutionError(
+                        f"Operation {op_id.value!r} was reconciled as CONFIRMED_FAILED."
+                    )
         else:
             raise Phase6ExecutionError(
                 f"Operation {op_id.value!r} is ambiguous and remains {existing_status.value!r}. Cannot dispatch without reconciliation."
             )
-    if existing_status == OperationStatus.DISPATCHING:
-        raise Phase6ExecutionError(
-            f"Duplicate dispatch rejected: operation {op_id.value!r} is currently DISPATCHING."
-        )
 
     # Acquire execution lease and record operation intent in store BEFORE paid dispatch
     lease_mgr = LeaseManager(orch_store)
@@ -948,6 +996,9 @@ def run_train_evaluate_diagnose(
             tool_executor=request.tool_executor,
             target_id=request.target_id,
             job_id=TrainingJobId(str(request.job_id)) if request.job_id else None,
+            execution_id=(
+                ExecutionId(str(request.execution_id)) if request.execution_id else None
+            ),
         )
 
         if job_record.status == TrainingJobStatus.FAILED:
@@ -1124,6 +1175,15 @@ def run_train_evaluate_diagnose(
             )
             raise Phase6ValidationError(
                 "Attested training metrics must contain a valid execution_id."
+            )
+
+        if str(attested_ts.execution_id) != str(job_record.execution_id):
+            orch_store.update_operation_status(op_id, OperationStatus.FAILED, lease)
+            ledger.fail_experiment(
+                exp_rec.exp_id, "Attested training metrics execution_id mismatch"
+            )
+            raise Phase6ValidationError(
+                f"Attested metrics execution_id {attested_ts.execution_id!r} does not match dispatched execution_id {job_record.execution_id!r}."
             )
 
         ts = attested_ts.metrics

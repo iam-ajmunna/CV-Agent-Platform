@@ -2490,3 +2490,32 @@ Remediated all three architectural blockers identified in the Official PM's seco
 **Learned:** In multi-stage agentic workflows, execution state cannot assume failure on missing terminal evidence when external jobs may still be running; preserving in-flight status (`RUNNING`) enables crash-safe external reconciliation while fencing prevents split-brain duplicate execution.
 
 **Left open:** Push commit to `feature/ajmunna/phase-6-train-evaluate-diagnose`, verify GitHub CI checks on PR #75, and report PR #75 + exact head SHA to Official PM for formal re-review.
+
+---
+
+## 2026-10-12 — Phase 6 PR #75 Remediation of PM Re-Review Blockers (D-076)
+
+**Did:**
+1. Discharged all four blocking findings from Official PM Re-Review (comment `6111458577` on PR #75):
+   - **B33 (Execution ID Lineage Attestation):** Enforced that `AttestedTrainingSystemMetrics.execution_id` must strictly match the actual dispatched `job_record.execution_id`. Passed caller-specified or deterministic `execution_id` through `TrainingLauncher.launch` and `ToolInvocation` into `TrainingJobRecord`. Mismatch fails closed with `Phase6ValidationError` and marks the experiment failed in the ledger.
+   - **B38 (DISPATCHING Crash Window ADR-0003 Reconciliation):** Addressed the genuine window where external dispatch succeeds while local process crashes before `RUNNING` persistence. Detected existing operation in `(UNKNOWN, RECONCILING, DISPATCHING)`, transitioned `DISPATCHING -> UNKNOWN -> RECONCILING`, and invoked `ReconciliationCoordinator.reconcile_operation`, raising `Phase6ExecutionError` for ambiguous or in-flight operations and guaranteeing zero duplicate paid jobs are launched.
+   - **Target Authority (Authoritative Availability & Compatibility Validation):** Validated named execution target in Gate G1 against `target_desc.is_available`, verified `target_desc.target_type in tool_desc.compatible_target_types`, and invoked `tool_registry.check_availability(tool_id, target_id)`, failing closed before dispatch with `Phase6ValidationError` on unavailable or incompatible hardware.
+   - **B39 (Exhaustive 5-Field CostEstimate Binding):** Enforced deterministic plan-bound equality across all five `CostEstimate` fields (`estimated_cost_usd`, `estimated_gpu_hours`, `estimated_wall_clock_hours`, `estimated_storage_gb`, `basis_description`). Any discrepancy or non-finite value fails closed with `Phase6ValidationError`.
+2. Updated adversarial test suite `tests/test_train_evaluate_diagnose_phase6_exit.py` covering:
+   - Registered-but-unavailable and incompatible target types (Case 4).
+   - Mismatches in wall clock hours, storage GB, and basis description (Case 5).
+   - Execution ID lineage mismatch and non-positive/NaN telemetry (Case 13).
+   - Crash during `DISPATCHING` transitioning to `RECONCILING` and reconciling via ADR-0003 with zero duplicate paid jobs (`test_crash_after_paid_dispatch_rejects_duplicate_dispatch_zero_new_jobs`).
+3. Verified all repository quality gates:
+   - 21/21 Phase 6 exit tests passing.
+   - 739/739 repository tests passing across 28 suites with zero regressions.
+   - Static analysis clean: Ruff check clean, Ruff format clean, Mypy clean (122 source files), `git diff --check` clean.
+4. Updated `docs/reports/ISSUE-74-PHASE-6-REPORT.md`, `docs/state/STATUS.md`, `docs/state/JOURNAL.md`, and recorded `D-076` in `docs/state/DECISIONS.md`.
+
+**Why:** `[P§7]`, `[P§12]`, `[P§13]`, `[P§19]`, `[P§20]`, `[P§21]`, `[P§22]`, `[P§24]`, `[P§25]`, `[P§26]`, `[P§29.1]`–`[P§29.4]`, `[P§34]` — addresses all findings from Official PM re-review comment `6111458577` on PR #75, guaranteeing complete execution lineage, crash-safe external reconciliation during dispatching, authoritative hardware validation, and complete cost-estimate binding.
+
+**Broke:** Nothing broken. 739/739 repository tests pass.
+
+**Learned:** In distributed execution environments, the interval between external dispatch and local record write represents a distinct ambiguity state that cannot simply be rejected as an unhandled collision; transitioning to RECONCILING and engaging ADR-0003 reconciliation safely resolves in-flight jobs without risking duplicate paid execution.
+
+**Left open:** Push commit to `feature/ajmunna/phase-6-train-evaluate-diagnose`, verify GitHub CI checks on PR #75, and report PR #75 + exact head SHA to Official PM for formal re-review.

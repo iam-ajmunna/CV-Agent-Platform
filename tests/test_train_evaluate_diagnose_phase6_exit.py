@@ -183,7 +183,17 @@ class MockToolExecutor(ToolExecutor):
         if self.should_raise is not None:
             raise self.should_raise
         if self.canned_result is not None:
-            return self.canned_result
+            return ToolResult(
+                execution_id=invocation.execution_id,
+                tool_id=invocation.tool_id,
+                target_id=invocation.target_id,
+                status=self.canned_result.status,
+                structured_output=self.canned_result.structured_output,
+                diagnostics=self.canned_result.diagnostics,
+                artifacts=self.canned_result.artifacts,
+                error_message=self.canned_result.error_message,
+                active_job_ref=self.canned_result.active_job_ref,
+            )
         return ToolResult(
             execution_id=invocation.execution_id,
             tool_id=invocation.tool_id,
@@ -602,9 +612,10 @@ def _make_clean_request(
         )
 
     # B33: Empirical attested training system metrics
+    exec_id = ExecutionId(f"exec-{plan.plan_id}")
     clean_train_sys = training_system_metrics or AttestedTrainingSystemMetrics(
         job_id=job_id,
-        execution_id=ExecutionId(op_id.operation_id),
+        execution_id=exec_id,
         target_id=tgt_id,
         metrics=SystemMetrics(
             gpu_hours=0.5,
@@ -691,6 +702,7 @@ def _make_clean_request(
         experiment_ledger=ledger,
         workspace_root=tmp_path,
         job_id=job_id,
+        execution_id=exec_id,
         reconciliation_coordinator=reconciliation_coordinator,
         commit_sha="a" * 40,
         seed=42,
@@ -877,6 +889,71 @@ def test_case_4_unregistered_named_target_rejects_zero_local_synthesis(tmp_path:
     ):
         run_train_evaluate_diagnose(req_unreg_tool)
 
+    # 5. Registered but unavailable target
+    reg_unavail = DefaultToolRegistry(
+        tools=[
+            ToolDescriptor(
+                tool_id=ToolId("tool-cv-trainer"),
+                name="CV Trainer Tool",
+                description="Training tool",
+                compatible_target_types=(TargetType.LOCAL, TargetType.REMOTE),
+                input_schema={},
+                output_schema={},
+                risk_level=ToolRiskLevel.RESOURCE_INTENSIVE,
+                requires_approval=True,
+            ),
+        ],
+        targets=[
+            ExecutionTargetDescriptor(
+                target_id=TargetId("orin-agx-01"),
+                target_type=TargetType.LOCAL,
+                is_available=False,
+                description="Jetson AGX Orin local target (offline)",
+                unavailable_reason="Target device is offline for maintenance",
+            )
+        ],
+    )
+    req_unavail = _make_clean_request(
+        tmp_path / "part_unavail_tgt", tool_registry=reg_unavail
+    )
+    with pytest.raises(
+        Phase6ValidationError,
+        match="registered but unavailable|unavailable",
+    ):
+        run_train_evaluate_diagnose(req_unavail)
+
+    # 6. Registered but incompatible target type
+    reg_incompat = DefaultToolRegistry(
+        tools=[
+            ToolDescriptor(
+                tool_id=ToolId("tool-cv-trainer"),
+                name="CV Trainer Tool",
+                description="Training tool",
+                compatible_target_types=(TargetType.REMOTE,),
+                input_schema={},
+                output_schema={},
+                risk_level=ToolRiskLevel.RESOURCE_INTENSIVE,
+                requires_approval=True,
+            ),
+        ],
+        targets=[
+            ExecutionTargetDescriptor(
+                target_id=TargetId("orin-agx-01"),
+                target_type=TargetType.LOCAL,
+                is_available=True,
+                description="Jetson AGX Orin local target",
+            )
+        ],
+    )
+    req_incompat = _make_clean_request(
+        tmp_path / "part_incompat_tgt", tool_registry=reg_incompat
+    )
+    with pytest.raises(
+        Phase6ValidationError,
+        match="incompatible with tool|unavailable or incompatible",
+    ):
+        run_train_evaluate_diagnose(req_incompat)
+
 
 def test_case_5_missing_nonfinite_cost_inputs_or_invented_hourly_price_rejects(
     tmp_path: Path,
@@ -922,6 +999,53 @@ def test_case_5_missing_nonfinite_cost_inputs_or_invented_hourly_price_rejects(
     )
     with pytest.raises(Phase6ValidationError, match="differs from authoritative"):
         run_train_evaluate_diagnose(req4_bad)
+
+    # 4b. Mismatched estimated_wall_clock_hours
+    good_cost = req4.training_plan.cost_estimate
+    assert good_cost is not None
+    bad_wall_plan = req4.training_plan.model_copy(
+        update={
+            "cost_estimate": good_cost.model_copy(
+                update={
+                    "estimated_wall_clock_hours": good_cost.estimated_wall_clock_hours
+                    + 1.0
+                }
+            )
+        }
+    )
+    req4_bad_wall = TrainEvaluateDiagnoseRequest(
+        **{**req4.__dict__, "training_plan": bad_wall_plan}
+    )
+    with pytest.raises(Phase6ValidationError, match="estimated_wall_clock_hours"):
+        run_train_evaluate_diagnose(req4_bad_wall)
+
+    # 4c. Mismatched estimated_storage_gb
+    bad_storage_plan = req4.training_plan.model_copy(
+        update={
+            "cost_estimate": good_cost.model_copy(
+                update={"estimated_storage_gb": good_cost.estimated_storage_gb + 5.0}
+            )
+        }
+    )
+    req4_bad_storage = TrainEvaluateDiagnoseRequest(
+        **{**req4.__dict__, "training_plan": bad_storage_plan}
+    )
+    with pytest.raises(Phase6ValidationError, match="estimated_storage_gb"):
+        run_train_evaluate_diagnose(req4_bad_storage)
+
+    # 4d. Mismatched basis_description
+    bad_basis_plan = req4.training_plan.model_copy(
+        update={
+            "cost_estimate": good_cost.model_copy(
+                update={"basis_description": "tampered basis description"}
+            )
+        }
+    )
+    req4_bad_basis = TrainEvaluateDiagnoseRequest(
+        **{**req4.__dict__, "training_plan": bad_basis_plan}
+    )
+    with pytest.raises(Phase6ValidationError, match="basis_description"):
+        run_train_evaluate_diagnose(req4_bad_basis)
 
     # 5. Missing cost estimate in TrainingPlan (B39)
     plan_no_cost = req4.training_plan.model_copy(update={"cost_estimate": None})
@@ -1389,7 +1513,7 @@ def test_case_13_invalid_checkpoint_hash_or_missing_reproducibility_prevents_com
     # 7. Non-positive training system metrics (B33)
     bad_sys = AttestedTrainingSystemMetrics(
         job_id=req6.job_id or TrainingJobId("job-01"),
-        execution_id=ExecutionId(req6.operation_identity.operation_id),
+        execution_id=req6.execution_id or ExecutionId("exec-plan-yolov8n-01"),
         target_id=req6.target_id,
         metrics=SystemMetrics(
             training_time_seconds=-10.0,
@@ -1408,7 +1532,7 @@ def test_case_13_invalid_checkpoint_hash_or_missing_reproducibility_prevents_com
     # 8. NaN training system metrics (B33: positivity check must include finiteness)
     nan_sys = AttestedTrainingSystemMetrics(
         job_id=req6.job_id or TrainingJobId("job-01"),
-        execution_id=ExecutionId(req6.operation_identity.operation_id),
+        execution_id=req6.execution_id or ExecutionId("exec-plan-yolov8n-01"),
         target_id=req6.target_id,
         metrics=SystemMetrics(
             training_time_seconds=float("nan"),
@@ -1427,7 +1551,7 @@ def test_case_13_invalid_checkpoint_hash_or_missing_reproducibility_prevents_com
     # 9. Attested training metrics job_id mismatch (B33)
     bad_job_ts = AttestedTrainingSystemMetrics(
         job_id=TrainingJobId("mismatched-job-id"),
-        execution_id=ExecutionId(req6.operation_identity.operation_id),
+        execution_id=req6.execution_id or ExecutionId("exec-plan-yolov8n-01"),
         target_id=req6.target_id,
         metrics=req6.training_system_metrics.metrics,
     )
@@ -1441,7 +1565,7 @@ def test_case_13_invalid_checkpoint_hash_or_missing_reproducibility_prevents_com
     # 10. Attested training metrics target_id mismatch (B33)
     bad_tgt_ts = AttestedTrainingSystemMetrics(
         job_id=req6.job_id or TrainingJobId("job-01"),
-        execution_id=ExecutionId(req6.operation_identity.operation_id),
+        execution_id=req6.execution_id or ExecutionId("exec-plan-yolov8n-01"),
         target_id=TargetId("other-target"),
         metrics=req6.training_system_metrics.metrics,
     )
@@ -1451,6 +1575,20 @@ def test_case_13_invalid_checkpoint_hash_or_missing_reproducibility_prevents_com
         match="Attested metrics target_id.*does not match requested",
     ):
         run_train_evaluate_diagnose(req10)
+
+    # 11. Attested training metrics execution_id mismatch (B33)
+    bad_exec_ts = AttestedTrainingSystemMetrics(
+        job_id=req6.job_id or TrainingJobId("job-01"),
+        execution_id=ExecutionId("mismatched-execution-id"),
+        target_id=req6.target_id,
+        metrics=req6.training_system_metrics.metrics,
+    )
+    req11 = _make_clean_request(tmp_path / "p11", training_system_metrics=bad_exec_ts)
+    with pytest.raises(
+        Phase6ValidationError,
+        match="Attested metrics execution_id.*does not match dispatched",
+    ):
+        run_train_evaluate_diagnose(req11)
 
 
 def test_case_14_failed_partial_training_never_produces_completed_ledger_or_evaluation(
@@ -1967,7 +2105,7 @@ def test_case_20_clean_approved_run_full_cycle(tmp_path: Path):
 def test_crash_after_paid_dispatch_rejects_duplicate_dispatch_zero_new_jobs(
     tmp_path: Path,
 ):
-    """B38: Crash after paid training dispatch but before local state returns rejects duplicate re-dispatch and issues zero new paid jobs."""
+    """B38: Crash after paid training dispatch but before RUNNING persistence enters ADR-0003 reconciliation and issues zero new paid jobs."""
     launch_count = 0
 
     class TrackingLauncher(DefaultTrainingLauncher):
@@ -1986,7 +2124,7 @@ def test_crash_after_paid_dispatch_rejects_duplicate_dispatch_zero_new_jobs(
         owner_instance_id="worker-crash",
     )
 
-    # Simulate that worker-1 persisted operation intent, advanced through DISPATCHING to RUNNING, and crashed before returning local workflow state
+    # Simulate: worker persisted operation intent, advanced to DISPATCHING, external dispatch succeeded, and process crashed BEFORE RUNNING persistence
     op_intent = OperationIntent(
         operation_id=op_id,
         session_id=req.approval_request.session_id,
@@ -2005,21 +2143,28 @@ def test_crash_after_paid_dispatch_rejects_duplicate_dispatch_zero_new_jobs(
     store.save_operation(op_intent, lease)
     store.update_operation_status(op_id, OperationStatus.VALIDATED, lease)
     store.update_operation_status(op_id, OperationStatus.DISPATCHING, lease)
-    store.update_operation_status(op_id, OperationStatus.RUNNING, lease)
-    # Crash occurs: release lease
+    # Crash occurs: release lease without writing RUNNING
     store.release_lease(lease)
 
-    # Replay / restart attempts to re-dispatch the exact same operation with a tracking launcher
+    # Replay with ReconciliationCoordinator enters ADR-0003 reconciliation
+    coord = ReconciliationCoordinator(store)
     tracking_launcher = TrackingLauncher()
     replay_req = TrainEvaluateDiagnoseRequest(
-        **{**req.__dict__, "training_launcher": tracking_launcher}
+        **{
+            **req.__dict__,
+            "training_launcher": tracking_launcher,
+            "reconciliation_coordinator": coord,
+        }
     )
 
     with pytest.raises(
         Phase6ExecutionError,
-        match="Duplicate dispatch rejected: operation '.*' is already 'running'",
+        match="Operation '.*' is ambiguous and remains UNRESOLVED / RECONCILING",
     ):
         run_train_evaluate_diagnose(replay_req)
 
     # Invariant: exactly ZERO new paid jobs launched upon replayed dispatch!
     assert launch_count == 0
+
+    # In store: operation entered reconciliation lifecycle (RECONCILING)
+    assert store.get_operation_status(op_id) == OperationStatus.RECONCILING

@@ -116,3 +116,21 @@ Following Official PM Re-Review (comment `6100697470` on PR #75), all findings h
 
 8. **B39 — Mandatory Pre-Approval Cost Estimate Binding:**
    `TrainingPlan` must have `cost_estimate: CostEstimate` populated and bound before approval. `compute_training_payload_hash(plan)` cryptographically hashes the plan *with* the cost estimate. `ApprovalDecision.decision_metadata` must contain `estimated_cost_usd` matching the calculated estimate. Stale, missing, or mismatched cost estimates fail closed before dispatch.
+
+---
+
+## 7. Official PM Re-Review Remediation (Comment 6111458577 — Final Blocker Resolution)
+
+Following Official PM Re-Review (comment `6111458577` on PR #75), all four blocking findings have been fully discharged and verified:
+
+1. **B33 — Attested Metrics `execution_id` Lineage Binding:**
+   `AttestedTrainingSystemMetrics.execution_id` must strictly equal the actual dispatched `job_record.execution_id`. `DefaultTrainingLauncher.launch` accepts caller-specified or deterministic `execution_id: ExecutionId | None = None` and propagates it through `ToolInvocation` into `TrainingJobRecord`. Any mismatch between `attested_metrics.execution_id` and `job_record.execution_id` fails closed with `Phase6ValidationError` and transitions the experiment in the ledger to `FAILED`.
+
+2. **B38 — `DISPATCHING` Crash-Recovery & ADR-0003 Reconciliation:**
+   Addressed the genuine window where external dispatch succeeds while the local process crashes before `RUNNING` state persistence. When an operation is encountered in `(UNKNOWN, RECONCILING, DISPATCHING)`, the workflow transitions `DISPATCHING -> UNKNOWN -> RECONCILING` and executes ADR-0003 `ReconciliationCoordinator.reconcile_operation`. Unresolved external operations fail closed with `Phase6ExecutionError` without attempting duplicate redispatch, guaranteeing that exactly 0 duplicate paid jobs are launched.
+
+3. **Target Authority — Authoritative Availability and Compatibility Verification:**
+   Gate G1 verifies target availability via `target_desc.is_available`, verifies tool-target compatibility via `target_desc.target_type in tool_desc.compatible_target_types`, and checks authoritative registry availability via `tool_registry.check_availability(tool_id, target_id)`. Unavailable or incompatible targets fail closed before dispatch with `Phase6ValidationError`.
+
+4. **B39 — Exhaustive 5-Field `CostEstimate` Plan-Binding Verification:**
+   Gate G1 enforces deterministic equality across all five fields of `CostEstimate` (`estimated_cost_usd`, `estimated_gpu_hours`, `estimated_wall_clock_hours`, `estimated_storage_gb`, `basis_description`) against the approved plan. Any discrepancy or non-finite value fails closed with `Phase6ValidationError`.
