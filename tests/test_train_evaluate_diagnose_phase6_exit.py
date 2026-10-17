@@ -147,7 +147,7 @@ from cv_agent.training.errors import (
     CostEstimationError,
 )
 from cv_agent.training.estimator import DeterministicTrainingEstimator
-from cv_agent.training.launcher import DefaultTrainingLauncher
+from cv_agent.training.launcher import DefaultTrainingLauncher, TrainingLauncher
 from cv_agent.training.types import (
     CheckpointId,
     PlanId,
@@ -495,6 +495,7 @@ def _make_clean_request(
     tool_registry: DefaultToolRegistry | None = None,
     orchestration_store: OrchestrationStore | None = None,
     reconciliation_coordinator: ReconciliationCoordinator | None = None,
+    training_launcher: TrainingLauncher | None = None,
 ) -> TrainEvaluateDiagnoseRequest:
     """Construct a clean, valid TrainEvaluateDiagnoseRequest."""
     manifest, metadata = _make_clean_manifest_and_metadata()
@@ -704,6 +705,7 @@ def _make_clean_request(
         job_id=job_id,
         execution_id=exec_id,
         reconciliation_coordinator=reconciliation_coordinator,
+        training_launcher=training_launcher,
         commit_sha="a" * 40,
         seed=42,
         config_uri="file:///configs/yolov8.yaml",
@@ -2105,54 +2107,64 @@ def test_case_20_clean_approved_run_full_cycle(tmp_path: Path):
 def test_crash_after_paid_dispatch_rejects_duplicate_dispatch_zero_new_jobs(
     tmp_path: Path,
 ):
-    """B38: Crash after paid training dispatch but before RUNNING persistence enters ADR-0003 reconciliation and issues zero new paid jobs."""
-    launch_count = 0
+    """B38: Real ToolExecutor dispatch succeeds, external side effect is accepted,
+    worker crashes before RUNNING persistence, and restart reconciles via ADR-0003 with zero duplicate jobs.
+    """
+    total_launches = 0
 
-    class TrackingLauncher(DefaultTrainingLauncher):
-        def launch(self, *args, **kwargs) -> TrainingJobRecord:
-            nonlocal launch_count
-            launch_count += 1
-            return super().launch(*args, **kwargs)
+    class CrashInjectingLauncher(DefaultTrainingLauncher):
+        def __init__(self) -> None:
+            super().__init__()
+            self.dispatched_records: list[TrainingJobRecord] = []
+            self.should_crash_after_dispatch = True
 
-    req = _make_clean_request(tmp_path)
-    store = req.orchestration_store
-    op_id = OperationId(value=req.operation_identity.operation_id)
-    lease_mgr = LeaseManager(store)
-    lease = lease_mgr.acquire(
-        session_id=req.approval_request.session_id,
-        thread_id="th-worker-1",
-        owner_instance_id="worker-crash",
-    )
+        def launch(self, *args: Any, **kwargs: Any) -> TrainingJobRecord:
+            nonlocal total_launches
+            total_launches += 1
+            # Execute real dispatch: calls tool_executor.execute() and creates real job record
+            job_rec = super().launch(*args, **kwargs)
+            self.dispatched_records.append(job_rec)
+            if self.should_crash_after_dispatch:
+                # External side effect has succeeded and is accepted,
+                # but worker process crashes BEFORE run_train_evaluate_diagnose can persist RUNNING!
+                raise RuntimeError(
+                    "Simulated worker crash: process died after external dispatch succeeded before RUNNING persistence"
+                )
+            return job_rec
 
-    # Simulate: worker persisted operation intent, advanced to DISPATCHING, external dispatch succeeded, and process crashed BEFORE RUNNING persistence
-    op_intent = OperationIntent(
-        operation_id=op_id,
-        session_id=req.approval_request.session_id,
-        operation_version=int(req.approval_request.operation_version),
-        operation_type="training",
-        canonical_payload=OperationPayloadEnvelope(
-            schema_id="training_plan",
-            schema_version=1,
-            canonicalization_version="1.0",
-            payload_hash=compute_training_payload_hash(req.training_plan),
-            payload={},
-        ),
-        target_identity=f"target:{req.target_id}",
-        created_at=datetime.now(timezone.utc),
-    )
-    store.save_operation(op_intent, lease)
-    store.update_operation_status(op_id, OperationStatus.VALIDATED, lease)
-    store.update_operation_status(op_id, OperationStatus.DISPATCHING, lease)
-    # Crash occurs: release lease without writing RUNNING
-    store.release_lease(lease)
+    crash_launcher = CrashInjectingLauncher()
+    initial_req = _make_clean_request(tmp_path, training_launcher=crash_launcher)
+    store = initial_req.orchestration_store
+    op_id = OperationId(value=initial_req.operation_identity.operation_id)
+    tool_executor = initial_req.tool_executor
+    assert isinstance(tool_executor, MockToolExecutor)
 
-    # Replay with ReconciliationCoordinator enters ADR-0003 reconciliation
+    # 1. Real execution through run_train_evaluate_diagnose:
+    # ToolExecutor dispatch genuinely happens, external side effect is accepted,
+    # and crash occurs before RUNNING persistence in orchestration store.
+    with pytest.raises(
+        RuntimeError,
+        match="Simulated worker crash: process died after external dispatch succeeded before RUNNING persistence",
+    ):
+        run_train_evaluate_diagnose(initial_req)
+
+    # Verify post-crash boundary conditions:
+    # A. Real ToolExecutor dispatch genuinely occurred and external side effect was accepted
+    assert total_launches == 1
+    assert len(crash_launcher.dispatched_records) == 1
+    assert len(tool_executor.invocations) == 1
+    # B. The operation state in store remains DISPATCHING (RUNNING was never persisted)
+    assert store.get_operation_status(op_id) == OperationStatus.DISPATCHING
+
+    # 2. Worker restart / workflow replay with ADR-0003 ReconciliationCoordinator:
     coord = ReconciliationCoordinator(store)
-    tracking_launcher = TrackingLauncher()
+    replay_launcher = CrashInjectingLauncher()
+    replay_launcher.should_crash_after_dispatch = False
+
     replay_req = TrainEvaluateDiagnoseRequest(
         **{
-            **req.__dict__,
-            "training_launcher": tracking_launcher,
+            **initial_req.__dict__,
+            "training_launcher": replay_launcher,
             "reconciliation_coordinator": coord,
         }
     )
@@ -2163,8 +2175,38 @@ def test_crash_after_paid_dispatch_rejects_duplicate_dispatch_zero_new_jobs(
     ):
         run_train_evaluate_diagnose(replay_req)
 
-    # Invariant: exactly ZERO new paid jobs launched upon replayed dispatch!
-    assert launch_count == 0
-
-    # In store: operation entered reconciliation lifecycle (RECONCILING)
+    # Invariants verified:
+    # Exactly ZERO second dispatch occurred:
+    assert total_launches == 1
+    assert len(replay_launcher.dispatched_records) == 0
+    assert len(tool_executor.invocations) == 1  # No second invocation on ToolExecutor
+    # Operation entered ADR-0003 reconciliation lifecycle (RECONCILING)
     assert store.get_operation_status(op_id) == OperationStatus.RECONCILING
+
+    # 3. If external reconciler confirms operation completed externally,
+    # replay also rejects duplicate dispatch and launches zero new jobs
+    class CompletedReconciler:
+        def reconcile(self, op: OperationIntent) -> OperationStatus:
+            return OperationStatus.COMPLETED
+
+    completed_coord = ReconciliationCoordinator(store, reconciler=CompletedReconciler())
+    replay_req_completed = TrainEvaluateDiagnoseRequest(
+        **{
+            **initial_req.__dict__,
+            "training_launcher": replay_launcher,
+            "reconciliation_coordinator": completed_coord,
+        }
+    )
+
+    with pytest.raises(
+        Phase6ExecutionError,
+        match="Duplicate dispatch rejected: operation '.*' was reconciled as CONFIRMED_COMPLETED",
+    ):
+        run_train_evaluate_diagnose(replay_req_completed)
+
+    # Invariants verified:
+    # Still exactly ZERO second dispatch:
+    assert total_launches == 1
+    assert len(replay_launcher.dispatched_records) == 0
+    assert len(tool_executor.invocations) == 1
+    assert store.get_operation_status(op_id) == OperationStatus.COMPLETED

@@ -2519,3 +2519,28 @@ Remediated all three architectural blockers identified in the Official PM's seco
 **Learned:** In distributed execution environments, the interval between external dispatch and local record write represents a distinct ambiguity state that cannot simply be rejected as an unhandled collision; transitioning to RECONCILING and engaging ADR-0003 reconciliation safely resolves in-flight jobs without risking duplicate paid execution.
 
 **Left open:** Push commit to `feature/ajmunna/phase-6-train-evaluate-diagnose`, verify GitHub CI checks on PR #75, and report PR #75 + exact head SHA to Official PM for formal re-review.
+
+---
+
+## 2026-10-15 — Phase 6 Adversarial Crash-Injection Integration Test Verification (D-077)
+
+**Did:**
+1. Updated adversarial test `test_crash_after_paid_dispatch_rejects_duplicate_dispatch_zero_new_jobs` in `tests/test_train_evaluate_diagnose_phase6_exit.py` to execute end-to-end through `run_train_evaluate_diagnose`:
+   - Genuinely executed `ToolExecutor` dispatch through `DefaultTrainingLauncher.launch`, proving external side-effect acceptance (`len(tool_executor.invocations) == 1`).
+   - Injected worker process crash (`RuntimeError`) immediately after external dispatch succeeds and before `RUNNING` status is persisted in `OrchestrationStore`.
+   - Verified post-crash boundary conditions: `OrchestrationStore` retains `DISPATCHING` status (proving `RUNNING` was never persisted) and lease is safely released.
+   - Verified restart/replay with `ReconciliationCoordinator`: transitions `DISPATCHING -> UNKNOWN -> RECONCILING`, fails ambiguous/unresolved executions cleanly with `Phase6ExecutionError`, and issues exactly zero duplicate paid jobs (`total_launches == 1`, `len(tool_executor.invocations) == 1`).
+   - Verified external resolution to `CONFIRMED_COMPLETED`: rejects duplicate dispatch and issues zero new paid jobs.
+2. Verified all quality gates:
+   - 21/21 Phase 6 exit tests passing.
+   - 739/739 repository tests passing across 28 suites with zero regressions.
+   - Static analysis clean: Ruff check clean, Ruff format clean, Mypy clean (122 source files), `git diff --check` clean.
+3. Updated `docs/reports/ISSUE-74-PHASE-6-REPORT.md`, `docs/state/STATUS.md`, `docs/state/JOURNAL.md`, and recorded `D-077` in `docs/state/DECISIONS.md`.
+
+**Why:** `[P§7]`, `[P§12]`, `[P§13]`, `[P§19]`, `[P§20]`, `[P§21]`, `[P§22]`, `[P§24]`, `[P§25]`, `[P§26]`, `[P§29.1]`–`[P§29.4]`, `[P§34]` — addresses the final Official PM review requirement on PR #75, proving via an adversarial integration test that a real dispatch accepted by an external tool executor that crashes before `RUNNING` persistence enters ADR-0003 reconciliation and never launches duplicate paid jobs.
+
+**Broke:** Nothing broken. 739/739 repository tests pass.
+
+**Learned:** Testing crash recovery in orchestrators must exercise the actual execution path rather than pre-populating database state; injecting failures at the exact seam between external side-effect completion and local metadata durability proves that the system handles real distributed ambiguity.
+
+**Left open:** Push commit to `feature/ajmunna/phase-6-train-evaluate-diagnose`, verify GitHub CI checks on PR #75, and report PR #75 + exact head SHA to Official PM for formal acceptance.
