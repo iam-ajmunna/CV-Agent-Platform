@@ -879,6 +879,18 @@ class SQLiteOrchestrationStore(OrchestrationStore):
                 conn.execute("ROLLBACK;")
                 raise
 
+    def get_operation_status(self, operation_id: OperationId) -> OperationStatus | None:
+        """Retrieve the current operation status for an operation."""
+        with self._get_connection() as conn:
+            cur = conn.execute(
+                "SELECT status FROM operations WHERE operation_id = ?",
+                (operation_id.value,),
+            )
+            row = cur.fetchone()
+            if row is None:
+                return None
+            return OperationStatus(row["status"])
+
     def find_operation(self, operation_id: OperationId) -> OperationIntent | None:
         """Retrieve operation intent by operation_id."""
         with self._get_connection() as conn:

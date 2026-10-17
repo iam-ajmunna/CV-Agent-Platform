@@ -2404,3 +2404,143 @@ Remediated all three architectural blockers identified in the Official PM's seco
 **Learned:** Strict adherence to atomic database transactions and fail-closed interfaces prevents split-brain orphan states and eliminates the danger of compatibility fallbacks degrading system invariants under edge-case failures.
 
 **Left open:** Phase 5 closed. `main` at `0e9dd84f232e0b00530a3accb2bc6ddd268abc05` is the authoritative baseline for Phase 6 architectural scoping.
+
+---
+
+## 2026-10-03 — Phase 6: Train / Evaluate / Diagnose Implementation (feature/ajmunna/phase-6-train-evaluate-diagnose)
+
+**Did:**
+1. Created branch `feature/ajmunna/phase-6-train-evaluate-diagnose` from `main` to implement Issue #74.
+2. Implemented `cv_agent/orchestration/train_evaluate_diagnose.py`:
+   - Domain contracts: `TargetConstraint`, `TargetConstraintVerdict`, `OperatingPoint`, `CompositeEvaluationResult`, `RankedFailureCategory`, `FailureCategoryAnalysis`, `ProposedNextExperiment`.
+   - Workflow request/result models: `TrainEvaluateDiagnoseRequest`, `TrainEvaluateDiagnoseResult`, `TrainEvaluateDiagnoseWorkflow`, `run_train_evaluate_diagnose`, `build_training_evaluation_plan`.
+   - Exception hierarchy: `TrainEvaluateDiagnoseError`, `Phase6ValidationError`, `Phase6ApprovalError`, `Phase6ExecutionError`, `Phase6EvaluationError`, `Phase6DiagnosisError`.
+   - Invariants: Pretrained base checkpoint verification, deterministic cost estimation, human PM approval binding and expiration, crash recovery and ambiguous execution reconciliation, duplicate dispatch rejection, reproducibility metadata enforcement (40-hex commit SHA, non-placeholder, non-default seed, config URI/hash, hyperparameters), telemetry divergence monitoring (NaN/Inf, OOM), checkpoint provenance, held-out evaluation split enforcement, hardware-synchronized accelerator timing check, composite delta comparison against active root baseline, empirical error category ranking with causal hypotheses, and strictly undispatched next-experiment proposals.
+3. Updated `cv_agent/evaluation/types.py`:
+   - Allowed uppercase alphanumeric characters in `_EXPERIMENT_ID_PATTERN` to support canonical ADR-0004 `EXP-YYYYMMDD-NNNN` experiment identifiers seamlessly in evaluation plans and results.
+4. Updated `cv_agent/orchestration/__init__.py`:
+   - Exported Phase 6 symbols with clean lazy `__getattr__` and sorted `__all__`.
+5. Created comprehensive exit test suite in `tests/test_train_evaluate_diagnose_phase6_exit.py`:
+   - 20 mandatory adversarial cases covering all 5 Phase 6 acceptance gates (G1–G5).
+6. Quality gates verified:
+   - 20/20 Phase 6 exit tests passing.
+   - 738/738 repository tests passing across 28 test suites with zero regressions.
+   - Static analysis clean: Ruff check clean (0 errors), Ruff format clean, Mypy clean (122 source files), `git diff --check` clean.
+7. Generated implementation report in `docs/reports/ISSUE-74-PHASE-6-REPORT.md`, updated `STATUS.md`, and recorded D-073 in `DECISIONS.md`.
+
+**Why:** `[P§7]`, `[P§12]`, `[P§13]`, `[P§19]`, `[P§20]`, `[P§21]`, `[P§22]`, `[P§24]`, `[P§25]`, `[P§26]`, `[P§29.1]`, `[P§29.2]`, `[P§29.3]`, `[P§29.4]`, `[P§34]` — fulfills Issue #74 and ROADMAP.md Phase 6, establishing the complete closed-loop experiment lifecycle from approved training to composite evaluation and evidence-grounded diagnosis.
+
+**Broke:** Nothing broken. All 738 tests passing with zero regressions.
+
+**Learned:** Subsystem integration in a layered architecture requires strict boundary discipline: orchestration must never own execution transport, evaluation metrics, or experiment persistence, but instead coordinate typed contracts across specialized domain authorities while maintaining end-to-end auditability and reproducibility.
+
+**Left open:** Commit, push branch, open PR against `main` referencing Issue #74, and provide exact head SHA to Official PM for review.
+
+---
+
+## 2026-10-09 — Phase 6 PR #75 Remediation of PM Review Blockers B32–B38 (D-074)
+
+**Did:**
+1. Discharged all seven blocking findings from Official PM Review (comment `5992301343` on PR #75):
+   - **B32 (Synthetic Terminal Checkpoint Elimination):** Removed fallback checkpoint synthesis in `run_train_evaluate_diagnose`. Missing `terminal_checkpoint` now fails closed with `Phase6ValidationError`.
+   - **B33 (Fabricated Training Evidence Elimination):** Enforced strict checkpoint manifest metrics verification and real empirical `training_system_metrics`. Hard-coded GPU hours, duration, VRAM, power, latency, and FPS defaults were completely eliminated before permanent SQLite ledger recording.
+   - **B34 (Evaluation Self-Approval Elimination):** Removed local generation of `OperationIdentity`, `ApprovalRequest`, and `APPROVED` `ApprovalDecision`. Explicit caller-supplied ADR-0003 credentials with verified canonical payload hash binding and human approver are strictly mandatory.
+   - **B35 (Defaulted Evaluation Telemetry Elimination):** Removed 4096 MB VRAM and 45 W power fallbacks. Missing or non-positive evaluation telemetry strictly fails closed with `Phase6EvaluationError`.
+   - **B36 (6-Dimensional Root-Baseline Comparability):** Enforced 6-dimensional verification before claiming baseline delta: dataset ID, dataset version, evaluation split, named `TargetId`, `ExecutionTarget`, and operating point threshold / false positive tolerance.
+   - **B37 (Synthesized Error Counts Elimination):** Eliminated arbitrary count translations from slice performance drops. Failure category ranking is grounded purely in empirical error counts.
+   - **B38 (Orchestration Store, Lease Fencing, and Reconciliation Integration):** Added `get_operation_status` to `OrchestrationStore` protocol and SQLite implementation; integrated `LeaseManager` and `ReconciliationCoordinator` into `run_train_evaluate_diagnose` with state transitions (`CREATED -> VALIDATED -> DISPATCHING -> RUNNING -> COMPLETED` / `FAILED`) and ambiguous execution fencing.
+   - **Case 4 Target Inventory:** Added `ToolRegistry.get_target` check verifying execution target registration in authoritative target inventory.
+2. Updated adversarial test suite `tests/test_train_evaluate_diagnose_phase6_exit.py` covering B32–B38 failure modes.
+3. Verified quality gates:
+   - 20/20 Phase 6 exit tests passing.
+   - 738/738 full repository tests passing across 28 suites with zero regressions.
+   - Static analysis clean: Ruff check clean (0 errors), Ruff format clean (201 files), Mypy clean (122 source files), `git diff --check` clean.
+4. Updated `docs/reports/ISSUE-74-PHASE-6-REPORT.md`, `docs/state/STATUS.md`, and recorded `D-074` in `docs/state/DECISIONS.md`.
+
+**Why:** `[P§7]`, `[P§12]`, `[P§13]`, `[P§19]`, `[P§20]`, `[P§21]`, `[P§22]`, `[P§24]`, `[P§25]`, `[P§26]`, `[P§29.1]`–`[P§29.4]`, `[P§34]` — addresses all findings from Official PM review on PR #75, guaranteeing that only genuine empirical evidence, authorized ADR-0003 approvals, and verified comparable baselines are persisted and reported.
+
+**Broke:** Nothing broken. All 738 tests passing.
+
+**Learned:** Workflows must never synthesize or repair missing artifacts, approvals, or telemetry on behalf of downstream consumers; failing closed when authoritative empirical data is absent ensures auditability and preserves zero-fabrication guarantees.
+
+**Left open:** Push commit to `feature/ajmunna/phase-6-train-evaluate-diagnose`, verify GitHub CI checks on PR #75, and report PR #75 + exact head SHA to Official PM for formal re-review.
+
+---
+
+## 2026-10-11 — Phase 6 PR #75 Remediation of PM Re-Review Findings B32–B39 (D-075)
+
+**Did:**
+1. Discharged all remaining findings from Official PM Re-Review (comment `6100697470` on PR #75):
+   - **B32 (Terminal Checkpoint Job ID Binding & Unresolved State Retention):** Bound `terminal_checkpoint.job_id` strictly to dispatched `job_record.job_id` and `terminal_checkpoint.plan_id` to `plan.plan_id`. When terminal checkpoint is missing, state is NOT converted to `FAILED`; instead, both operation in `OrchestrationStore` and experiment record in `ExperimentLedger` remain in-flight (`RUNNING`) for ADR-0003 reconciliation, raising `Phase6ExecutionError`.
+   - **B33 (Attested Training System Metrics Lineage & Explicit Finiteness):** Replaced un-attested caller input with `AttestedTrainingSystemMetrics(job_id, execution_id, target_id, metrics)`. Enforced strict job/target lineage and finite positive floats (`math.isfinite(v) and v > 0.0`) across duration, peak VRAM, power, throughput, and GPU hours, rejecting `NaN`, `Inf`, and non-positive values.
+   - **B35 (Exact Benchmark Target ID Attestation & Monotonic Non-Zero Telemetry):** Enforced exact `BenchmarkResult.target_id` matching requested `request.target_id`. Enforced finite positive latency (`latency_p50_ms`, `latency_p95_ms`), throughput (`throughput_fps`), peak VRAM, and power with zero defaulting.
+   - **B36 (Strict 6-Dimensional Root-Baseline Comparability):** Enforced exact 6-dimensional verification before claiming baseline delta: dataset ID (from `hyperparameters["dataset_id"]`), payload root checksum (from `hyperparameters["payload_root_checksum"]` matching manifest), dataset version (matching manifest), evaluation split (from `hyperparameters["split_name"]`, zero defaulting to "test"), named `target_id` (from `hyperparameters["target_id"]`, zero hypothesis parsing), and operating point (mandatory threshold and false-positive tolerance, zero skipping).
+   - **B38 (Mandatory Orchestration Store & Crash-Replay Guard):** Made `orchestration_store` and `tool_registry` strictly mandatory on `TrainEvaluateDiagnoseRequest`. Wrapped lease lifecycle in `try ... finally: lease_mgr.release(lease)`. Added dedicated adversarial test `test_crash_after_paid_dispatch_rejects_duplicate_dispatch_zero_new_jobs` proving duplicate dispatch after crash is rejected and launches 0 new paid jobs.
+   - **B39 (Mandatory Pre-Approval Cost Estimate Binding):** `TrainingPlan` must have `cost_estimate: CostEstimate` populated and bound before approval. `compute_training_payload_hash(plan)` cryptographically hashes the plan *with* the cost estimate. `ApprovalDecision.decision_metadata` must contain `estimated_cost_usd` matching the calculated estimate.
+2. Verified all quality gates:
+   - 21/21 Phase 6 exit tests passing.
+   - 739/739 repository tests passing across 28 suites with zero regressions.
+   - Static analysis clean: Ruff check clean (0 errors), Ruff format clean, Mypy clean (122 source files), `git diff --check` clean.
+3. Updated `docs/reports/ISSUE-74-PHASE-6-REPORT.md`, `docs/state/STATUS.md`, and recorded `D-075` in `docs/state/DECISIONS.md`.
+
+**Why:** `[P§7]`, `[P§12]`, `[P§13]`, `[P§19]`, `[P§20]`, `[P§21]`, `[P§22]`, `[P§24]`, `[P§25]`, `[P§26]`, `[P§29.1]`–`[P§29.4]`, `[P§34]` — addresses all findings from Official PM re-review on PR #75, guaranteeing that missing evidence is preserved for reconciliation, metrics have verified cryptographic and target lineage, baseline comparison is mathematically exact across 6 dimensions, and cost estimates are bound before human approval.
+
+**Broke:** Nothing broken. 739/739 repository tests pass.
+
+**Learned:** In multi-stage agentic workflows, execution state cannot assume failure on missing terminal evidence when external jobs may still be running; preserving in-flight status (`RUNNING`) enables crash-safe external reconciliation while fencing prevents split-brain duplicate execution.
+
+**Left open:** Push commit to `feature/ajmunna/phase-6-train-evaluate-diagnose`, verify GitHub CI checks on PR #75, and report PR #75 + exact head SHA to Official PM for formal re-review.
+
+---
+
+## 2026-10-12 — Phase 6 PR #75 Remediation of PM Re-Review Blockers (D-076)
+
+**Did:**
+1. Discharged all four blocking findings from Official PM Re-Review (comment `6111458577` on PR #75):
+   - **B33 (Execution ID Lineage Attestation):** Enforced that `AttestedTrainingSystemMetrics.execution_id` must strictly match the actual dispatched `job_record.execution_id`. Passed caller-specified or deterministic `execution_id` through `TrainingLauncher.launch` and `ToolInvocation` into `TrainingJobRecord`. Mismatch fails closed with `Phase6ValidationError` and marks the experiment failed in the ledger.
+   - **B38 (DISPATCHING Crash Window ADR-0003 Reconciliation):** Addressed the genuine window where external dispatch succeeds while local process crashes before `RUNNING` persistence. Detected existing operation in `(UNKNOWN, RECONCILING, DISPATCHING)`, transitioned `DISPATCHING -> UNKNOWN -> RECONCILING`, and invoked `ReconciliationCoordinator.reconcile_operation`, raising `Phase6ExecutionError` for ambiguous or in-flight operations and guaranteeing zero duplicate paid jobs are launched.
+   - **Target Authority (Authoritative Availability & Compatibility Validation):** Validated named execution target in Gate G1 against `target_desc.is_available`, verified `target_desc.target_type in tool_desc.compatible_target_types`, and invoked `tool_registry.check_availability(tool_id, target_id)`, failing closed before dispatch with `Phase6ValidationError` on unavailable or incompatible hardware.
+   - **B39 (Exhaustive 5-Field CostEstimate Binding):** Enforced deterministic plan-bound equality across all five `CostEstimate` fields (`estimated_cost_usd`, `estimated_gpu_hours`, `estimated_wall_clock_hours`, `estimated_storage_gb`, `basis_description`). Any discrepancy or non-finite value fails closed with `Phase6ValidationError`.
+2. Updated adversarial test suite `tests/test_train_evaluate_diagnose_phase6_exit.py` covering:
+   - Registered-but-unavailable and incompatible target types (Case 4).
+   - Mismatches in wall clock hours, storage GB, and basis description (Case 5).
+   - Execution ID lineage mismatch and non-positive/NaN telemetry (Case 13).
+   - Crash during `DISPATCHING` transitioning to `RECONCILING` and reconciling via ADR-0003 with zero duplicate paid jobs (`test_crash_after_paid_dispatch_rejects_duplicate_dispatch_zero_new_jobs`).
+3. Verified all repository quality gates:
+   - 21/21 Phase 6 exit tests passing.
+   - 739/739 repository tests passing across 28 suites with zero regressions.
+   - Static analysis clean: Ruff check clean, Ruff format clean, Mypy clean (122 source files), `git diff --check` clean.
+4. Updated `docs/reports/ISSUE-74-PHASE-6-REPORT.md`, `docs/state/STATUS.md`, `docs/state/JOURNAL.md`, and recorded `D-076` in `docs/state/DECISIONS.md`.
+
+**Why:** `[P§7]`, `[P§12]`, `[P§13]`, `[P§19]`, `[P§20]`, `[P§21]`, `[P§22]`, `[P§24]`, `[P§25]`, `[P§26]`, `[P§29.1]`–`[P§29.4]`, `[P§34]` — addresses all findings from Official PM re-review comment `6111458577` on PR #75, guaranteeing complete execution lineage, crash-safe external reconciliation during dispatching, authoritative hardware validation, and complete cost-estimate binding.
+
+**Broke:** Nothing broken. 739/739 repository tests pass.
+
+**Learned:** In distributed execution environments, the interval between external dispatch and local record write represents a distinct ambiguity state that cannot simply be rejected as an unhandled collision; transitioning to RECONCILING and engaging ADR-0003 reconciliation safely resolves in-flight jobs without risking duplicate paid execution.
+
+**Left open:** Push commit to `feature/ajmunna/phase-6-train-evaluate-diagnose`, verify GitHub CI checks on PR #75, and report PR #75 + exact head SHA to Official PM for formal re-review.
+
+---
+
+## 2026-10-15 — Phase 6 Adversarial Crash-Injection Integration Test Verification (D-077)
+
+**Did:**
+1. Updated adversarial test `test_crash_after_paid_dispatch_rejects_duplicate_dispatch_zero_new_jobs` in `tests/test_train_evaluate_diagnose_phase6_exit.py` to execute end-to-end through `run_train_evaluate_diagnose`:
+   - Genuinely executed `ToolExecutor` dispatch through `DefaultTrainingLauncher.launch`, proving external side-effect acceptance (`len(tool_executor.invocations) == 1`).
+   - Injected worker process crash (`RuntimeError`) immediately after external dispatch succeeds and before `RUNNING` status is persisted in `OrchestrationStore`.
+   - Verified post-crash boundary conditions: `OrchestrationStore` retains `DISPATCHING` status (proving `RUNNING` was never persisted) and lease is safely released.
+   - Verified restart/replay with `ReconciliationCoordinator`: transitions `DISPATCHING -> UNKNOWN -> RECONCILING`, fails ambiguous/unresolved executions cleanly with `Phase6ExecutionError`, and issues exactly zero duplicate paid jobs (`total_launches == 1`, `len(tool_executor.invocations) == 1`).
+   - Verified external resolution to `CONFIRMED_COMPLETED`: rejects duplicate dispatch and issues zero new paid jobs.
+2. Verified all quality gates:
+   - 21/21 Phase 6 exit tests passing.
+   - 739/739 repository tests passing across 28 suites with zero regressions.
+   - Static analysis clean: Ruff check clean, Ruff format clean, Mypy clean (122 source files), `git diff --check` clean.
+3. Updated `docs/reports/ISSUE-74-PHASE-6-REPORT.md`, `docs/state/STATUS.md`, `docs/state/JOURNAL.md`, and recorded `D-077` in `docs/state/DECISIONS.md`.
+
+**Why:** `[P§7]`, `[P§12]`, `[P§13]`, `[P§19]`, `[P§20]`, `[P§21]`, `[P§22]`, `[P§24]`, `[P§25]`, `[P§26]`, `[P§29.1]`–`[P§29.4]`, `[P§34]` — addresses the final Official PM review requirement on PR #75, proving via an adversarial integration test that a real dispatch accepted by an external tool executor that crashes before `RUNNING` persistence enters ADR-0003 reconciliation and never launches duplicate paid jobs.
+
+**Broke:** Nothing broken. 739/739 repository tests pass.
+
+**Learned:** Testing crash recovery in orchestrators must exercise the actual execution path rather than pre-populating database state; injecting failures at the exact seam between external side-effect completion and local metadata durability proves that the system handles real distributed ambiguity.
+
+**Left open:** Push commit to `feature/ajmunna/phase-6-train-evaluate-diagnose`, verify GitHub CI checks on PR #75, and report PR #75 + exact head SHA to Official PM for formal acceptance.

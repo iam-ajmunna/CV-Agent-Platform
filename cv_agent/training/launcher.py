@@ -84,6 +84,7 @@ class TrainingLauncher(Protocol):
         *,
         target_id: TargetId | None = None,
         job_id: TrainingJobId | None = None,
+        execution_id: ExecutionId | None = None,
     ) -> TrainingJobRecord:
         """Dispatch an approved training plan to ADR-0005.
 
@@ -384,6 +385,7 @@ class DefaultTrainingLauncher:
         *,
         target_id: TargetId | None = None,
         job_id: TrainingJobId | None = None,
+        execution_id: ExecutionId | None = None,
     ) -> TrainingJobRecord:
         """Launch training workload by verifying approval and delegating execution transport to ADR-0005.
 
@@ -431,7 +433,7 @@ class DefaultTrainingLauncher:
         )
 
         invocation = self.prepare_invocation(
-            plan, tool_id, target_id=resolved_target_id
+            plan, tool_id, target_id=resolved_target_id, execution_id=execution_id
         )
 
         result = self._dispatch_invocation(tool_executor, invocation)

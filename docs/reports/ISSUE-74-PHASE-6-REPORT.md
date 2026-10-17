@@ -1,0 +1,137 @@
+# Issue #74 — Phase 6: Train / Evaluate / Diagnose Report
+
+**Date:** 2026-10-03<br>
+**Trunk:** `main`<br>
+**Branch:** `feature/ajmunna/phase-6-train-evaluate-diagnose`<br>
+**Issue:** [Issue #74](https://github.com/iam-ajmunna/CV-Agent-Platform/issues/74)<br>
+**Authoritative Contracts:** Frozen `ADR-0003`, `ADR-0004`, `ADR-0005`, `ADR-0008`, `ADR-0009`, `ADR-0010`, `ADR-0011`, `[P§7]`, `[P§12]`, `[P§13]`, `[P§19]`, `[P§20]`, `[P§21]`, `[P§22]`, `[P§24]`, `[P§25]`, `[P§26]`, `[P§29.1]`, `[P§29.2]`, `[P§29.3]`, `[P§29.4]`, `[P§34]`<br>
+**Status:** IMPLEMENTED AND VERIFIED — READY FOR PM REVIEW
+
+---
+
+## 1. Executive Summary
+
+Phase 6 operationalizes the Train / Evaluate / Diagnose loop pursuant to `ROADMAP.md` Phase 6 and **Issue #74**.
+
+The core architectural mandate of Phase 6 is to integrate existing subsystem authorities without creating competing orchestrators, training executors, evaluation runners, or experiment ledgers:
+> **One approved training run must produce:**
+> 1. A complete `ExperimentRecord` in `SQLiteExperimentLedger` (`TRAINING` workload with all mandatory validation accuracy and resource metrics per ADR-0004 §2.4.C).
+> 2. A composite evaluation result per `docs/EVALUATION.md` (`ACCURACY + SYSTEM PERFORMANCE + TARGET CONSTRAINT + BASELINE DELTA`).
+> 3. A ranked failure-category analysis grounded in empirical evidence (`FailureCategoryAnalysis`).
+> 4. A proposed next experiment (`ProposedNextExperiment`) strictly undispatched (`is_dispatched: False`, `requires_fresh_approval: True`).
+
+All 5 acceptance gates G1–G5 and all 20 mandatory adversarial test cases are fully satisfied and verified.
+
+---
+
+## 2. Fulfillment of Five Phase 6 Acceptance Gates
+
+| Gate | Name | Architectural Requirement | Implementation & Test Coverage | Result |
+|---|---|---|---|---|
+| **G1** | **Plan & Cost Integrity** | Exact dataset manifest, split disjointness, checkpoint lineage, and target binding. Deterministic finite cost estimate; fail-closed rejection on non-finite values or invented hourly prices. | `compute_training_payload_hash`, `DeterministicTrainingEstimator`, `test_case_1`–`test_case_5` | **PASS** |
+| **G2** | **Approval Verification & Recovery** | Mandatory human approval before GPU dispatch (`[P§24]`). Expiration check, canonical payload hash verification, target scope binding, restart/resume support, and ambiguous execution reconciliation (`UNKNOWN`/`RECONCILING`). | `ApprovalManager`, `ReconciliationCoordinator`, `test_case_6`–`test_case_10` | **PASS** |
+| **G3** | **Training Execution & Ledger Recording** | Approved ADR-0005 execution via `ToolExecutor`, asynchronous handoff recovery, telemetry divergence monitoring (NaN/Inf, OOM), checkpoint provenance, and atomic ledger persistence (`WorkloadType.TRAINING`). | `DefaultTrainingLauncher`, `SQLiteExperimentLedger`, `test_case_11`–`test_case_14` | **PASS** |
+| **G4** | **Composite Evaluation** | ADR-0011 evaluation plan referencing trained checkpoint, held-out test split, empirical quality + on-target latency/memory/power with hardware-synchronized timing (`[P§13]`, `[P§29.4]`), target constraints, and comparable root-baseline delta. | `DefaultEvaluationRunner`, `build_training_evaluation_plan`, `test_case_15`–`test_case_17` | **PASS** |
+| **G5** | **Diagnosis & Proposed Next Experiment** | Empirical failure-category analysis with non-fabricated counts and distinct causal hypotheses. Proposed next experiment is strictly undispatched (`is_dispatched: False`, `requires_fresh_approval: True`, `cost_estimate_required: True`). | `FailureCategoryAnalysis`, `ProposedNextExperiment`, `test_case_18`–`test_case_20` | **PASS** |
+
+---
+
+## 3. Mandatory Adversarial Verification Matrix (20 Cases)
+
+| Case | Scenario | Invariant Verified | Outcome |
+|---|---|---|---|
+| **Case 1** | Missing/mismatched dataset version or manifest hash | Plan dataset binding mismatch fails before dispatch | `Phase6ValidationError: Dataset manifest hash mismatch` |
+| **Case 2** | Leakage / contamination detected | Temporal and camera/site leakage fails closed; 0 training jobs launched | `SplitLeakageError: ['temporal', 'camera_site']`, 0 jobs launched |
+| **Case 3** | Unresolved base checkpoint | Pretrained weights reference unresolvable to valid checkpoint fails closed | `Phase6ValidationError: Base checkpoint manifest mismatch` |
+| **Case 4** | Unregistered named target | Named target accelerator without registry authorization fails closed; 0 local synthesis | `Phase6ValidationError: Missing authorized execution TargetId` |
+| **Case 5** | Non-finite cost inputs or missing hourly rate | Cost estimator fails closed on NaN/Inf latency or zero/missing price | `CostEstimationError: Positive finite float required` |
+| **Case 6** | Approval denied | Zero dispatch permitted when approval decision is REJECTED (`[P§24]`) | `Phase6ApprovalError: Approval was NOT granted` |
+| **Case 7** | Expired approval / mismatched payload / mismatched scope | Stale, tampered, or cross-target approvals fail closed | `Phase6ApprovalError: expired / payload hash mismatch / scope mismatch` |
+| **Case 8** | Approval interrupt & restart | Approval request survives crash, persists in SQLite store, resumes once | Persistent approval recovered with matching payload hash |
+| **Case 9** | Duplicate / replayed dispatch | Replaying identical training request rejects without launching duplicate paid jobs | `Phase6ExecutionError: Duplicate dispatch rejected` |
+| **Case 10** | Ambiguous external execution | Unresolved external status remains `UNKNOWN`/`RECONCILING` without synthetic success | `ReconciliationOutcome.UNRESOLVED`, status `reconciling` |
+| **Case 11** | Async dispatch without terminal checkpoint | Missing valid weights hash prevents marking training completed | `Phase6ValidationError: Checkpoint weights hash is missing or invalid` |
+| **Case 12** | Telemetry divergence (NaN/Inf, OOM) | Telemetry loss divergence or OOM fails experiment cleanly with diagnostic details | `Phase6ExecutionError: Divergence detected in telemetry`, ledger FAILED |
+| **Case 13** | Missing reproducibility metadata | Rejects missing commit SHA, placeholder commit (`"0"*40`), or missing random seed | `Phase6ValidationError: commit_sha / seed` |
+| **Case 14** | Partial/failed training | Failed training jobs never publish completed ledger rows or evaluation artifacts | Ledger status `failed`, zero evaluation executed |
+| **Case 15** | Evaluation disallowed split / wrong checkpoint | Evaluates strictly on held-out test split, rejecting train/val/calibration | `EvaluationValidationError: strictly disallowed` |
+| **Case 16** | Missing telemetry or unsynchronized accelerator timing | Rejects unsynchronized timing or missing system telemetry on named accelerator | `Phase6EvaluationError: Hardware-synchronized timing / missing system_benchmarks` |
+| **Case 17** | Incomparable baseline | Active baseline with different dataset version cannot establish comparative delta | `Phase6ValidationError: Incomparable baseline` |
+| **Case 18** | Missing failure-category counts | Rejects empty or fabricated error ranking without empirical failure evidence | `Phase6DiagnosisError: Missing empirical failure-category counts` |
+| **Case 19** | Next experiment proposal auto-dispatch prohibition | Next experiment is strictly undispatched (`is_dispatched: False`, `requires_fresh_approval: True`) | Hard assertion verified: `is_dispatched is False` |
+| **Case 20** | Clean approved run full cycle | 1 training record in ledger, composite evaluation, ranked failure analysis, and 1 proposed next experiment | Complete cycle verified: `RUNNING` job, `COMPLETED` experiment, composite verdicts, ranked failures, undispatched proposal |
+
+---
+
+## 4. Architectural Boundaries
+
+1. **Zero Layer Leakage:** Orchestration does not own model training, evaluation metrics, or experiment persistence. It delegates strictly to ADR-0010 (`TrainingLauncher`), ADR-0011 (`EvaluationRunner`), ADR-0004 (`SQLiteExperimentLedger`), and ADR-0003 (`OrchestrationStore`, `ApprovalManager`).
+2. **Deterministic Reproducibility (`[P§25]`):** Explicit commit SHA, non-placeholder hardware, explicit integer seed, valid config URI and 64-hex SHA, and non-empty hyperparameters are strictly enforced.
+3. **Hardware-Aware Deployability (`[P§13]`, `[P§29.4]`):** Evaluation on named accelerator requires hardware-synchronized timing (`timing_synchronized=True`). Wall-clock or unsynchronized timing fails closed.
+4. **Approval Boundary (`[P§24]`):** Execution requires explicit human PM approval. Proposed next experiments are strictly proposals and require independent approval before any subsequent execution.
+
+---
+
+## 5. Repository Quality Gates
+
+- **Total Test Suite:** 739/739 passed across 28 suites with zero regressions.
+- **Phase 6 Exit Suite:** 21/21 passed in `tests/test_train_evaluate_diagnose_phase6_exit.py` (20 mandatory adversarial cases + crash-after-paid-dispatch replay test).
+- **Ruff Linter:** `ruff check .` clean (All checks passed!).
+- **Ruff Formatter:** `ruff format --check .` (with repo exclusions) clean.
+- **Mypy Type Checker:** `mypy cv_agent` clean (`Success: no issues found in 122 source files`).
+- **Git Diffs:** `git diff --check` clean.
+
+---
+
+## 6. Official PM Re-Review Remediation (B32–B39 Fully Discharged)
+
+Following Official PM Re-Review (comment `6100697470` on PR #75), all findings have been fully discharged and verified against frozen project invariants:
+
+1. **B32 — Dispatched Job ID Binding & Non-Failing In-Flight Reconcile:**
+   `terminal_checkpoint.job_id` is strictly bound and validated against the dispatched `job_record.job_id`, and `terminal_checkpoint.plan_id` against `plan.plan_id`. When terminal checkpoint evidence is missing, state is NOT converted to `FAILED`; instead, both the operation in `OrchestrationStore` and the experiment record in `ExperimentLedger` remain in-flight (`RUNNING`) for ADR-0003 external reconciliation, raising `Phase6ExecutionError`.
+
+2. **B33 — Attested Training Telemetry with Strict Lineage & Finiteness:**
+   Replaced un-attested `training_system_metrics` caller input with `AttestedTrainingSystemMetrics(job_id, execution_id, target_id, metrics)`. Enforced strict lineage binding (`job_id` matching dispatched job, `target_id` matching execution target) and strict positivity/finiteness (`math.isfinite(v) and v > 0.0`) across duration, peak VRAM, power, throughput, and GPU hours, rejecting `NaN`, `Inf`, and zero.
+
+3. **B34 — Enforcement of External ADR-0003 Evaluation Approvals:**
+   The workflow strictly requires explicit external caller-supplied ADR-0003 credentials (`evaluation_approval_request`, `evaluation_approval_decision`) with verified canonical payload hash binding and human approver. Zero self-approval.
+
+4. **B35 — Strict Evaluation Telemetry Attestation & Monotonic Percentiles:**
+   Enforced exact `BenchmarkResult.target_id` matching requested `request.target_id`. Enforced finite positive latency (`latency_p50_ms`, `latency_p95_ms`), throughput (`throughput_fps`), peak VRAM, and power with zero defaulting.
+
+5. **B36 — Strict 6-Dimensional Root-Baseline Comparability:**
+   Baseline delta comparison enforces strict 6-dimensional comparability:
+   - Dataset ID: from `hyperparameters["dataset_id"]` (zero name parsing).
+   - Root checksum: from `hyperparameters["payload_root_checksum"]` matching `manifest.payload_root_checksum`.
+   - Dataset version: matching `manifest.version`.
+   - Evaluation split: from `hyperparameters["split_name"]` (zero defaulting to "test").
+   - Target ID: from `hyperparameters["target_id"]` (zero hypothesis parsing).
+   - Operating point: from `hyperparameters["operating_point"]` (mandatory, zero conditional skipping), matching confidence threshold and false-positive tolerance.
+
+6. **B37 — Empirical Error Analysis without Count Synthesizing:**
+   Removed synthetic count generation from slice performance percentages. Failure category ranking is grounded purely in empirical error counts (`localization_errors`, `classification_errors`, `false_positive_count`, `false_negative_count`, or empirical `category_error_counts`).
+
+7. **B38 — Mandatory Orchestration Store, Tool Registry, Lease Lifecycle & Crash-Replay Guard:**
+   `orchestration_store: OrchestrationStore` and `tool_registry: ToolRegistry` are strictly mandatory on `TrainEvaluateDiagnoseRequest`. Execution lease lifecycle is wrapped in `try ... finally: lease_mgr.release(lease)`. Added dedicated adversarial crash-replay test `test_crash_after_paid_dispatch_rejects_duplicate_dispatch_zero_new_jobs` proving a crash after paid dispatch / before local state persistence rejects duplicate dispatch upon replay and launches 0 new paid jobs.
+
+8. **B39 — Mandatory Pre-Approval Cost Estimate Binding:**
+   `TrainingPlan` must have `cost_estimate: CostEstimate` populated and bound before approval. `compute_training_payload_hash(plan)` cryptographically hashes the plan *with* the cost estimate. `ApprovalDecision.decision_metadata` must contain `estimated_cost_usd` matching the calculated estimate. Stale, missing, or mismatched cost estimates fail closed before dispatch.
+
+---
+
+## 7. Official PM Re-Review Remediation (Comment 6111458577 — Final Blocker Resolution)
+
+Following Official PM Re-Review (comment `6111458577` on PR #75), all four blocking findings have been fully discharged and verified:
+
+1. **B33 — Attested Metrics `execution_id` Lineage Binding:**
+   `AttestedTrainingSystemMetrics.execution_id` must strictly equal the actual dispatched `job_record.execution_id`. `DefaultTrainingLauncher.launch` accepts caller-specified or deterministic `execution_id: ExecutionId | None = None` and propagates it through `ToolInvocation` into `TrainingJobRecord`. Any mismatch between `attested_metrics.execution_id` and `job_record.execution_id` fails closed with `Phase6ValidationError` and transitions the experiment in the ledger to `FAILED`.
+
+2. **B38 — `DISPATCHING` Crash-Recovery & ADR-0003 Reconciliation:**
+   Addressed the genuine window where external dispatch succeeds while the local process crashes before `RUNNING` state persistence. When an operation is encountered in `(UNKNOWN, RECONCILING, DISPATCHING)`, the workflow transitions `DISPATCHING -> UNKNOWN -> RECONCILING` and executes ADR-0003 `ReconciliationCoordinator.reconcile_operation`. Unresolved external operations fail closed with `Phase6ExecutionError` without attempting duplicate redispatch, guaranteeing that exactly 0 duplicate paid jobs are launched.
+   Verified via adversarial test `test_crash_after_paid_dispatch_rejects_duplicate_dispatch_zero_new_jobs`: runs through the real `run_train_evaluate_diagnose` entrypoint, proves real `ToolExecutor` dispatch execution and side-effect acceptance (`mock_executor.invocations` has 1 item), injects crash immediately after dispatch before `RUNNING` persistence, confirms `DISPATCHING` state retention in `OrchestrationStore`, and verifies that subsequent restart with `ReconciliationCoordinator` initiates reconciliation (`RECONCILING`), fails ambiguous/unresolved status cleanly, and issues exactly 0 second dispatches (`total_launches == 1`, `len(tool_executor.invocations) == 1`).
+
+3. **Target Authority — Authoritative Availability and Compatibility Verification:**
+   Gate G1 verifies target availability via `target_desc.is_available`, verifies tool-target compatibility via `target_desc.target_type in tool_desc.compatible_target_types`, and checks authoritative registry availability via `tool_registry.check_availability(tool_id, target_id)`. Unavailable or incompatible targets fail closed before dispatch with `Phase6ValidationError`.
+
+4. **B39 — Exhaustive 5-Field `CostEstimate` Plan-Binding Verification:**
+   Gate G1 enforces deterministic equality across all five fields of `CostEstimate` (`estimated_cost_usd`, `estimated_gpu_hours`, `estimated_wall_clock_hours`, `estimated_storage_gb`, `basis_description`) against the approved plan. Any discrepancy or non-finite value fails closed with `Phase6ValidationError`.
