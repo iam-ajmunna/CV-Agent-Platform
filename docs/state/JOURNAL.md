@@ -2404,3 +2404,42 @@ Remediated all three architectural blockers identified in the Official PM's seco
 **Learned:** Strict adherence to atomic database transactions and fail-closed interfaces prevents split-brain orphan states and eliminates the danger of compatibility fallbacks degrading system invariants under edge-case failures.
 
 **Left open:** Phase 5 closed. `main` at `0e9dd84f232e0b00530a3accb2bc6ddd268abc05` is the authoritative baseline for Phase 6 architectural scoping.
+
+---
+
+## 2026-11-17 — Phase 2L ADR-0011 Evaluation Subsystem Post-Merge Conformance Remediation (D-073, Issue #76)
+
+**Did:** Resolved all findings B1–B5 from the Official PM Second Adversarial Review on merged PR #61 under Issue #76 on branch `fix/ajmunna/phase-2l-evaluation-conformance`:
+1. **B1 (Runtime Environment Provenance Integrity):**
+   - Hardened `EvaluationEnvironmentRecord` field validation: strictly prohibited all-zero placeholder Git commit SHAs (`"0"*len(v)` or `"0"*40`), non-empty stripped strings for `python_version`, `torch_version`, and `target_hardware` (rejecting `"Target Hardware"`), strict boolean type for `git_is_dirty`, and non-empty `metric_definition_versions`.
+   - In `DefaultEvaluationRunner._build_evaluation_result()`: completely deleted synthetic fallback defaults (`"0"*40`, `"3.11.0"`, `"2.4.0"`, `"Target Hardware"`). Mandated genuine environment telemetry from `output_data.get("environment")`, validated hashes against plan `dataset_manifest_hash` and `weights_hash`, and raised `EvaluationValidationError` fail-closed on missing or mismatched provenance.
+2. **B2 (Statistically Valid Baseline Comparisons):**
+   - In `DefaultBaselineComparator`: completely deleted synthetic p-values (`abs(mean_delta) > 0.02`) and fabricated sample count (`total_samples = 100`).
+   - Implemented exact pure-Python two-sided p-value calculations without external dependencies (`scipy` prohibited):
+     - `PAIRED_T_TEST`: Student's t-test with regularized incomplete beta continued fraction $\text{betacf}(a, b, x)$ and $\text{incbeta}(a, b, x)$.
+     - `WILCOXON_SIGNED_RANK`: exact Wilcoxon signed-rank test with zero-difference exclusion, tie-ranking, and normal approximation with continuity correction.
+     - `BOOTSTRAP_RESAMPLING`: deterministic bootstrap resampling (1,000 resamples, fixed seed 42) computing empirical two-sided p-values.
+     - `MCNEMAR_TEST`: exact McNemar's test with continuity correction ($(|b - c| - 1)^2 / (b + c)$).
+   - Updated `BaselineComparisonResult` contract: `sample_count: int = Field(ge=0)`, `p_value: float | None = None`, `statistically_significant: bool | None = None`. Returns inconclusive when paired observation samples are absent or $N < 2$.
+3. **B3 (Benchmark Target/Configuration Binding):**
+   - In `DefaultEvaluationRunner._build_evaluation_result()`: validated that every ingested `BenchmarkResult` strictly matches authorized `target_id`, `plan.benchmark_config.benchmark_id`, `plan.benchmark_config.precision`, and declared `batch_sizes`, raising `BenchmarkExecutionError` fail-closed on any mismatch.
+4. **B4 (Authoritative Hardware Timing Attestation):**
+   - In `DefaultBenchmarkRunner`: replaced device-name substring keyword heuristics with authoritative `config.target_requirements` and telemetry `hardware_class` inspection.
+   - Enforced strict allowlist validation for `timing_source` (`ALLOWED_ACCELERATOR_TIMING_SOURCES` and `ALLOWED_CPU_TIMING_SOURCES`), eliminating synthetic defaulting and requiring hardware synchronization on accelerator targets.
+5. **B5 (Type Safety, Parser Identity, and Verdict Logic):**
+   - In `DefaultBenchmarkRunner`: enforced exact integer validation (`type(v) is int and type(v) is not bool`) on `warmup_executed`, and rejected boolean values (`type(v) is bool`) in latency observation samples.
+   - In `parse_evaluation_result()`: required authoritative caller-supplied or payload `execution_id` and `target_id`, eliminating synthetic `"exec-parse"` and `"target-parsed"`.
+   - Implemented `compute_evaluation_verdict()` to derive `EvaluationVerdict` dynamically (`PASSED`, `FAILED_QUALITY`, `FAILED_SYSTEMS`, `INCONCLUSIVE`) from empirical metrics, benchmark results, and plan SLAs.
+6. **12 Adversarial Acceptance Tests:**
+   - Implemented all 12 adversarial tests specified in Issue #76 covering B1–B5 in `tests/test_evaluation_boundary.py`.
+   - Verified 58/58 evaluation boundary tests passing.
+   - Verified 730/730 full repository tests passing across 27 suites with zero regressions.
+   - Clean static gates: Ruff check, Ruff format, Mypy (121 source files), `git diff --check`.
+
+**Why:** `[P§7]`, `[P§12]`, `[P§13]`, `[P§21]`, `[P§22]`, `[P§24]`, `[P§25]`, `[P§27]`, `[P§29.2]`, `[P§29.3]`, `[P§29.4]`, `[P§29.10]`, `[P§34]` — enforces ADR-0011 evaluation invariants, eliminates synthetic defaults and simulated statistics, and unblocks Phase 6 with authoritative evaluation provenance.
+
+**Broke:** Nothing. All 730 tests pass.
+
+**Learned:** Statistical validity in baseline comparison cannot rely on heuristics or simulated thresholds; pure-Python mathematical functions (such as regularized incomplete beta continued fractions) allow rigorous hypothesis testing without adding external heavy dependencies like SciPy.
+
+**Left open:** Push branch `fix/ajmunna/phase-2l-evaluation-conformance`, open PR referencing Issue #76, and submit to Official PM for review and merge.

@@ -396,7 +396,7 @@ def _make_valid_evaluation_env(
         else "sha256:2222222222222222222222222222222222222222222222222222222222222222"
     )
     return EvaluationEnvironmentRecord(
-        git_commit_sha="0" * 40,
+        git_commit_sha="a" * 40,
         git_is_dirty=False,
         dataset_manifest_hash=ContentHash(
             "sha256:1111111111111111111111111111111111111111111111111111111111111111"
