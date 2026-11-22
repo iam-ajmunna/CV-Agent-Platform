@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import uuid
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from typing import Any, Protocol, cast, runtime_checkable
 
@@ -20,6 +20,7 @@ from cv_agent.evaluation.contracts import (
     EvaluationEnvironmentRecord,
     EvaluationPlan,
     EvaluationResult,
+    MetricResult,
 )
 from cv_agent.evaluation.diagnostics import DefaultErrorAnalyzer, ErrorAnalyzer
 from cv_agent.evaluation.errors import (
@@ -439,14 +440,71 @@ class DefaultEvaluationRunner:
         """Assemble typed EvaluationResult from execution outputs."""
         output_data = tool_result.structured_output or {}
 
-        # 1. Quality metrics
+        # 1. Environment record (B1: Empirical reproducibility provenance, zero synthetic defaults)
+        env_raw = output_data.get("environment")
+        if env_raw is None or not env_raw:
+            raise EvaluationValidationError(
+                "Missing authoritative environment telemetry in evaluation output. "
+                "Reproducibility metadata is mandatory per [P§25]."
+            )
+
+        if isinstance(env_raw, EvaluationEnvironmentRecord):
+            env = env_raw
+        elif isinstance(env_raw, (dict, Mapping)):
+            env_dict = dict(env_raw)
+            if "dataset_manifest_hash" in env_dict and str(
+                env_dict["dataset_manifest_hash"]
+            ) != str(plan.dataset_binding.dataset_manifest_hash):
+                raise EvaluationValidationError(
+                    f"Environment dataset_manifest_hash mismatch: expected {plan.dataset_binding.dataset_manifest_hash!r}, "
+                    f"got {env_dict['dataset_manifest_hash']!r}"
+                )
+            if "weights_hash" in env_dict and str(env_dict["weights_hash"]) != str(
+                plan.model_artifact.weights_hash
+            ):
+                raise EvaluationValidationError(
+                    f"Environment weights_hash mismatch: expected {plan.model_artifact.weights_hash!r}, "
+                    f"got {env_dict['weights_hash']!r}"
+                )
+            env_dict.setdefault(
+                "dataset_manifest_hash", plan.dataset_binding.dataset_manifest_hash
+            )
+            env_dict.setdefault("weights_hash", plan.model_artifact.weights_hash)
+            env_dict.setdefault(
+                "metric_definition_versions", tuple(m.version for m in plan.metrics)
+            )
+            try:
+                env = EvaluationEnvironmentRecord.model_validate(env_dict)
+            except Exception as exc:
+                raise EvaluationValidationError(
+                    f"Invalid environment telemetry: {exc}"
+                ) from exc
+        else:
+            raise EvaluationValidationError(
+                f"Invalid environment telemetry type: {type(env_raw).__name__}"
+            )
+
+        if str(env.dataset_manifest_hash) != str(
+            plan.dataset_binding.dataset_manifest_hash
+        ):
+            raise EvaluationValidationError(
+                f"Environment dataset_manifest_hash mismatch: expected {plan.dataset_binding.dataset_manifest_hash!r}, "
+                f"got {env.dataset_manifest_hash!r}"
+            )
+        if str(env.weights_hash) != str(plan.model_artifact.weights_hash):
+            raise EvaluationValidationError(
+                f"Environment weights_hash mismatch: expected {plan.model_artifact.weights_hash!r}, "
+                f"got {env.weights_hash!r}"
+            )
+
+        # 2. Quality metrics
         metrics = self.metric_calculator.compute(
             output_data.get("predictions", {}),
             output_data.get("ground_truth", {}),
             plan.metrics,
         )
 
-        # 2. System benchmarks (if benchmark_config is declared)
+        # 3. System benchmarks (if benchmark_config is declared)
         benchmarks: list[BenchmarkResult] = []
         if plan.benchmark_config is not None:
             raw_benchmarks = output_data.get("system_benchmarks")
@@ -461,6 +519,29 @@ class DefaultEvaluationRunner:
                         raise BenchmarkExecutionError(
                             f"Invalid benchmark item in system_benchmarks: {b!r}"
                         )
+
+                    # B3: Strict target_id, benchmark_id, precision, and batch_size binding
+                    if bench_obj.target_id != target_id:
+                        raise BenchmarkExecutionError(
+                            f"Benchmark result target_id {bench_obj.target_id!r} does not match "
+                            f"authorized target_id {target_id!r}"
+                        )
+                    if bench_obj.benchmark_id != plan.benchmark_config.benchmark_id:
+                        raise BenchmarkExecutionError(
+                            f"Benchmark result benchmark_id {bench_obj.benchmark_id!r} does not match "
+                            f"plan benchmark_id {plan.benchmark_config.benchmark_id!r}"
+                        )
+                    if bench_obj.precision != plan.benchmark_config.precision:
+                        raise BenchmarkExecutionError(
+                            f"Benchmark result precision {bench_obj.precision!r} does not match "
+                            f"plan precision {plan.benchmark_config.precision!r}"
+                        )
+                    if bench_obj.batch_size not in plan.benchmark_config.batch_sizes:
+                        raise BenchmarkExecutionError(
+                            f"Benchmark result batch_size {bench_obj.batch_size} is not among "
+                            f"plan configured batch_sizes {plan.benchmark_config.batch_sizes}"
+                        )
+
                     req = plan.benchmark_config.target_requirements
                     plan_is_accel = (
                         req.required_hardware_class is not None
@@ -478,6 +559,10 @@ class DefaultEvaluationRunner:
                         bs = int(
                             obs.get("batch_size", plan.benchmark_config.batch_sizes[0])
                         )
+                        if bs not in plan.benchmark_config.batch_sizes:
+                            raise BenchmarkExecutionError(
+                                f"Observation batch_size {bs} is not among plan batch_sizes {plan.benchmark_config.batch_sizes}"
+                            )
                         benchmarks.append(
                             self.benchmark_runner.compute_result_from_observation(
                                 plan.benchmark_config, target_id, bs, obs
@@ -486,6 +571,10 @@ class DefaultEvaluationRunner:
                 elif isinstance(raw_observations, dict):
                     for bs_str, obs in raw_observations.items():
                         bs = int(bs_str)
+                        if bs not in plan.benchmark_config.batch_sizes:
+                            raise BenchmarkExecutionError(
+                                f"Observation batch_size {bs} is not among plan batch_sizes {plan.benchmark_config.batch_sizes}"
+                            )
                         benchmarks.append(
                             self.benchmark_runner.compute_result_from_observation(
                                 plan.benchmark_config, target_id, bs, obs
@@ -509,43 +598,30 @@ class DefaultEvaluationRunner:
                     )
                 )
 
-        # 3. Error analysis
+        # 4. Error analysis
         diag = self.error_analyzer.analyze(
             output_data.get("predictions", {}),
             output_data.get("ground_truth", {}),
             plan.dataset_binding,
         )
+        if str(env.weights_hash) != str(plan.model_artifact.weights_hash):
+            raise EvaluationValidationError(
+                f"Environment weights_hash mismatch: expected {plan.model_artifact.weights_hash!r}, "
+                f"got {env.weights_hash!r}"
+            )
 
-        # 4. Environment record
-        env_raw = output_data.get("environment")
-        if isinstance(env_raw, EvaluationEnvironmentRecord):
-            env = env_raw
-        elif isinstance(env_raw, (dict, Mapping)):
-            env_dict = dict(env_raw)
-            env_dict.setdefault(
-                "dataset_manifest_hash", plan.dataset_binding.dataset_manifest_hash
-            )
-            env_dict.setdefault("weights_hash", plan.model_artifact.weights_hash)
-            env_dict.setdefault(
-                "metric_definition_versions", tuple(m.version for m in plan.metrics)
-            )
-            env = EvaluationEnvironmentRecord.model_validate(env_dict)
-        else:
-            env = EvaluationEnvironmentRecord(
-                git_commit_sha="0" * 40,
-                git_is_dirty=False,
-                dataset_manifest_hash=plan.dataset_binding.dataset_manifest_hash,
-                weights_hash=plan.model_artifact.weights_hash,
-                metric_definition_versions=tuple(m.version for m in plan.metrics),
-                python_version="3.11.0",
-                torch_version="2.4.0",
-                target_hardware="Target Hardware",
-            )
+        # 5. Verdict derivation (B5: Derived from empirical quality and systems criteria)
+        verdict = compute_evaluation_verdict(
+            plan=plan,
+            quality_metrics=metrics,
+            system_benchmarks=benchmarks,
+            baseline_comparison=None,
+        )
 
         return EvaluationResult(
             evaluation_id=plan.evaluation_id,
             plan=plan,
-            verdict=EvaluationVerdict.PASSED,
+            verdict=verdict,
             quality_metrics=metrics,
             system_benchmarks=tuple(benchmarks),
             baseline_comparison=None,
@@ -555,18 +631,151 @@ class DefaultEvaluationRunner:
         )
 
 
-def parse_evaluation_result(tool_output: Any, plan: EvaluationPlan) -> EvaluationResult:
+def compute_evaluation_verdict(
+    plan: EvaluationPlan,
+    quality_metrics: Sequence[MetricResult],
+    system_benchmarks: Sequence[BenchmarkResult],
+    baseline_comparison: Any | None = None,
+) -> EvaluationVerdict:
+    """Derive domain EvaluationVerdict strictly from empirical quality and systems criteria."""
+    # 1. Missing evidence check
+    if not quality_metrics:
+        return EvaluationVerdict.INCONCLUSIVE
+
+    if plan.benchmark_config is not None and not system_benchmarks:
+        return EvaluationVerdict.INCONCLUSIVE
+
+    reqs = plan.evaluation_requirements
+
+    # If baseline comparison is required by plan
+    if plan.baseline_experiment_id is not None and reqs.get(
+        "require_baseline_comparison", False
+    ):
+        if baseline_comparison is None:
+            return EvaluationVerdict.INCONCLUSIVE
+        if baseline_comparison.statistically_significant is False:
+            return EvaluationVerdict.FAILED_QUALITY
+        if (
+            reqs.get("require_quality_improvement", False)
+            and not baseline_comparison.quality_improved
+        ):
+            return EvaluationVerdict.FAILED_QUALITY
+
+    # 2. Quality criteria checks
+    quality_thresholds: dict[str, float] = {}
+    if "quality_thresholds" in reqs and isinstance(reqs["quality_thresholds"], Mapping):
+        quality_thresholds.update(
+            {str(k): float(v) for k, v in reqs["quality_thresholds"].items()}
+        )
+    if "min_quality" in reqs:
+        min_q = reqs["min_quality"]
+        if isinstance(min_q, (int, float)):
+            for qm in quality_metrics:
+                quality_thresholds.setdefault(str(qm.metric.metric_id), float(min_q))
+        elif isinstance(min_q, Mapping):
+            quality_thresholds.update({str(k): float(v) for k, v in min_q.items()})
+
+    for qm in quality_metrics:
+        m_key = str(qm.metric.metric_id)
+        m_name = qm.metric.name
+        threshold = quality_thresholds.get(m_key)
+        if threshold is None:
+            threshold = quality_thresholds.get(m_name)
+        if threshold is not None:
+            if qm.metric.higher_is_better:
+                if qm.primary_value < threshold:
+                    return EvaluationVerdict.FAILED_QUALITY
+            else:
+                if qm.primary_value > threshold:
+                    return EvaluationVerdict.FAILED_QUALITY
+
+    # 3. Systems SLA checks
+    system_sla = (
+        dict(reqs.get("system_sla", {}))
+        if isinstance(reqs.get("system_sla"), Mapping)
+        else {}
+    )
+    max_latency_ms = reqs.get("max_latency_ms", system_sla.get("max_latency_ms"))
+    min_throughput_fps = reqs.get(
+        "min_throughput_fps", system_sla.get("min_throughput_fps")
+    )
+    max_peak_vram_gb = reqs.get("max_peak_vram_gb", system_sla.get("max_peak_vram_gb"))
+
+    if max_latency_ms is not None:
+        max_lat = float(max_latency_ms)
+        for b in system_benchmarks:
+            if b.latency_p95_ms > max_lat or b.latency_mean_ms > max_lat:
+                return EvaluationVerdict.FAILED_SYSTEMS
+
+    if min_throughput_fps is not None:
+        min_fps = float(min_throughput_fps)
+        for b in system_benchmarks:
+            if b.throughput_fps < min_fps:
+                return EvaluationVerdict.FAILED_SYSTEMS
+
+    if max_peak_vram_gb is not None:
+        max_vram = float(max_peak_vram_gb)
+        for b in system_benchmarks:
+            if b.peak_vram_gb is not None and b.peak_vram_gb > max_vram:
+                return EvaluationVerdict.FAILED_SYSTEMS
+
+    required_metrics = reqs.get("required_metrics")
+    if required_metrics:
+        evaluated_ids = {str(m.metric.metric_id) for m in quality_metrics}
+        evaluated_names = {m.metric.name for m in quality_metrics}
+        for rm in required_metrics:
+            if str(rm) not in evaluated_ids and str(rm) not in evaluated_names:
+                return EvaluationVerdict.INCONCLUSIVE
+
+    return EvaluationVerdict.PASSED
+
+
+def parse_evaluation_result(
+    tool_output: Any,
+    plan: EvaluationPlan,
+    *,
+    execution_id: ExecutionId | None = None,
+    target_id: TargetId | None = None,
+) -> EvaluationResult:
     """Stateless parser assembling an EvaluationResult from completed ADR-0005 tool execution data."""
     if isinstance(tool_output, EvaluationResult):
         return tool_output
+
+    if not isinstance(tool_output, (dict, Mapping)):
+        raise EvaluationValidationError(
+            f"Expected tool_output mapping or EvaluationResult, got {type(tool_output).__name__}"
+        )
+
+    resolved_target_id = target_id
+    if resolved_target_id is None:
+        raw_tid = tool_output.get("target_id")
+        if raw_tid is not None and str(raw_tid).strip():
+            resolved_target_id = TargetId(str(raw_tid).strip())
+        else:
+            raise EvaluationValidationError(
+                "Cannot parse evaluation result without an authorized target_id. "
+                "Local target synthesis is strictly prohibited."
+            )
+
+    resolved_exec_id = execution_id
+    if resolved_exec_id is None:
+        raw_eid = tool_output.get("execution_id")
+        if raw_eid is not None and str(raw_eid).strip():
+            resolved_exec_id = ExecutionId(str(raw_eid).strip())
+        else:
+            raise EvaluationValidationError(
+                "Cannot parse evaluation result without an authoritative execution_id. "
+                "Local execution synthesis is strictly prohibited."
+            )
+
     runner = DefaultEvaluationRunner()
     dummy_result = ToolResult(
         tool_id=ToolId("cv.eval.execute"),
-        execution_id=ExecutionId("exec-parse"),
-        target_id=TargetId("target-parsed"),
+        execution_id=resolved_exec_id,
+        target_id=resolved_target_id,
         status=ToolExecutionStatus.SUCCESS,
-        structured_output=tool_output if isinstance(tool_output, dict) else {},
+        structured_output=dict(tool_output),
     )
     return runner._build_evaluation_result(
-        plan, TargetId("target-parsed"), dummy_result, tool_id=dummy_result.tool_id
+        plan, resolved_target_id, dummy_result, tool_id=dummy_result.tool_id
     )

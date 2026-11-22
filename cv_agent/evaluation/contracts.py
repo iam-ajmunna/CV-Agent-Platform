@@ -33,6 +33,29 @@ from cv_agent.training.types import (
     validate_checkpoint_id,
 )
 
+ALLOWED_ACCELERATOR_TIMING_SOURCES: frozenset[str] = frozenset(
+    {
+        "cuda_event",
+        "cuda_event_timer",
+        "cuda_stream_synchronize",
+        "metal_command_buffer",
+        "metal_shared_event",
+        "hip_event",
+        "opencl_event",
+    }
+)
+ALLOWED_CPU_TIMING_SOURCES: frozenset[str] = frozenset(
+    {
+        "host_timer",
+        "perf_counter",
+        "cpu_perf_counter",
+        "clock_gettime",
+    }
+)
+ALL_ALLOWED_TIMING_SOURCES: frozenset[str] = (
+    ALLOWED_ACCELERATOR_TIMING_SOURCES | ALLOWED_CPU_TIMING_SOURCES
+)
+
 
 def deep_freeze(val: Any) -> Any:
     """Recursively freeze dictionaries, lists, and sets into immutable types."""
@@ -251,6 +274,13 @@ class BenchmarkResult(BaseModel):
     timing_synchronized: bool
     timing_source: str
 
+    @field_validator("target_id", mode="before")
+    @classmethod
+    def _coerce_target_id(cls, v: Any) -> TargetId:
+        if isinstance(v, TargetId):
+            return v
+        return TargetId(str(v))
+
     @model_validator(mode="after")
     def _validate_percentiles_and_finiteness(self) -> BenchmarkResult:
         # Check finite floats for mandatory metrics
@@ -418,10 +448,10 @@ class BaselineComparisonResult(BaseModel):
     comparable_evidence_ref: str
     test_type: StatisticalTestType
     test_version: str
-    sample_count: int = Field(ge=1)
+    sample_count: int = Field(ge=0)
     confidence_level: float
-    p_value: float
-    statistically_significant: bool
+    p_value: float | None = None
+    statistically_significant: bool | None = None
     quality_metric_deltas: Mapping[MetricId, float]
     system_metric_deltas: Mapping[str, float] = Field(default_factory=dict)
     quality_improved: bool
@@ -443,7 +473,9 @@ class BaselineComparisonResult(BaseModel):
 
     @field_validator("p_value")
     @classmethod
-    def _check_p_value(cls, v: float) -> float:
+    def _check_p_value(cls, v: float | None) -> float | None:
+        if v is None:
+            return None
         _ensure_finite_float(v, "p_value")
         if not (0.0 <= v <= 1.0):
             raise ValueError(f"p_value must be in [0.0, 1.0], got {v}")
@@ -473,6 +505,47 @@ class EvaluationEnvironmentRecord(BaseModel):
     driver_version: str | None = None
     target_hardware: str
     seed: int | None = None
+
+    @field_validator("git_commit_sha")
+    @classmethod
+    def _validate_git_sha(cls, v: str) -> str:
+        if not isinstance(v, str) or not v.strip():
+            raise ValueError("git_commit_sha cannot be empty")
+        val = v.strip()
+        if val == "0" * len(val):
+            raise ValueError(
+                "Placeholder all-zero git commit SHA ('0'*40) is strictly prohibited. "
+                "Authoritative commit SHA is mandatory per [P§25]."
+            )
+        return val
+
+    @field_validator("git_is_dirty")
+    @classmethod
+    def _validate_git_is_dirty(cls, v: bool) -> bool:
+        if type(v) is not bool:
+            raise ValueError(
+                f"git_is_dirty must be a strict boolean, got {type(v).__name__}"
+            )
+        return v
+
+    @field_validator("python_version", "torch_version", "target_hardware")
+    @classmethod
+    def _validate_non_empty_str(cls, v: str, info: Any) -> str:
+        if not isinstance(v, str) or not v.strip():
+            raise ValueError(f"{info.field_name} cannot be empty")
+        if (
+            info.field_name == "target_hardware"
+            and v.strip().lower() == "target hardware"
+        ):
+            raise ValueError("Placeholder 'Target Hardware' is prohibited")
+        return v.strip()
+
+    @field_validator("metric_definition_versions")
+    @classmethod
+    def _validate_metric_versions(cls, v: tuple[str, ...]) -> tuple[str, ...]:
+        if not v:
+            raise ValueError("metric_definition_versions cannot be empty")
+        return tuple(v)
 
 
 class EvaluationPlan(BaseModel):

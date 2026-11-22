@@ -48,6 +48,7 @@ from cv_agent.evaluation.contracts import (
     BenchmarkResult,
     ErrorAnalysisRecord,
     EvaluationDatasetBinding,
+    EvaluationEnvironmentRecord,
     EvaluationPlan,
     EvaluationResult,
     EvaluationTargetRequirements,
@@ -65,7 +66,11 @@ from cv_agent.evaluation.errors import (
     MetricCalculationError,
 )
 from cv_agent.evaluation.metrics import StandardMetricCalculator
-from cv_agent.evaluation.runner import DefaultEvaluationRunner, parse_evaluation_result
+from cv_agent.evaluation.runner import (
+    DefaultEvaluationRunner,
+    compute_evaluation_verdict,
+    parse_evaluation_result,
+)
 from cv_agent.evaluation.types import (
     BenchmarkId,
     EvaluationId,
@@ -85,6 +90,7 @@ from cv_agent.orchestration import (
 )
 from cv_agent.tools import (
     ActiveJobHandoff,
+    ExecutionId,
     TargetId,
     ToolExecutionStatus,
     ToolExecutor,
@@ -322,6 +328,13 @@ def _make_mock_executor(
                 structured_output={
                     "predictions": {"val-map50": 0.745},
                     "ground_truth": {"val-map50": 0.745},
+                    "environment": {
+                        "git_commit_sha": "a" * 40,
+                        "git_is_dirty": False,
+                        "python_version": "3.11.8",
+                        "torch_version": "2.4.0",
+                        "target_hardware": "NVIDIA RTX A6000",
+                    },
                 },
             )
 
@@ -1039,19 +1052,54 @@ def test_zero_physical_transport_leakage() -> None:
 def test_reproducibility_environment_packaging() -> None:
     """Verify parse_evaluation_result packages full EvaluationEnvironmentRecord and verdict."""
     plan = _make_valid_plan()
+    assert plan.benchmark_config is not None
     tool_output = {
+        "execution_id": "exec-eval-parse-001",
+        "target_id": "gpu-cluster-01",
         "predictions": {"val-map50": 0.82},
         "ground_truth": {"val-map50": 0.82},
+        "system_benchmarks": [
+            {
+                "benchmark_id": str(plan.benchmark_config.benchmark_id),
+                "batch_size": 1,
+                "precision": plan.benchmark_config.precision.value,
+                "latency_min_ms": 5.0,
+                "latency_mean_ms": 6.0,
+                "latency_p50_ms": 6.0,
+                "latency_p90_ms": 7.0,
+                "latency_p95_ms": 7.5,
+                "latency_p99_ms": 8.0,
+                "latency_max_ms": 9.0,
+                "throughput_fps": 166.7,
+                "device_name": "NVIDIA RTX A6000",
+                "target_id": "gpu-cluster-01",
+                "timing_synchronized": True,
+                "timing_source": "cuda_event",
+            }
+        ],
+        "environment": {
+            "git_commit_sha": "b" * 40,
+            "git_is_dirty": False,
+            "python_version": "3.11.8",
+            "torch_version": "2.4.0",
+            "target_hardware": "NVIDIA RTX A6000",
+        },
     }
 
-    result = parse_evaluation_result(tool_output, plan)
+    result = parse_evaluation_result(
+        tool_output,
+        plan,
+        execution_id=ExecutionId("exec-eval-parse-001"),
+        target_id=TargetId("gpu-cluster-01"),
+    )
     assert isinstance(result, EvaluationResult)
     assert result.verdict == EvaluationVerdict.PASSED
     assert result.evaluation_id == plan.evaluation_id
     assert len(result.quality_metrics) == 1
     assert result.quality_metrics[0].primary_value == 0.82
-    assert result.environment.git_commit_sha == "0" * 40
-    assert result.environment.python_version == "3.11.0"
+    assert result.environment.git_commit_sha == "b" * 40
+    assert result.environment.python_version == "3.11.8"
+    assert result.environment.target_hardware == "NVIDIA RTX A6000"
 
 
 # =============================================================================
@@ -1816,6 +1864,13 @@ def test_raw_benchmarks_ingestion_path_enforces_synchronization_fails_closed() -
                 structured_output={
                     "predictions": {"val-map50": 0.745},
                     "ground_truth": {"val-map50": 0.745},
+                    "environment": {
+                        "git_commit_sha": "a" * 40,
+                        "git_is_dirty": False,
+                        "python_version": "3.11.8",
+                        "torch_version": "2.4.0",
+                        "target_hardware": "NVIDIA RTX A6000",
+                    },
                     "system_benchmarks": [raw_dict],
                 },
             )
@@ -1830,3 +1885,508 @@ def test_raw_benchmarks_ingestion_path_enforces_synchronization_fails_closed() -
             tool_id=ToolId("eval.evaluator"),
             tool_executor=_RawBenchmarksExecutor(),  # type: ignore[arg-type]
         )
+
+
+# =============================================================================
+# Remediation Tests (Issue #76): B1 — Runtime Environment Provenance Integrity
+# =============================================================================
+def test_environment_provenance_rejects_placeholder_git_sha() -> None:
+    """[B1] Verify EvaluationEnvironmentRecord rejects all-zero placeholder git SHA."""
+    with pytest.raises(ValidationError, match="Placeholder all-zero git commit SHA"):
+        EvaluationEnvironmentRecord(
+            git_commit_sha="0" * 40,
+            git_is_dirty=False,
+            dataset_manifest_hash=ContentHash("a" * 64),
+            weights_hash=ContentHash("b" * 64),
+            metric_definition_versions=("v1.0",),
+            python_version="3.11.8",
+            torch_version="2.4.0",
+            target_hardware="NVIDIA RTX A6000",
+        )
+
+
+def test_environment_provenance_rejects_missing_environment_telemetry() -> None:
+    """[B1] Verify DefaultEvaluationRunner fails closed when tool output lacks environment telemetry."""
+    runner = DefaultEvaluationRunner()
+    plan = _make_valid_plan()
+    op_id, app_req, app_dec = _make_approval_context(plan)
+
+    class _MissingEnvExecutor:
+        async def execute(self, invocation: ToolInvocation) -> ToolResult:
+            return ToolResult(
+                tool_id=invocation.tool_id,
+                execution_id=invocation.execution_id,
+                target_id=invocation.target_id,
+                status=ToolExecutionStatus.SUCCESS,
+                structured_output={
+                    "predictions": {"val-map50": 0.75},
+                    "ground_truth": {"val-map50": 0.75},
+                    # "environment" omitted!
+                },
+            )
+
+    with pytest.raises(
+        EvaluationValidationError, match="Missing authoritative environment telemetry"
+    ):
+        runner.execute(
+            plan=plan,
+            operation_identity=op_id,
+            approval_request=app_req,
+            approval_decision=app_dec,
+            tool_id=ToolId("cv.eval.execute"),
+            tool_executor=_MissingEnvExecutor(),
+            target_id=TargetId("gpu-cluster-01"),
+        )
+
+
+def test_environment_provenance_rejects_hash_mismatch_against_plan() -> None:
+    """[B1] Verify DefaultEvaluationRunner rejects environment weights_hash/dataset_manifest_hash mismatch against plan."""
+    runner = DefaultEvaluationRunner()
+    plan = _make_valid_plan()
+    op_id, app_req, app_dec = _make_approval_context(plan)
+
+    class _MismatchedHashExecutor:
+        async def execute(self, invocation: ToolInvocation) -> ToolResult:
+            return ToolResult(
+                tool_id=invocation.tool_id,
+                execution_id=invocation.execution_id,
+                target_id=invocation.target_id,
+                status=ToolExecutionStatus.SUCCESS,
+                structured_output={
+                    "predictions": {"val-map50": 0.75},
+                    "ground_truth": {"val-map50": 0.75},
+                    "environment": {
+                        "git_commit_sha": "a" * 40,
+                        "git_is_dirty": False,
+                        "python_version": "3.11.8",
+                        "torch_version": "2.4.0",
+                        "target_hardware": "NVIDIA RTX A6000",
+                        "weights_hash": "f" * 64,  # Tampered weights hash!
+                    },
+                },
+            )
+
+    with pytest.raises(
+        EvaluationValidationError, match="Environment weights_hash mismatch"
+    ):
+        runner.execute(
+            plan=plan,
+            operation_identity=op_id,
+            approval_request=app_req,
+            approval_decision=app_dec,
+            tool_id=ToolId("cv.eval.execute"),
+            tool_executor=_MismatchedHashExecutor(),
+            target_id=TargetId("gpu-cluster-01"),
+        )
+
+
+# =============================================================================
+# Remediation Tests (Issue #76): B2 — Statistically Valid Baseline Comparisons
+# =============================================================================
+def test_baseline_comparator_returns_inconclusive_when_paired_samples_insufficient() -> (
+    None
+):
+    """[B2] Verify DefaultBaselineComparator returns inconclusive when paired observations are absent or N < 2."""
+    comp = DefaultBaselineComparator()
+    m_cand = MetricResult(
+        metric=_make_valid_metric(metric_id="val-map50"),
+        primary_value=0.85,
+        sample_count=100,
+    )
+    m_base = MetricResult(
+        metric=_make_valid_metric(metric_id="val-map50"),
+        primary_value=0.80,
+        sample_count=100,
+    )
+
+    # 1. No paired observations passed -> inconclusive (sample_count=0, p_value=None)
+    res = comp.compare(
+        candidate_metrics=[m_cand],
+        baseline_metrics=[m_base],
+        candidate_benchmarks=[],
+        baseline_benchmarks=[],
+        candidate_exp_id=ExperimentId("exp-cand"),
+        baseline_exp_id=ExperimentId("exp-base"),
+    )
+    assert res.p_value is None
+    assert res.statistically_significant is None
+    assert res.sample_count == 0
+    assert "inconclusive" in res.summary.lower()
+
+    # 2. Insufficient paired observations (N = 1) -> inconclusive
+    res_one = comp.compare(
+        candidate_metrics=[m_cand],
+        baseline_metrics=[m_base],
+        candidate_benchmarks=[],
+        baseline_benchmarks=[],
+        candidate_exp_id=ExperimentId("exp-cand"),
+        baseline_exp_id=ExperimentId("exp-base"),
+        paired_observations=[(0.85, 0.80)],
+    )
+    assert res_one.p_value is None
+    assert res_one.statistically_significant is None
+    assert res_one.sample_count == 1
+    assert "inconclusive" in res_one.summary.lower()
+
+
+def test_baseline_comparator_paired_t_test_exact_calculation() -> None:
+    """[B2] Verify DefaultBaselineComparator computes exact Student's t-test p-value and significance."""
+    comp = DefaultBaselineComparator()
+    m_cand = MetricResult(
+        metric=_make_valid_metric(metric_id="val-map50"),
+        primary_value=0.85,
+        sample_count=10,
+    )
+    m_base = MetricResult(
+        metric=_make_valid_metric(metric_id="val-map50"),
+        primary_value=0.75,
+        sample_count=10,
+    )
+
+    # 10 pairs with consistent positive delta of 0.10, very small variance -> statistically significant
+    pairs = [(0.80 + i * 0.01 + 0.10, 0.80 + i * 0.01) for i in range(10)]
+    res = comp.compare(
+        candidate_metrics=[m_cand],
+        baseline_metrics=[m_base],
+        candidate_benchmarks=[],
+        baseline_benchmarks=[],
+        candidate_exp_id=ExperimentId("exp-cand"),
+        baseline_exp_id=ExperimentId("exp-base"),
+        paired_observations=pairs,
+        test_type=StatisticalTestType.PAIRED_T_TEST,
+        confidence_level=0.95,
+    )
+    assert res.sample_count == 10
+    assert res.p_value is not None
+    assert res.p_value < 0.001
+    assert res.statistically_significant is True
+    assert res.quality_improved is True
+
+    # Pairs with zero mean difference -> not significant (p_value ~ 1.0)
+    zero_pairs = [(0.80, 0.80) for _ in range(10)]
+    res_null = comp.compare(
+        candidate_metrics=[m_cand],
+        baseline_metrics=[m_base],
+        candidate_benchmarks=[],
+        baseline_benchmarks=[],
+        candidate_exp_id=ExperimentId("exp-cand"),
+        baseline_exp_id=ExperimentId("exp-base"),
+        paired_observations=zero_pairs,
+        test_type=StatisticalTestType.PAIRED_T_TEST,
+    )
+    assert res_null.p_value == pytest.approx(1.0, abs=1e-4)
+    assert res_null.statistically_significant is False
+
+
+def test_baseline_comparator_wilcoxon_signed_rank_exact_calculation() -> None:
+    """[B2] Verify DefaultBaselineComparator computes exact Wilcoxon signed-rank significance."""
+    comp = DefaultBaselineComparator()
+    m_cand = MetricResult(
+        metric=_make_valid_metric(metric_id="val-map50"), primary_value=0.85
+    )
+    m_base = MetricResult(
+        metric=_make_valid_metric(metric_id="val-map50"), primary_value=0.75
+    )
+
+    # 15 pairs where candidate is consistently higher than baseline
+    pairs = [(0.80 + i * 0.02, 0.70 + i * 0.02) for i in range(15)]
+    res = comp.compare(
+        candidate_metrics=[m_cand],
+        baseline_metrics=[m_base],
+        candidate_benchmarks=[],
+        baseline_benchmarks=[],
+        candidate_exp_id=ExperimentId("exp-cand"),
+        baseline_exp_id=ExperimentId("exp-base"),
+        paired_observations=pairs,
+        test_type=StatisticalTestType.WILCOXON_SIGNED_RANK,
+        confidence_level=0.95,
+    )
+    assert res.sample_count == 15
+    assert res.p_value is not None
+    assert res.p_value < 0.01
+    assert res.statistically_significant is True
+
+
+# =============================================================================
+# Remediation Tests (Issue #76): B3 — Benchmark Target/Configuration Binding
+# =============================================================================
+def test_runner_rejects_benchmark_target_id_mismatch() -> None:
+    """[B3] Verify DefaultEvaluationRunner rejects BenchmarkResult whose target_id mismatches authorized target."""
+    runner = DefaultEvaluationRunner()
+    plan = _make_valid_plan()
+    assert plan.benchmark_config is not None
+    op_id, app_req, app_dec = _make_approval_context(plan)
+
+    mismatched_bench = {
+        "benchmark_id": str(plan.benchmark_config.benchmark_id),
+        "batch_size": 1,
+        "precision": plan.benchmark_config.precision.value,
+        "latency_min_ms": 5.0,
+        "latency_mean_ms": 6.0,
+        "latency_p50_ms": 6.0,
+        "latency_p90_ms": 7.0,
+        "latency_p95_ms": 7.5,
+        "latency_p99_ms": 8.0,
+        "latency_max_ms": 9.0,
+        "throughput_fps": 166.7,
+        "device_name": "NVIDIA RTX A6000",
+        "target_id": "different-target-gpu",  # Target mismatch!
+        "timing_synchronized": True,
+        "timing_source": "cuda_event",
+    }
+
+    class _MismatchedTargetExecutor:
+        async def execute(self, invocation: ToolInvocation) -> ToolResult:
+            return ToolResult(
+                tool_id=invocation.tool_id,
+                execution_id=invocation.execution_id,
+                target_id=invocation.target_id,
+                status=ToolExecutionStatus.SUCCESS,
+                structured_output={
+                    "predictions": {"val-map50": 0.75},
+                    "ground_truth": {"val-map50": 0.75},
+                    "system_benchmarks": [mismatched_bench],
+                    "environment": {
+                        "git_commit_sha": "a" * 40,
+                        "git_is_dirty": False,
+                        "python_version": "3.11.8",
+                        "torch_version": "2.4.0",
+                        "target_hardware": "NVIDIA RTX A6000",
+                    },
+                },
+            )
+
+    with pytest.raises(
+        BenchmarkExecutionError, match="does not match authorized target_id"
+    ):
+        runner.execute(
+            plan=plan,
+            operation_identity=op_id,
+            approval_request=app_req,
+            approval_decision=app_dec,
+            tool_id=ToolId("cv.eval.execute"),
+            tool_executor=_MismatchedTargetExecutor(),
+            target_id=TargetId("gpu-cluster-01"),
+        )
+
+
+def test_runner_rejects_benchmark_config_mismatch() -> None:
+    """[B3] Verify DefaultEvaluationRunner rejects BenchmarkResult whose benchmark_id, precision, or batch_size mismatches plan."""
+    runner = DefaultEvaluationRunner()
+    plan = _make_valid_plan()
+    assert plan.benchmark_config is not None
+    op_id, app_req, app_dec = _make_approval_context(plan)
+
+    # Mismatched precision (FP32 instead of FP16_AMP)
+    mismatched_precision_bench = {
+        "benchmark_id": str(plan.benchmark_config.benchmark_id),
+        "batch_size": 1,
+        "precision": "fp32",  # Mismatched!
+        "latency_min_ms": 5.0,
+        "latency_mean_ms": 6.0,
+        "latency_p50_ms": 6.0,
+        "latency_p90_ms": 7.0,
+        "latency_p95_ms": 7.5,
+        "latency_p99_ms": 8.0,
+        "latency_max_ms": 9.0,
+        "throughput_fps": 166.7,
+        "device_name": "NVIDIA RTX A6000",
+        "target_id": "gpu-cluster-01",
+        "timing_synchronized": True,
+        "timing_source": "cuda_event",
+    }
+
+    class _MismatchedPrecisionExecutor:
+        async def execute(self, invocation: ToolInvocation) -> ToolResult:
+            return ToolResult(
+                tool_id=invocation.tool_id,
+                execution_id=invocation.execution_id,
+                target_id=invocation.target_id,
+                status=ToolExecutionStatus.SUCCESS,
+                structured_output={
+                    "predictions": {"val-map50": 0.75},
+                    "ground_truth": {"val-map50": 0.75},
+                    "system_benchmarks": [mismatched_precision_bench],
+                    "environment": {
+                        "git_commit_sha": "a" * 40,
+                        "git_is_dirty": False,
+                        "python_version": "3.11.8",
+                        "torch_version": "2.4.0",
+                        "target_hardware": "NVIDIA RTX A6000",
+                    },
+                },
+            )
+
+    with pytest.raises(BenchmarkExecutionError, match="does not match plan precision"):
+        runner.execute(
+            plan=plan,
+            operation_identity=op_id,
+            approval_request=app_req,
+            approval_decision=app_dec,
+            tool_id=ToolId("cv.eval.execute"),
+            tool_executor=_MismatchedPrecisionExecutor(),
+            target_id=TargetId("gpu-cluster-01"),
+        )
+
+
+# =============================================================================
+# Remediation Tests (Issue #76): B4 — Authoritative Hardware Timing Attestation
+# =============================================================================
+def test_benchmark_runner_accelerator_timing_source_allowlist() -> None:
+    """[B4] Verify DefaultBenchmarkRunner rejects unauthorized timing sources on accelerator targets."""
+    runner = DefaultBenchmarkRunner()
+    plan = _make_valid_plan()
+    assert plan.benchmark_config is not None
+
+    obs_unauthorized = {
+        "warmup_executed": 10,
+        "latencies_ms": [10.0] * 50,
+        "device_name": "NVIDIA RTX A6000",
+        "timing_synchronized": True,
+        "timing_source": "host_timer",  # CPU timing source on accelerator!
+    }
+
+    with pytest.raises(
+        BenchmarkExecutionError, match="is not an authorized accelerator timing source"
+    ):
+        runner.compute_result_from_observation(
+            config=plan.benchmark_config,
+            target_id=TargetId("gpu-cluster-01"),
+            batch_size=1,
+            observation=obs_unauthorized,
+        )
+
+
+# =============================================================================
+# Remediation Tests (Issue #76): B5 — Type Safety, Parser Identity, and Verdict Logic
+# =============================================================================
+def test_benchmark_runner_rejects_boolean_latency_and_warmup_truncation() -> None:
+    """[B5] Verify DefaultBenchmarkRunner rejects booleans in latency samples and non-integer warmup_executed."""
+    runner = DefaultBenchmarkRunner()
+    plan = _make_valid_plan()
+    assert plan.benchmark_config is not None
+
+    # 1. Boolean in latencies sample
+    obs_bool_latency = {
+        "warmup_executed": 10,
+        "latencies_ms": [10.0] * 49 + [True],  # Boolean True as latency!
+        "device_name": "NVIDIA RTX A6000",
+        "timing_synchronized": True,
+        "timing_source": "cuda_event",
+    }
+    with pytest.raises(BenchmarkExecutionError, match="has invalid latency value True"):
+        runner.compute_result_from_observation(
+            config=plan.benchmark_config,
+            target_id=TargetId("gpu-cluster-01"),
+            batch_size=1,
+            observation=obs_bool_latency,
+        )
+
+    # 2. Non-integer warmup_executed (float truncation attempt)
+    obs_float_warmup = {
+        "warmup_executed": 10.5,  # Float!
+        "latencies_ms": [10.0] * 50,
+        "device_name": "NVIDIA RTX A6000",
+        "timing_synchronized": True,
+        "timing_source": "cuda_event",
+    }
+    with pytest.raises(
+        BenchmarkExecutionError, match="warmup_executed must be an exact integer"
+    ):
+        runner.compute_result_from_observation(
+            config=plan.benchmark_config,
+            target_id=TargetId("gpu-cluster-01"),
+            batch_size=1,
+            observation=obs_float_warmup,
+        )
+
+
+def test_parse_evaluation_result_requires_authoritative_identities() -> None:
+    """[B5] Verify parse_evaluation_result fails closed when execution_id or target_id is omitted."""
+    plan = _make_valid_plan()
+    raw_output = {
+        "predictions": {"val-map50": 0.80},
+        "ground_truth": {"val-map50": 0.80},
+        "environment": {
+            "git_commit_sha": "a" * 40,
+            "git_is_dirty": False,
+            "python_version": "3.11.8",
+            "torch_version": "2.4.0",
+            "target_hardware": "NVIDIA RTX A6000",
+        },
+    }
+
+    # Missing target_id
+    with pytest.raises(
+        EvaluationValidationError,
+        match="Cannot parse evaluation result without an authorized target_id",
+    ):
+        parse_evaluation_result(
+            raw_output, plan, execution_id=ExecutionId("exec-parse-01"), target_id=None
+        )
+
+    # Missing execution_id
+    with pytest.raises(
+        EvaluationValidationError,
+        match="Cannot parse evaluation result without an authoritative execution_id",
+    ):
+        parse_evaluation_result(
+            raw_output, plan, execution_id=None, target_id=TargetId("gpu-cluster-01")
+        )
+
+
+def test_verdict_derivation_quality_systems_inconclusive() -> None:
+    """[B5] Verify compute_evaluation_verdict dynamically derives PASSED, FAILED_QUALITY, FAILED_SYSTEMS, INCONCLUSIVE."""
+    base_plan = _make_valid_plan()
+
+    # Plan with quality threshold of 0.80 and latency budget of 10.0ms
+    plan = base_plan.model_copy(
+        update={
+            "evaluation_requirements": {
+                "quality_thresholds": {"val-map50": 0.80},
+                "max_latency_ms": 10.0,
+            }
+        }
+    )
+
+    m_pass = MetricResult(
+        metric=_make_valid_metric(metric_id="val-map50"), primary_value=0.85
+    )
+    m_fail = MetricResult(
+        metric=_make_valid_metric(metric_id="val-map50"), primary_value=0.75
+    )
+
+    b_pass = BenchmarkResult(
+        benchmark_id=BenchmarkId("bench-throughput-001"),
+        batch_size=1,
+        precision=TrainingPrecision.FP16_AMP,
+        latency_min_ms=5.0,
+        latency_mean_ms=8.0,
+        latency_p50_ms=8.0,
+        latency_p90_ms=9.0,
+        latency_p95_ms=9.5,
+        latency_p99_ms=9.8,
+        latency_max_ms=10.0,
+        throughput_fps=125.0,
+        device_name="NVIDIA RTX A6000",
+        target_id=TargetId("gpu-cluster-01"),
+        timing_synchronized=True,
+        timing_source="cuda_event",
+    )
+    b_fail = b_pass.model_copy(update={"latency_p95_ms": 15.0, "latency_mean_ms": 12.0})
+
+    # 1. All criteria met -> PASSED
+    v_pass = compute_evaluation_verdict(plan, [m_pass], [b_pass])
+    assert v_pass == EvaluationVerdict.PASSED
+
+    # 2. Quality threshold breached -> FAILED_QUALITY
+    v_qual = compute_evaluation_verdict(plan, [m_fail], [b_pass])
+    assert v_qual == EvaluationVerdict.FAILED_QUALITY
+
+    # 3. System SLA breached -> FAILED_SYSTEMS
+    v_sys = compute_evaluation_verdict(plan, [m_pass], [b_fail])
+    assert v_sys == EvaluationVerdict.FAILED_SYSTEMS
+
+    # 4. Missing quality evidence -> INCONCLUSIVE
+    v_inconc = compute_evaluation_verdict(plan, [], [b_pass])
+    assert v_inconc == EvaluationVerdict.INCONCLUSIVE

@@ -9,6 +9,9 @@ from cv_agent.evaluation.canonicalization import (
 )
 from cv_agent.evaluation.comparison import BaselineComparator, DefaultBaselineComparator
 from cv_agent.evaluation.contracts import (
+    ALL_ALLOWED_TIMING_SOURCES,
+    ALLOWED_ACCELERATOR_TIMING_SOURCES,
+    ALLOWED_CPU_TIMING_SOURCES,
     BaselineComparisonResult,
     BenchmarkConfiguration,
     BenchmarkResult,
@@ -38,6 +41,7 @@ from cv_agent.evaluation.metrics import MetricCalculator, StandardMetricCalculat
 from cv_agent.evaluation.runner import (
     DefaultEvaluationRunner,
     EvaluationRunner,
+    compute_evaluation_verdict,
     parse_evaluation_result,
 )
 from cv_agent.evaluation.types import (
@@ -56,6 +60,9 @@ from cv_agent.evaluation.types import (
 )
 
 __all__ = [
+    "ALLOWED_ACCELERATOR_TIMING_SOURCES",
+    "ALLOWED_CPU_TIMING_SOURCES",
+    "ALL_ALLOWED_TIMING_SOURCES",
     "BaselineComparator",
     "BaselineComparisonError",
     "BaselineComparisonResult",
@@ -95,6 +102,7 @@ __all__ = [
     "StatisticalTestType",
     "TaskType",
     "compute_evaluation_payload_hash",
+    "compute_evaluation_verdict",
     "deep_freeze",
     "extract_evaluation_operation_payload",
     "parse_evaluation_result",

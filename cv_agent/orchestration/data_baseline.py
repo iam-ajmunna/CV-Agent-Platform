@@ -166,7 +166,7 @@ def build_baseline_evaluation_plan(
     eff_bench_cfg = benchmark_config
     if eff_bench_cfg is None:
         eff_bench_cfg = BenchmarkConfiguration(
-            benchmark_id=BenchmarkId(f"bench-{evaluation_id}"),
+            benchmark_id=BenchmarkId("bench-baseline-001"),
             target_requirements=target_requirements or EvaluationTargetRequirements(),
         )
 
@@ -333,15 +333,20 @@ def establish_dataset_baseline(
     )
 
     # 6. Evaluation Execution via ADR-0011 and ADR-0005 (Gate G3)
-    eval_result = runner.execute(
-        plan=plan,
-        operation_identity=request.operation_identity,
-        approval_request=request.approval_request,
-        approval_decision=request.approval_decision,
-        tool_id=request.tool_id,
-        tool_executor=request.tool_executor,
-        target_id=request.target_id,
-    )
+    try:
+        eval_result = runner.execute(
+            plan=plan,
+            operation_identity=request.operation_identity,
+            approval_request=request.approval_request,
+            approval_decision=request.approval_decision,
+            tool_id=request.tool_id,
+            tool_executor=request.tool_executor,
+            target_id=request.target_id,
+        )
+    except EvaluationValidationError as exc:
+        raise BaselineValidationError(
+            f"Evaluation execution failed validation: {exc}"
+        ) from exc
 
     # 7. Empirical Evidence & Attestation Verification
     if not eval_result.quality_metrics:

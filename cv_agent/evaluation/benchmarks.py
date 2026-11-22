@@ -10,6 +10,8 @@ from collections.abc import Mapping
 from typing import Any, Protocol, cast, runtime_checkable
 
 from cv_agent.evaluation.contracts import (
+    ALLOWED_ACCELERATOR_TIMING_SOURCES,
+    ALLOWED_CPU_TIMING_SOURCES,
     BenchmarkConfiguration,
     BenchmarkResult,
     ModelArtifactReference,
@@ -30,37 +32,31 @@ from cv_agent.tools import (
 def _is_accelerator_target(
     config: BenchmarkConfiguration, observation: Mapping[str, Any]
 ) -> bool:
-    """Determine whether benchmark target is an asynchronous accelerator per ADR-0011 §3.13."""
+    """Determine whether benchmark target is an asynchronous accelerator per ADR-0011 §3.13.
+
+    Uses authoritative target requirements and HardwareClass, never device-name heuristics.
+    """
     req = config.target_requirements
-    if (
-        req.required_hardware_class is not None
-        and req.required_hardware_class != HardwareClass.CPU
-    ):
-        return True
+    if req.required_hardware_class is not None:
+        return req.required_hardware_class != HardwareClass.CPU
     if req.min_cuda_compute_capability is not None:
         return True
-    hw_cls = str(observation.get("hardware_class", "")).lower()
-    if hw_cls in {"nvidia_gpu", "jetson", "other_accelerator", "gpu", "accelerator"}:
-        return True
-    dev_name = str(observation.get("device_name", "")).lower()
-    gpu_keywords = (
-        "nvidia",
-        "cuda",
-        "geforce",
-        "rtx",
-        "gtx",
-        "tesla",
-        "a100",
-        "h100",
-        "v100",
-        "t4",
-        "jetson",
-        "radeon",
-        "rocm",
-        "metal",
-        "apple m",
-    )
-    return any(k in dev_name for k in gpu_keywords)
+    hw_cls = str(observation.get("hardware_class", "")).strip().lower()
+    if hw_cls:
+        if hw_cls in {"cpu", HardwareClass.CPU.value}:
+            return False
+        if hw_cls in {
+            "nvidia_gpu",
+            "jetson",
+            "other_accelerator",
+            "gpu",
+            "accelerator",
+            HardwareClass.NVIDIA_GPU.value,
+            HardwareClass.JETSON.value,
+            HardwareClass.OTHER_ACCELERATOR.value,
+        }:
+            return True
+    return False
 
 
 @runtime_checkable
@@ -218,12 +214,24 @@ class DefaultBenchmarkRunner:
         observation: Mapping[str, Any],
     ) -> BenchmarkResult:
         """Compute typed BenchmarkResult from empirical on-target observation telemetry."""
-        # 1. Warmup validation (must be genuinely executed on target)
-        warmup_executed = int(observation.get("warmup_executed", 0))
-        if warmup_executed < config.warmup_iterations:
+        # 1. Warmup validation (must be genuinely executed on target, exact integer)
+        if (
+            "warmup_executed" not in observation
+            or observation["warmup_executed"] is None
+        ):
+            raise BenchmarkExecutionError(
+                f"Missing warmup_executed in target telemetry for target {target_id}. "
+                "Warmup attestation is mandatory."
+            )
+        raw_warmup = observation["warmup_executed"]
+        if type(raw_warmup) is not int or type(raw_warmup) is bool:
+            raise BenchmarkExecutionError(
+                f"warmup_executed must be an exact integer, got {type(raw_warmup).__name__} ({raw_warmup!r})"
+            )
+        if raw_warmup < config.warmup_iterations:
             raise BenchmarkExecutionError(
                 f"Warmup iterations incomplete on target {target_id}: "
-                f"expected at least {config.warmup_iterations}, but target reported {warmup_executed}"
+                f"expected at least {config.warmup_iterations}, but target reported {raw_warmup}"
             )
 
         # 2. Measured iterations sample validation
@@ -242,7 +250,8 @@ class DefaultBenchmarkRunner:
         float_sample: list[float] = []
         for i, val in enumerate(sample):
             if (
-                not isinstance(val, (int, float))
+                type(val) is bool
+                or not isinstance(val, (int, float))
                 or not math.isfinite(val)
                 or val <= 0.0
             ):
@@ -304,22 +313,42 @@ class DefaultBenchmarkRunner:
         # Asynchronous accelerator measurements strictly require hardware-synchronized timing
         is_accelerator = _is_accelerator_target(config, observation)
         raw_timing_sync = observation.get("timing_synchronized")
-        raw_timing_source = observation.get("timing_source")
 
         if is_accelerator:
             if raw_timing_sync is not True:
                 raise BenchmarkExecutionError(
                     f"Hardware-synchronized timing is required for asynchronous accelerator measurements on target {target_id} "
                     f"per ADR-0011 §3.13, but timing_synchronized is {raw_timing_sync!r}. "
-                    f"Target telemetry must attest timing_synchronized=True."
+                    "Target telemetry must attest timing_synchronized=True."
                 )
-            if not raw_timing_source or not str(raw_timing_source).strip():
+        else:
+            if (
+                "timing_synchronized" not in observation
+                or observation["timing_synchronized"] is None
+            ):
                 raise BenchmarkExecutionError(
-                    f"Authoritative timing_source is required for accelerator measurements on target {target_id} "
-                    f"per ADR-0011 §3.13, but got {raw_timing_source!r}. "
-                    f"Valid synchronization source (e.g. 'cuda_event', 'cuda_stream_synchronize') is mandatory."
+                    f"Missing timing_synchronized attestation in telemetry for target {target_id}. "
+                    "Hardware timing attestation is mandatory per ADR-0011 §3.13."
                 )
-            source_normalized = str(raw_timing_source).strip().lower()
+            if type(raw_timing_sync) is not bool:
+                raise BenchmarkExecutionError(
+                    f"timing_synchronized must be a boolean, got {type(raw_timing_sync).__name__}"
+                )
+
+        if "timing_source" not in observation or observation["timing_source"] is None:
+            raise BenchmarkExecutionError(
+                f"Missing timing_source attestation in telemetry for target {target_id}. "
+                "Hardware timing attestation is mandatory per ADR-0011 §3.13."
+            )
+        raw_timing_source = str(observation["timing_source"]).strip()
+        if not raw_timing_source:
+            raise BenchmarkExecutionError(
+                f"Empty timing_source attestation in telemetry for target {target_id}."
+            )
+
+        source_normalized = raw_timing_source.lower()
+
+        if is_accelerator:
             if source_normalized in {
                 "unsynchronized",
                 "wall_clock_async",
@@ -331,15 +360,22 @@ class DefaultBenchmarkRunner:
                     f"Accelerator timing source {raw_timing_source!r} on target {target_id} is unsynchronized. "
                     f"ADR-0011 §3.13 requires hardware-synchronized timing (e.g. 'cuda_event')."
                 )
+            if source_normalized not in ALLOWED_ACCELERATOR_TIMING_SOURCES:
+                raise BenchmarkExecutionError(
+                    f"Accelerator timing source {raw_timing_source!r} on target {target_id} is not "
+                    f"an authorized accelerator timing source. "
+                    f"Allowed sources: {sorted(ALLOWED_ACCELERATOR_TIMING_SOURCES)}"
+                )
+        else:
+            if source_normalized not in ALLOWED_CPU_TIMING_SOURCES:
+                raise BenchmarkExecutionError(
+                    f"CPU timing source {raw_timing_source!r} on target {target_id} is not "
+                    f"an authorized CPU timing source. "
+                    f"Allowed sources: {sorted(ALLOWED_CPU_TIMING_SOURCES)}"
+                )
 
-        timing_synchronized = (
-            bool(raw_timing_sync) if raw_timing_sync is not None else True
-        )
-        timing_source = (
-            str(raw_timing_source).strip()
-            if raw_timing_source is not None and str(raw_timing_source).strip()
-            else ("cuda_event" if is_accelerator else "host_timer")
-        )
+        timing_synchronized = raw_timing_sync
+        timing_source = raw_timing_source
 
         return BenchmarkResult(
             benchmark_id=config.benchmark_id,
